@@ -1,16 +1,27 @@
-# server.py
 from fastapi import FastAPI
-from pydantic import BaseModel
-from agent import ask_agent  # import your working AI
+from fastapi.middleware.cors import CORSMiddleware
+from agent import get_ai_response  # your LangChain function
 
 app = FastAPI()
 
-# Request format
-class ChatRequest(BaseModel):
-    message: str
+# Allow your website domain
+origins = [
+    "https://www.chinawestconnector.com",  # replace with your actual domain
+    "https://chinawestconnector.com",
+    "http://localhost:8000"  # optional for testing locally
+]
 
-# Endpoint
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 @app.post("/chat")
-def chat(req: ChatRequest):
-    reply = ask_agent(req.message)
+async def chat(request: dict):
+    user_message = request.get("message")
+    reply = get_ai_response(user_message)
     return {"reply": reply}
+
