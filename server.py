@@ -1,3 +1,4 @@
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -11,8 +12,14 @@ load_dotenv()
 app = FastAPI()
 
 # ---- CORS configuration ----
+# Allow your WordPress site AND common development origins
 origins = [
-    "https://www.chinawestconnector.com",  # REPLACE with your real WordPress URL
+    "https://www.chinawestconnector.com",
+    "https://chinawestconnector.com",
+    "http://localhost:8000",
+    "http://localhost:3000",
+    "https://localhost",
+    "null",  # For file:// origins during local testing
 ]
 
 app.add_middleware(
@@ -29,6 +36,20 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
 class ChatRequest(BaseModel):
     message: str
+
+# ---- Health check endpoint ----
+@app.get("/health")
+def health_check():
+    return {
+        "status": "healthy",
+        "groq_configured": bool(GROQ_API_KEY),
+        "tavily_configured": bool(TAVILY_API_KEY)
+    }
+
+# ---- Root endpoint ----
+@app.get("/")
+def root():
+    return {"message": "CWC AI stable backend running"}
 
 # ---- Real-time search ----
 def search_web(query: str) -> str:
@@ -77,7 +98,7 @@ If unsure, give strategic insights instead of generic answers.
 """
 
     data = {
-        "model": "llama-3.3-70b-versatile",  # <-- exact Groq model
+        "model": "llama-3.3-70b-versatile",
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt}
@@ -112,9 +133,6 @@ Answer as CWC AI.
 """
     reply = ask_groq(final_prompt)
     print("AI reply:", reply)
-    return {"reply": reply}
-
-# ---- Root endpoint ----
-@app.get("/")
-def root():
-    return {"message": "CWC AI stable backend running"}
+    
+    # FIXED: Return "response" key to match frontend expectation
+    return {"response": reply}
