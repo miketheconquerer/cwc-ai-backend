@@ -1,10 +1,12 @@
+
+
 from fastapi import FastAPI
 from pydantic import BaseModel
 import requests
 import os
 from dotenv import load_dotenv
 
-# Load .env locally (optional on Render)
+# Optional: Load .env locally
 load_dotenv()
 
 app = FastAPI()
@@ -16,7 +18,7 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 class ChatRequest(BaseModel):
     message: str
 
-# ---- Real-time search (stable) ----
+# ---- Real-time web search ----
 def search_web(query: str) -> str:
     if not TAVILY_API_KEY:
         print("TAVILY_API_KEY is missing!")
@@ -70,7 +72,7 @@ If unsure, give strategic insights instead of generic answers.
 """
 
     data = {
-        "model": "llama3-70b-8192",
+        "model": "versatile",  # fixed to your Groq model
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt}
@@ -114,4 +116,3 @@ Answer as CWC AI.
 @app.get("/")
 def root():
     return {"message": "CWC AI stable backend running"}
-
