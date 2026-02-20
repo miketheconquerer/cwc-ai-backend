@@ -1,40 +1,50 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import requests
 import os
 from dotenv import load_dotenv
 
-# Load environment variables from .env
+# Load environment variables
 load_dotenv()
 
 app = FastAPI()
 
-# Get API keys from environment variables
+# ---- CORS configuration ----
+origins = [
+    "https://www.chinawestconnector.com",  # REPLACE with your real WordPress URL
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ---- API keys ----
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
 class ChatRequest(BaseModel):
     message: str
 
-# ---- Real-time web search via Tavily ----
+# ---- Real-time search ----
 def search_web(query: str) -> str:
     if not TAVILY_API_KEY:
-        print("TAVILY_API_KEY is missing!")
-        return "No live search available. Tavily API key not set."
+        print("TAVILY_API_KEY missing!")
+        return "No live search available."
 
     url = "https://api.tavily.com/search"
-    payload = {
-        "api_key": TAVILY_API_KEY,
-        "query": query,
-        "max_results": 3
-    }
+    payload = {"api_key": TAVILY_API_KEY, "query": query, "max_results": 3}
 
     try:
         res = requests.post(url, json=payload, timeout=8)
         res.raise_for_status()
         data = res.json()
         results = [r.get("content", "") for r in data.get("results", [])]
-        return "\n".join(results) if results else "No relevant live search results found."
+        return "\n".join(results) if results else "No relevant live search results."
     except Exception as e:
         print("Error in Tavily search:", e)
         return "Error fetching live search results."
@@ -42,14 +52,11 @@ def search_web(query: str) -> str:
 # ---- Groq AI call ----
 def ask_groq(prompt: str) -> str:
     if not GROQ_API_KEY:
-        print("GROQ_API_KEY is missing!")
-        return "Cannot generate AI response. GROQ API key not set."
+        print("GROQ_API_KEY missing!")
+        return "Cannot generate AI response. GROQ key not set."
 
     url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
 
     system_prompt = """
 You are CWC AI — elite China business strategist trained on:
@@ -70,7 +77,7 @@ If unsure, give strategic insights instead of generic answers.
 """
 
     data = {
-        "model": "llama-3.3-70b-versatile",  # <-- fixed your exact model
+        "model": "llama-3.3-70b-versatile",  # <-- exact Groq model
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt}
@@ -90,10 +97,8 @@ If unsure, give strategic insights instead of generic answers.
 # ---- Chat endpoint ----
 @app.post("/chat")
 def chat(req: ChatRequest):
-    print("User message received:", req.message)
+    print("User message:", req.message)
     user_msg = req.message
-
-    # Real-time context
     live_data = search_web(user_msg)
     print("Live search data:", live_data)
 
@@ -106,12 +111,10 @@ Relevant real-time context:
 Answer as CWC AI.
 """
     reply = ask_groq(final_prompt)
-    print("AI reply generated:", reply)
-
+    print("AI reply:", reply)
     return {"reply": reply}
 
 # ---- Root endpoint ----
 @app.get("/")
 def root():
     return {"message": "CWC AI stable backend running"}
-
