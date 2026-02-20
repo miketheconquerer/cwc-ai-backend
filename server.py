@@ -1,87 +1,99 @@
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI
+from pydantic import BaseModel
+import requests
 import os
 from dotenv import load_dotenv
 
-# LangChain & Groq Imports
-from langchain_groq import ChatGroq
-from langchain_community.tools import DuckDuckGoSearchResults
-from langchain_core.messages import HumanMessage, SystemMessage
-from langgraph.prebuilt import create_react_agent
-
 load_dotenv()
 
+app = FastAPI()
+
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-if not GROQ_API_KEY:
-    raise ValueError("Missing Groq API key!")
+TAVILY_API_KEY = os.getenv("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")
 
-app = FastAPI(title="CWC AI Backend")
+class ChatRequest(BaseModel):
+    message: str
 
-# CORS remains the same
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["https://www.chinawestconnector.com", "https://chinawestconnector.com", "http://localhost:8000"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# ---- Real-time search (stable) ----
+def search_web(query: str) -> str:
+    if not TAVILY_API_KEY:
+        return ""
 
-# 1. Initialize the LLM (Using the model you specified)
-llm = ChatGroq(
-    model="llama-3.3-70b-versatile",
-    api_key=GROQ_API_KEY,
-    temperature=0.2 # Lower temperature for business professional tone
-)
-
-# 2. Initialize Real-Time News Tool (Lightweight for Render)
-search_tool = DuckDuckGoSearchResults(backend="news", max_results=3)
-tools = [search_tool]
-
-# 3. System Prompt (Your "Mike Zhu Assistant" Context)
-SYSTEM_CONTEXT = """
-You are an expert AI assistant for China West Connector (CWC). 
-Founder: Mike Zhu (Greek lawyer/consultant in China since 2011).
-Expertise: Smart Cities, Medical Devices, Energy, Expo Services, Business Strategy, Legal/IP, and Sourcing.
-Tone: Professional, authoritative, and promotional.
-Action: Use the search tool to find LATEST news if the user asks about current events, tariffs, or shipping rates.
-"""
-
-# 4. Create the Agent (Replaces your manual request post)
-agent_executor = create_react_agent(llm, tools, state_modifier=SYSTEM_CONTEXT)
-
-# Temporary In-Memory Storage (Best for Render Free Tier to avoid crashes)
-# For permanent memory on Render, you'd eventually need a database like Upstash Redis.
-chat_history = []
-
-@app.get("/")
-def read_root():
-    return {"status": "CWC Agent Online", "real_time_search": "Enabled"}
-
-@app.post("/chat")
-async def chat(request: Request):
-    global chat_history
-    data = await request.json()
-    user_message = data.get("message")
-    
-    if not user_message:
-        raise HTTPException(status_code=400, detail="No message provided")
+    url = "https://api.tavily.com/search"
+    payload = {
+        "api_key": TAVILY_API_KEY,
+        "query": query,
+        "max_results": 3
+    }
 
     try:
-        # Invoke the agent with tool access
-        response = agent_executor.invoke({
-            "messages": chat_history + [HumanMessage(content=user_message)]
-        })
-        
-        ai_reply = response["messages"][-1].content
-        
-        # Update history (Keeping it short to save Render RAM)
-        chat_history.append(HumanMessage(content=user_message))
-        chat_history = chat_history[-6:] # Keep last 3 turns
-        
-        return {"reply": ai_reply}
-        
-    except Exception as e:
-        print(f"Error: {e}")
-        return {"reply": "I'm currently updating my trade data. Please try again in a moment."}
+        res = requests.post(url, json=payload, timeout=8)
+        data = res.json()
+        results = [r["content"] for r in data.get("results", [])]
+        return "\n".join(results)
+    except:
+        return ""
 
+# ---- Groq AI call ----
+def ask_groq(prompt: str) -> str:
+    url = "https://api.groq.com/openai/v1/chat/completions"
 
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    system_prompt = """
+You are CWC AI — elite China business strategist trained on:
+- China-Europe trade
+- Manufacturing sourcing
+- Investments in China
+- Cross-border deals
+- China market entry
+
+Your personality:
+- Sharp
+- Strategic
+- Concise
+- Practical
+- Sounds like a high-level consultant
+
+If unsure, give strategic insights instead of generic answers.
+"""
+
+    data = {
+        "model": "llama3-70b-8192",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.4
+    }
+
+    res = requests.post(url, headers=headers, json=data)
+    return res.json()["choices"][0]["message"]["content"]
+
+# ---- Chat endpoint ----
+@app.post("/chat")
+def chat(req: ChatRequest):
+    user_msg = req.message
+
+    # Real-time context
+    live_data = search_web(user_msg)
+
+    final_prompt = f"""
+User question: {user_msg}
+
+Relevant real-time context:
+{live_data}
+
+Answer as CWC AI.
+"""
+
+    reply = ask_groq(final_prompt)
+
+    return {"reply": reply}
+
+@app.get("/")
+def root():
+    return {"message": "CWC AI stable backend running"}
