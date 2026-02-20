@@ -139,16 +139,25 @@ RESPONSE RULES:
             {"role": "user", "content": prompt}
         ],
         "temperature": 0.3,
+<<<<<<< HEAD
         "max_tokens": 300  # Reduced for shorter answers
     }
 
     try:
         res = requests.post(url, headers=headers, json=data, timeout=12)
+=======
+        "max_tokens": 800
+    }
+
+    try:
+        res = requests.post(url, headers=headers, json=data, timeout=15)
+>>>>>>> 7fa2d9c2d348bc01d72a8e980e5235c0d88a9b7f
         res.raise_for_status()
         content = res.json()
         return content["choices"][0]["message"]["content"]
     except Exception as e:
         print("Groq error:", e)
+<<<<<<< HEAD
         return "Connection issue. Contact Michail Digkas directly at CWC."
 
 @app.post("/chat")
@@ -161,6 +170,16 @@ def chat(req: ChatRequest):
         return {"response": "Got it. I'll keep my answers brief. What would you like to know about China business opportunities?"}
     
     # Get real-time data
+=======
+        return "I apologize, but I'm having trouble connecting. Please reach out to Michail Digkas directly at CWC for immediate assistance."
+
+# ---- Chat endpoint ----
+@app.post("/chat")
+def chat(req: ChatRequest):
+    user_msg = req.message.lower()
+    
+    # Get real-time data if not a direct consultation request
+>>>>>>> 7fa2d9c2d348bc01d72a8e980e5235c0d88a9b7f
     consultation_keywords = ["book", "consultation", "call", "schedule", "meet", "contact", "michail", "digkas"]
     is_consultation_request = any(kw in user_msg for kw in consultation_keywords)
     
@@ -168,6 +187,7 @@ def chat(req: ChatRequest):
     if not is_consultation_request:
         live_data = search_web(req.message)
     
+<<<<<<< HEAD
     # Build prompt
     context = ""
     if live_data:
@@ -187,5 +207,25 @@ Respond in 2-3 short paragraphs max. Mention Michail Digkas. Suggest consultatio
     if any(word in user_msg for word in ["price", "cost", "start", "help", "serious", "interested", "manufacturer", "2026", "2027"]):
         if "consultation" not in reply.lower():
             reply += f"\n\nWant to discuss your 2026-2027 China strategy with Michail Digkas? Click 'Book Consultation' above."
+=======
+    # Build enhanced prompt
+    context = ""
+    if live_data:
+        context = f"\n\nRelevant market data:\n{live_data}\n"
+    
+    final_prompt = f"""User question: {req.message}{context}
+
+Respond as CWC AI, representing China West Connector and Michail Digkas. 
+Be specific about CWC services. Reference Michail's expertise naturally.
+If the user shows buying intent or complex needs, suggest booking a consultation with Michail Digkas.
+Keep response concise but authoritative (2-4 paragraphs max)."""
+
+    reply = ask_groq(final_prompt)
+    
+    # Add consultation CTA for high-intent queries
+    if any(word in user_msg for word in ["price", "cost", "fee", "how much", "start", "begin", "help me", "serious", "interested", "manufacturer", "supplier", "factory"]):
+        if "consultation" not in reply.lower() and "book" not in reply.lower():
+            reply += "\n\nWould you like to schedule a personal consultation with Michail Digkas to discuss your specific situation? Click 'Book Consultation' above or let me know your preferred time."
+>>>>>>> 7fa2d9c2d348bc01d72a8e980e5235c0d88a9b7f
     
     return {"response": reply}
