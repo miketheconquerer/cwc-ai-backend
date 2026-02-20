@@ -4,4 +4,4 @@ python-dotenv
 langchain-groq
 langchain-community
 langgraph
-duckduckgo-search>=6.2.10
+ddgs
