@@ -4,12 +4,14 @@ import requests
 import os
 from dotenv import load_dotenv
 
+# Load .env locally (optional on Render)
 load_dotenv()
 
 app = FastAPI()
 
+# Get API keys from environment variables
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-TAVILY_API_KEY = os.getenv("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")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
 class ChatRequest(BaseModel):
     message: str
@@ -17,7 +19,8 @@ class ChatRequest(BaseModel):
 # ---- Real-time search (stable) ----
 def search_web(query: str) -> str:
     if not TAVILY_API_KEY:
-        return ""
+        print("TAVILY_API_KEY is missing!")
+        return "No live search available. Tavily API key not set."
 
     url = "https://api.tavily.com/search"
     payload = {
@@ -28,16 +31,21 @@ def search_web(query: str) -> str:
 
     try:
         res = requests.post(url, json=payload, timeout=8)
+        res.raise_for_status()
         data = res.json()
-        results = [r["content"] for r in data.get("results", [])]
-        return "\n".join(results)
-    except:
-        return ""
+        results = [r.get("content", "") for r in data.get("results", [])]
+        return "\n".join(results) if results else "No relevant live search results found."
+    except Exception as e:
+        print("Error in Tavily search:", e)
+        return "Error fetching live search results."
 
 # ---- Groq AI call ----
 def ask_groq(prompt: str) -> str:
-    url = "https://api.groq.com/openai/v1/chat/completions"
+    if not GROQ_API_KEY:
+        print("GROQ_API_KEY is missing!")
+        return "Cannot generate AI response. GROQ API key not set."
 
+    url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
@@ -70,16 +78,24 @@ If unsure, give strategic insights instead of generic answers.
         "temperature": 0.4
     }
 
-    res = requests.post(url, headers=headers, json=data)
-    return res.json()["choices"][0]["message"]["content"]
+    try:
+        res = requests.post(url, headers=headers, json=data, timeout=12)
+        res.raise_for_status()
+        content = res.json()
+        return content["choices"][0]["message"]["content"]
+    except Exception as e:
+        print("Error in Groq AI call:", e)
+        return "AI service failed to generate a response."
 
 # ---- Chat endpoint ----
 @app.post("/chat")
 def chat(req: ChatRequest):
+    print("User message received:", req.message)
     user_msg = req.message
 
     # Real-time context
     live_data = search_web(user_msg)
+    print("Live search data:", live_data)
 
     final_prompt = f"""
 User question: {user_msg}
@@ -89,11 +105,13 @@ Relevant real-time context:
 
 Answer as CWC AI.
 """
-
     reply = ask_groq(final_prompt)
+    print("AI reply generated:", reply)
 
     return {"reply": reply}
 
+# ---- Root endpoint ----
 @app.get("/")
 def root():
     return {"message": "CWC AI stable backend running"}
+
