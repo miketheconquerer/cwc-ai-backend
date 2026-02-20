@@ -12,7 +12,7 @@ app = FastAPI()
 
 # ---- CORS configuration ----
 origins = [
-    "https://your-wordpress-site.com",  # REPLACE with your real WordPress URL
+    "https://www.chinawestconnector.com",  # REPLACE with your real WordPress URL
 ]
 
 app.add_middleware(
