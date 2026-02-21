@@ -276,37 +276,70 @@ RULES:
         print("Groq error:", e)
         return "I apologize, but I'm having trouble connecting. Please reach out to Michail Digkas directly at CWC."
 
-# ---- Email Notification ----
+# ---- Email Notification (ProtonMail Bridge or SMTP) ----
 def send_lead_notification(lead: LeadCapture):
-    """Send email when lead is captured - configure with your Gmail"""
+    """Send email notification for new lead"""
+    
+    # Email configuration - USING PROTONMAIL
+    SMTP_SERVER = "127.0.0.1"  # ProtonMail Bridge default (if installed)
+    SMTP_PORT = 1025           # ProtonMail Bridge default port
+    # OR use Proton SMTP directly (requires ProtonMail Business plan)
+    # SMTP_SERVER = "smtp.protonmail.ch"
+    # SMTP_PORT = 587
+    
+    SENDER_EMAIL = "info@chinawestconnector.com"  # CWC official email
+    RECIPIENT_EMAIL = "digkasm@proton.me"         # Your personal email
+    
     try:
         msg = MIMEText(f"""
 New Lead Captured from CWC AI Chat!
 
-Name: {lead.name}
-Email: {lead.email}
-Company: {lead.company}
-Region: {lead.region}
-Source: {lead.source}
-Time: {lead.timestamp}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-View leads: https://cwc-ai-backend.onrender.com/leads?password=your-secret-password
+👤 NAME: {lead.name}
+📧 EMAIL: {lead.email}
+🏢 COMPANY: {lead.company or 'Not provided'}
+🌍 REGION: {lead.region or 'Not specified'}
+📱 SOURCE: {lead.source}
+⏰ TIME: {lead.timestamp}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+View all leads: https://cwc-ai-backend.onrender.com/leads?password=your-secret-password
+
+Reply to this lead: mailto:{lead.email}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         """)
         
-        msg['Subject'] = f'🎯 New Lead: {lead.name} from {lead.company or "Unknown"}'
-        msg['From'] = 'your-notification-email@gmail.com'
-        msg['To'] = 'michail@chinawestconnector.com'  # CHANGE THIS
+        msg['Subject'] = f'🎯 New Lead: {lead.name} from {lead.company or "Website"}'
+        msg['From'] = SENDER_EMAIL
+        msg['To'] = RECIPIENT_EMAIL
+        msg['Reply-To'] = lead.email  # So you can reply directly to lead
         
-        # Gmail SMTP - create app password at myaccount.google.com/apppasswords
-        server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()
-        server.login('your-notification-email@gmail.com', 'your-16-char-app-password')
-        server.send_message(msg)
-        server.quit()
-        print("Lead notification sent")
+        # Option 1: ProtonMail Bridge (recommended - if installed on server)
+        try:
+            server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+            server.starttls()
+            # No login needed for Bridge, or use Bridge credentials
+            server.send_message(msg)
+            server.quit()
+            print("Lead notification sent via ProtonMail Bridge")
+            return
+        except Exception as bridge_error:
+            print(f"ProtonMail Bridge failed: {bridge_error}")
+        
+        # Option 2: Fallback to console logging if email fails
+        print("=" * 50)
+        print("NEW LEAD CAPTURED (Email failed - save manually)")
+        print(f"Name: {lead.name}")
+        print(f"Email: {lead.email}")
+        print(f"Company: {lead.company}")
+        print(f"Region: {lead.region}")
+        print("=" * 50)
         
     except Exception as e:
-        print(f"Email notification failed: {e}")
+        print(f"Email notification error: {e}")
 
 # ---- API Endpoints ----
 @app.get("/health")
