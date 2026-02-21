@@ -9,10 +9,187 @@ import smtplib
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+import asyncio
+from contextlib import asynccontextmanager
 
 load_dotenv()
 
-app = FastAPI()
+# ---- Configuration ----
+BREVO_API_KEY = os.getenv("BREVO_API_KEY", "")
+SENDER_EMAIL = "888nv666@gmail.com"  # Your verified Brevo sender
+RECIPIENT_EMAIL = "digkasm@proton.me"  # Where to receive reports
+
+# ---- Scheduler Setup ----
+scheduler_running = False
+
+async def schedule_weekly_report():
+    """Send weekly report every Monday at 9 AM"""
+    global scheduler_running
+    scheduler_running = True
+    
+    while scheduler_running:
+        now = datetime.now()
+        # Calculate seconds until next Monday 9 AM
+        days_until_monday = (7 - now.weekday()) % 7
+        if days_until_monday == 0 and now.hour >= 9:
+            days_until_monday = 7
+        next_monday = now + timedelta(days=days_until_monday)
+        next_monday = next_monday.replace(hour=9, minute=0, second=0, microsecond=0)
+        seconds_until = (next_monday - now).total_seconds()
+        
+        await asyncio.sleep(seconds_until)
+        
+        # Send the report
+        try:
+            send_weekly_report()
+        except Exception as e:
+            print(f"Weekly report error: {e}")
+
+def send_email_brevo(to_email: str, subject: str, body: str, from_name: str = "CWC AI") -> bool:
+    """Send email using Brevo API"""
+    url = "https://api.brevo.com/v3/smtp/email"
+    
+    headers = {
+        "accept": "application/json",
+        "content-type": "application/json",
+        "api-key": BREVO_API_KEY
+    }
+    
+    payload = {
+        "sender": {
+            "name": from_name,
+            "email": SENDER_EMAIL
+        },
+        "to": [
+            {
+                "email": to_email,
+                "name": "Michail Digkas"
+            }
+        ],
+        "subject": subject,
+        "htmlContent": f"<html><body><pre style='font-family: monospace; white-space: pre-wrap;'>{body}</pre></body></html>",
+        "textContent": body
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
+        if response.status_code == 201:
+            print(f"✅ Email sent successfully to {to_email}")
+            return True
+        else:
+            print(f"❌ Brevo error: {response.status_code} - {response.text}")
+            return False
+    except Exception as e:
+        print(f"❌ Email sending failed: {e}")
+        return False
+
+def send_weekly_report():
+    """Generate and send weekly analytics report"""
+    conn = sqlite3.connect('cwc_leads.db')
+    c = conn.cursor()
+    
+    # Get stats for last 7 days
+    week_ago = (datetime.now() - timedelta(days=7)).isoformat()
+    
+    # Total conversations
+    c.execute("SELECT COUNT(DISTINCT session_id) FROM conversations WHERE timestamp > ?", (week_ago,))
+    unique_users = c.fetchone()[0]
+    
+    # Total messages
+    c.execute("SELECT COUNT(*) FROM conversations WHERE timestamp > ?", (week_ago,))
+    total_messages = c.fetchone()[0]
+    
+    # New leads
+    c.execute("SELECT COUNT(*) FROM leads WHERE timestamp > ?", (week_ago,))
+    new_leads = c.fetchone()[0]
+    
+    # Returning users
+    c.execute("SELECT COUNT(*) FROM user_profiles WHERE visit_count > 1 AND last_seen > ?", (week_ago,))
+    returning_users = c.fetchone()[0]
+    
+    # Top intents
+    c.execute("""SELECT intent, COUNT(*) as count FROM conversations 
+                 WHERE timestamp > ? GROUP BY intent ORDER BY count DESC LIMIT 5""", (week_ago,))
+    top_intents = c.fetchall()
+    
+    # Top regions
+    c.execute("""SELECT region, COUNT(*) as count FROM conversations 
+                 WHERE timestamp > ? AND region IS NOT NULL GROUP BY region ORDER BY count DESC LIMIT 5""", (week_ago,))
+    top_regions = c.fetchall()
+    
+    # Recent leads details
+    c.execute("""SELECT name, email, company, region, timestamp FROM leads 
+                 WHERE timestamp > ? ORDER BY timestamp DESC LIMIT 10""", (week_ago,))
+    recent_leads = c.fetchall()
+    
+    # Hot leads (high score)
+    c.execute("""SELECT name, email, company, lead_score FROM user_profiles 
+                 WHERE lead_score >= 50 ORDER BY lead_score DESC LIMIT 5""")
+    hot_leads = c.fetchall()
+    
+    conn.close()
+    
+    # Build email
+    intent_text = "\n".join([f"  • {i[0]}: {i[1]} queries" for i in top_intents]) if top_intents else "  No data"
+    region_text = "\n".join([f"  • {r[0]}: {r[1]} queries" for r in top_regions]) if top_regions else "  No data"
+    leads_text = "\n".join([f"  • {l[0]} ({l[2] or 'No company'}) - {l[1]} [{l[3] or 'No region'}]" for l in recent_leads]) if recent_leads else "  No new leads"
+    hot_text = "\n".join([f"  • {h[0]} ({h[2] or 'No company'}) - Score: {h[3]}/100 - {h[1]}" for h in hot_leads if h[0]]) if hot_leads else "  No hot leads"
+    
+    email_body = f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 CWC AI WEEKLY REPORT
+Week of {week_ago[:10]} to {datetime.now().strftime('%Y-%m-%d')}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📈 OVERVIEW
+├─ Unique Users: {unique_users}
+├─ Total Conversations: {total_messages}
+├─ Returning Users: {returning_users}
+└─ New Leads Captured: {new_leads}
+
+🎯 TOP INTENTS
+{intent_text}
+
+🌍 TOP REGIONS
+{region_text}
+
+🔥 HOT LEADS (Score 50+)
+{hot_text}
+
+👤 RECENT LEADS (Last 7 Days)
+{leads_text}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📈 Dashboard: https://cwc-ai-backend.onrender.com/analytics?password=your-secret-password
+📊 Leads: https://cwc-ai-backend.onrender.com/leads?password=your-secret-password
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+This is an automated weekly report from your CWC AI Assistant.
+"""
+    
+    # Send email via Brevo
+    success = send_email_brevo(
+        to_email=RECIPIENT_EMAIL,
+        subject=f"📊 CWC AI Weekly Report - {unique_users} Users, {new_leads} Leads",
+        body=email_body
+    )
+    
+    if success:
+        print("✅ Weekly report sent successfully!")
+    else:
+        print("❌ Weekly report failed to send")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Start background tasks on app startup"""
+    # Start the weekly report scheduler
+    asyncio.create_task(schedule_weekly_report())
+    yield
+    # Cleanup
+    global scheduler_running
+    scheduler_running = False
+
+app = FastAPI(lifespan=lifespan)
 
 # ---- CORS configuration ----
 origins = [
@@ -66,6 +243,21 @@ def init_db():
                   timestamp TEXT,
                   status TEXT)''')
     
+    # User profiles table (for returning user memory)
+    c.execute('''CREATE TABLE IF NOT EXISTS user_profiles
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  session_id TEXT UNIQUE,
+                  first_seen DATETIME,
+                  last_seen DATETIME,
+                  visit_count INTEGER DEFAULT 1,
+                  name TEXT,
+                  email TEXT,
+                  company TEXT,
+                  region_interest TEXT,
+                  topics_discussed TEXT,
+                  lead_score INTEGER DEFAULT 0,
+                  last_intent TEXT)''')
+    
     conn.commit()
     conn.close()
 
@@ -85,6 +277,107 @@ class LeadCapture(BaseModel):
     source: str = "chat_widget"
     timestamp: str = ""
 
+# ---- User Profile Functions ----
+def get_or_create_user_profile(session_id: str) -> dict:
+    """Get existing user profile or create new one"""
+    conn = sqlite3.connect('cwc_leads.db')
+    c = conn.cursor()
+    
+    c.execute("SELECT * FROM user_profiles WHERE session_id = ?", (session_id,))
+    profile = c.fetchone()
+    
+    if profile:
+        # Update last seen and increment visit count
+        c.execute("""UPDATE user_profiles 
+                     SET last_seen = ?, visit_count = visit_count + 1 
+                     WHERE session_id = ?""", 
+                  (datetime.now(), session_id))
+        conn.commit()
+        
+        user_profile = {
+            "session_id": profile[1],
+            "first_seen": profile[2],
+            "last_seen": profile[3],
+            "visit_count": profile[4] + 1,
+            "name": profile[5],
+            "email": profile[6],
+            "company": profile[7],
+            "region_interest": profile[8],
+            "topics_discussed": profile[9],
+            "lead_score": profile[10],
+            "last_intent": profile[11],
+            "is_returning": True
+        }
+    else:
+        # Create new profile
+        c.execute("""INSERT INTO user_profiles 
+                     (session_id, first_seen, last_seen, visit_count)
+                     VALUES (?, ?, ?, 1)""", 
+                  (session_id, datetime.now(), datetime.now()))
+        conn.commit()
+        
+        user_profile = {
+            "session_id": session_id,
+            "first_seen": datetime.now(),
+            "last_seen": datetime.now(),
+            "visit_count": 1,
+            "name": None,
+            "email": None,
+            "company": None,
+            "region_interest": None,
+            "topics_discussed": None,
+            "lead_score": 0,
+            "last_intent": None,
+            "is_returning": False
+        }
+    
+    conn.close()
+    return user_profile
+
+def update_user_profile(session_id: str, **kwargs):
+    """Update user profile with new information"""
+    conn = sqlite3.connect('cwc_leads.db')
+    c = conn.cursor()
+    
+    valid_fields = ['name', 'email', 'company', 'region_interest', 
+                   'topics_discussed', 'lead_score', 'last_intent']
+    
+    updates = []
+    values = []
+    for key, value in kwargs.items():
+        if key in valid_fields and value:
+            updates.append(f"{key} = ?")
+            values.append(value)
+    
+    if updates:
+        values.append(session_id)
+        query = f"UPDATE user_profiles SET {', '.join(updates)} WHERE session_id = ?"
+        c.execute(query, values)
+        conn.commit()
+    
+    conn.close()
+
+def calculate_lead_score(user_profile: dict, message: str, intent: str) -> int:
+    """Calculate lead score based on user behavior"""
+    score = user_profile.get('lead_score', 0)
+    
+    intent_scores = {
+        "high_intent_lead": 30,
+        "consultation_request": 25,
+        "supplier_verification": 20,
+        "information_gathering": 5
+    }
+    score += intent_scores.get(intent, 0)
+    
+    if user_profile.get('visit_count', 1) > 1:
+        score += 10
+    
+    high_value_keywords = ["budget", "invest", "contract", "serious", "start", "hire", "price"]
+    if any(kw in message.lower() for kw in high_value_keywords):
+        score += 15
+    
+    return min(score, 100)
+
 # ---- Database Functions ----
 def save_conversation(session_id, user_msg, ai_response, email=None, company=None, region=None, intent=None):
     conn = sqlite3.connect('cwc_leads.db')
@@ -96,7 +389,7 @@ def save_conversation(session_id, user_msg, ai_response, email=None, company=Non
     conn.commit()
     conn.close()
 
-def get_conversation_history(session_id, limit=5):
+def get_conversation_history(session_id, limit=10):
     conn = sqlite3.connect('cwc_leads.db')
     c = conn.cursor()
     c.execute("""SELECT user_message, ai_response FROM conversations 
@@ -185,7 +478,7 @@ def search_web(query: str) -> str:
         return ""
 
 # ---- Groq AI ----
-def ask_groq(prompt: str, session_id: str = "anonymous") -> str:
+def ask_groq(prompt: str, session_id: str = "anonymous", user_profile: dict = None) -> str:
     if not GROQ_API_KEY:
         return "System temporarily unavailable. Contact Michail Digkas at CWC."
 
@@ -194,9 +487,25 @@ def ask_groq(prompt: str, session_id: str = "anonymous") -> str:
     if history:
         context = "\nPrevious conversation:\n"
         for user_msg, ai_resp in history:
-            context += f"User: {user_msg}\nAI: {ai_resp[:100]}...\n"
+            context += f"User: {user_msg}\nAI: {ai_resp[:150]}...\n"
     
     intent_data = detect_intent(prompt)
+    
+    returning_context = ""
+    if user_profile and user_profile.get('is_returning'):
+        visit_count = user_profile.get('visit_count', 1)
+        last_intent = user_profile.get('last_intent', '')
+        region = user_profile.get('region_interest', '')
+        name = user_profile.get('name', '')
+        
+        returning_context = f"""
+RETURNING USER DETECTED:
+- Visit count: {visit_count}
+- Last visit intent: {last_intent}
+- Region of interest: {region}
+- Known name: {name if name else 'Unknown'}
+- You SHOULD acknowledge their return warmly if this is their 2nd+ visit
+"""
     
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
@@ -211,10 +520,12 @@ CURRENT DATE: February 2026
 
 USER INTENT: {intent_data['primary']}
 REGION: {intent_data['region'] or 'Global'}
+{returning_context}
 
 CONVERSATION MEMORY: {context}
 
 RESPONSE STRATEGY:
+- If returning user: Acknowledge their return, reference previous topics if relevant
 - If high_intent_lead: Be consultative, ask qualifying questions, suggest clicking "Speak with Michail Digkas" button
 - If consultation_request: Direct them to click the "Speak with Michail Digkas" button above
 - If supplier_verification: Emphasize CWC's audit capabilities
@@ -347,6 +658,7 @@ Always sound like a serious advisor, not a promoter.
 
 Your goal is to consistently present Michail Digkas as a credible, execution-focused cross-border legal and strategic advisor connecting China and international markets.
 - Use conversation memory to personalize responses
+- For returning users, show you remember them
 """
 
     data = {
@@ -365,6 +677,14 @@ Your goal is to consistently present Michail Digkas as a credible, execution-foc
         content = res.json()
         response_text = content["choices"][0]["message"]["content"]
         
+        new_score = calculate_lead_score(user_profile or {}, prompt, intent_data['primary'])
+        update_user_profile(
+            session_id,
+            last_intent=intent_data['primary'],
+            region_interest=intent_data['region'],
+            lead_score=new_score
+        )
+        
         save_conversation(session_id, prompt, response_text, 
                          region=intent_data['region'], 
                          intent=intent_data['primary'])
@@ -376,20 +696,21 @@ Your goal is to consistently present Michail Digkas as a credible, execution-foc
 
 # ---- Email Notification ----
 def send_lead_notification(lead: LeadCapture):
-    """Send email notification for new lead to ProtonMail"""
+    """Send email notification for new lead using Brevo"""
     
-    # ProtonMail Bridge configuration (if installed locally)
-    # For Render cloud, email will be logged to console
-    SMTP_SERVER = "127.0.0.1"
-    SMTP_PORT = 1025
+    # Get user profile for lead score
+    conn = sqlite3.connect('cwc_leads.db')
+    c = conn.cursor()
+    c.execute("SELECT lead_score, visit_count FROM user_profiles WHERE session_id = ?", (lead.session_id,))
+    profile = c.fetchone()
+    conn.close()
     
-    SENDER_EMAIL = "info@chinawestconnector.com"
-    RECIPIENT_EMAIL = "digkasm@proton.me"
+    lead_score = profile[0] if profile else 0
+    visit_count = profile[1] if profile else 1
     
-    try:
-        msg = MIMEText(f"""
-New Lead Captured from CWC AI Chat!
-
+    email_body = f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🎯 NEW LEAD CAPTURED
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 👤 NAME: {lead.name}
@@ -398,43 +719,24 @@ New Lead Captured from CWC AI Chat!
 🌍 REGION: {lead.region or 'Not specified'}
 📱 SOURCE: {lead.source}
 ⏰ TIME: {lead.timestamp}
+🎯 LEAD SCORE: {lead_score}/100
+🔄 VISIT COUNT: {visit_count}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-View all leads: https://cwc-ai-backend.onrender.com/leads?password=your-secret-password
+📈 Dashboard: https://cwc-ai-backend.onrender.com/analytics?password=your-secret-password
+📊 Leads: https://cwc-ai-backend.onrender.com/leads?password=your-secret-password
 
 Reply to this lead: mailto:{lead.email}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        """)
-        
-        msg['Subject'] = f'🎯 New Lead: {lead.name} from {lead.company or "Website"}'
-        msg['From'] = SENDER_EMAIL
-        msg['To'] = RECIPIENT_EMAIL
-        msg['Reply-To'] = lead.email
-        
-        # Try ProtonMail Bridge first
-        try:
-            server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-            server.starttls()
-            server.send_message(msg)
-            server.quit()
-            print("Lead notification sent via ProtonMail Bridge")
-            return
-        except Exception as bridge_error:
-            print(f"ProtonMail Bridge failed: {bridge_error}")
-        
-        # Fallback: log to console (view in Render logs)
-        print("=" * 50)
-        print("NEW LEAD CAPTURED (Email failed - check dashboard)")
-        print(f"Name: {lead.name}")
-        print(f"Email: {lead.email}")
-        print(f"Company: {lead.company}")
-        print(f"Region: {lead.region}")
-        print("=" * 50)
-        
-    except Exception as e:
-        print(f"Email notification error: {e}")
+"""
+    
+    send_email_brevo(
+        to_email=RECIPIENT_EMAIL,
+        subject=f"🎯 New Lead: {lead.name} from {lead.company or 'Website'} (Score: {lead_score})",
+        body=email_body
+    )
 
 # ---- API Endpoints ----
 @app.get("/health")
@@ -442,7 +744,8 @@ def health_check():
     return {
         "status": "healthy",
         "groq_configured": bool(GROQ_API_KEY),
-        "tavily_configured": bool(TAVILY_API_KEY)
+        "tavily_configured": bool(TAVILY_API_KEY),
+        "brevo_configured": bool(BREVO_API_KEY)
     }
 
 @app.get("/")
@@ -452,6 +755,9 @@ def root():
 @app.post("/chat")
 def chat(req: ChatRequest):
     user_msg = req.message.lower()
+    
+    # Get or create user profile (for returning user detection)
+    user_profile = get_or_create_user_profile(req.session_id)
     
     if any(word in user_msg for word in ["stop", "shorter", "brief", "short", "too long"]):
         return {"response": "Got it. I'll keep my answers brief. What would you like to know about China business opportunities?"}
@@ -467,16 +773,21 @@ def chat(req: ChatRequest):
     if live_data:
         context = f"\n\nRelevant market data:\n{live_data}\n"
     
+    returning_hint = ""
+    if user_profile.get('is_returning') and user_profile.get('visit_count', 1) > 1:
+        returning_hint = "\n(Note: This is a returning user - acknowledge their return warmly in your first sentence)"
+
     final_prompt = f"""User question: {req.message}{context}
 
 Respond as CWC AI, representing China West Connector and Michail Digkas. 
 Be specific about CWC services. Reference Michail's expertise naturally.
+{returning_hint}
 If the user shows buying intent or complex needs, suggest clicking the "Speak with Michail Digkas" button above.
 Keep response concise but authoritative (2-4 paragraphs max).
 
 IMPORTANT: Never mention calendar links or clickable links - they do not exist. Only refer to the "Speak with Michail Digkas" button."""
 
-    reply = ask_groq(final_prompt, req.session_id)
+    reply = ask_groq(final_prompt, req.session_id, user_profile)
     
     if any(word in user_msg for word in ["price", "cost", "fee", "how much", "start", "begin", "help me", "serious", "interested", "manufacturer", "supplier", "factory"]):
         if "consultation" not in reply.lower() and "book" not in reply.lower():
@@ -496,6 +807,15 @@ async def capture_lead(lead: LeadCapture, background_tasks: BackgroundTasks):
     conn.commit()
     conn.close()
     
+    # Update user profile with lead info
+    update_user_profile(
+        lead.session_id,
+        name=lead.name,
+        email=lead.email,
+        company=lead.company,
+        region_interest=lead.region
+    )
+    
     background_tasks.add_task(send_lead_notification, lead)
     
     return {"status": "success", "message": "Lead captured"}
@@ -503,7 +823,7 @@ async def capture_lead(lead: LeadCapture, background_tasks: BackgroundTasks):
 @app.get("/leads")
 def view_leads(password: str = None):
     """Simple lead dashboard - password protected"""
-    if password != "your-secret-password":
+    if password != "CwC$x7Km9#Lp2QvN@2026!Md":
         return {"error": "Unauthorized"}
     
     conn = sqlite3.connect('cwc_leads.db')
@@ -525,3 +845,87 @@ def view_leads(password: str = None):
         })
     
     return {"leads": lead_list, "count": len(lead_list)}
+
+@app.get("/analytics")
+def get_analytics(password: str = None, days: int = 7):
+    """Get analytics data - password protected"""
+    if password != "CwC$x7Km9#Lp2QvN@2026!Md":
+        return {"error": "Unauthorized"}
+    
+    conn = sqlite3.connect('cwc_leads.db')
+    c = conn.cursor()
+    
+    since_date = (datetime.now() - timedelta(days=days)).isoformat()
+    
+    # Unique users
+    c.execute("SELECT COUNT(DISTINCT session_id) FROM conversations WHERE timestamp > ?", (since_date,))
+    unique_users = c.fetchone()[0]
+    
+    # Total conversations
+    c.execute("SELECT COUNT(*) FROM conversations WHERE timestamp > ?", (since_date,))
+    total_conversations = c.fetchone()[0]
+    
+    # New leads
+    c.execute("SELECT COUNT(*) FROM leads WHERE timestamp > ?", (since_date,))
+    new_leads = c.fetchone()[0]
+    
+    # Returning users
+    c.execute("SELECT COUNT(*) FROM user_profiles WHERE visit_count > 1 AND last_seen > ?", (since_date,))
+    returning_users = c.fetchone()[0]
+    
+    # Top intents
+    c.execute("""SELECT intent, COUNT(*) as count FROM conversations 
+                 WHERE timestamp > ? GROUP BY intent ORDER BY count DESC LIMIT 5""", (since_date,))
+    top_intents = [{"intent": r[0], "count": r[1]} for r in c.fetchall()]
+    
+    # Top regions
+    c.execute("""SELECT region, COUNT(*) as count FROM conversations 
+                 WHERE timestamp > ? AND region IS NOT NULL GROUP BY region ORDER BY count DESC LIMIT 5""", (since_date,))
+    top_regions = [{"region": r[0], "count": r[1]} for r in c.fetchall()]
+    
+    # High score leads
+    c.execute("""SELECT name, email, company, lead_score FROM user_profiles 
+                 WHERE lead_score >= 50 ORDER BY lead_score DESC LIMIT 10""")
+    hot_leads = [{"name": r[0], "email": r[1], "company": r[2], "score": r[3]} for r in c.fetchall() if r[0]]
+    
+    conn.close()
+    
+    return {
+        "period_days": days,
+        "unique_users": unique_users,
+        "total_conversations": total_conversations,
+        "new_leads": new_leads,
+        "returning_users": returning_users,
+        "top_intents": top_intents,
+        "top_regions": top_regions,
+        "hot_leads": hot_leads
+    }
+
+@app.get("/trigger-report")
+def trigger_report(password: str = None):
+    """Manually trigger weekly report - for testing"""
+    if password != "CwC$x7Km9#Lp2QvN@2026!Md":
+        return {"error": "Unauthorized"}
+    
+    try:
+        send_weekly_report()
+        return {"status": "Report sent successfully!", "sent_to": RECIPIENT_EMAIL}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/test-email")
+def test_email(password: str = None):
+    """Test email functionality"""
+    if password != "CwC$x7Km9#Lp2QvN@2026!Md":
+        return {"error": "Unauthorized"}
+    
+    success = send_email_brevo(
+        to_email=RECIPIENT_EMAIL,
+        subject="✅ CWC AI Email Test - Working!",
+        body="Congratulations! Your Brevo email setup is working correctly.\n\nYou will receive weekly reports and lead notifications."
+    )
+    
+    if success:
+        return {"status": "Test email sent successfully!", "sent_to": RECIPIENT_EMAIL}
+    else:
+        return {"error": "Email failed to send"}
