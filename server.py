@@ -276,19 +276,17 @@ RULES:
         print("Groq error:", e)
         return "I apologize, but I'm having trouble connecting. Please reach out to Michail Digkas directly at CWC."
 
-# ---- Email Notification (ProtonMail Bridge or SMTP) ----
+# ---- Email Notification ----
 def send_lead_notification(lead: LeadCapture):
-    """Send email notification for new lead"""
+    """Send email notification for new lead to ProtonMail"""
     
-    # Email configuration - USING PROTONMAIL
-    SMTP_SERVER = "127.0.0.1"  # ProtonMail Bridge default (if installed)
-    SMTP_PORT = 1025           # ProtonMail Bridge default port
-    # OR use Proton SMTP directly (requires ProtonMail Business plan)
-    # SMTP_SERVER = "smtp.protonmail.ch"
-    # SMTP_PORT = 587
+    # ProtonMail Bridge configuration (if installed locally)
+    # For Render cloud, email will be logged to console
+    SMTP_SERVER = "127.0.0.1"
+    SMTP_PORT = 1025
     
-    SENDER_EMAIL = "info@chinawestconnector.com"  # CWC official email
-    RECIPIENT_EMAIL = "digkasm@proton.me"         # Your personal email
+    SENDER_EMAIL = "info@chinawestconnector.com"
+    RECIPIENT_EMAIL = "digkasm@proton.me"
     
     try:
         msg = MIMEText(f"""
@@ -315,13 +313,12 @@ Reply to this lead: mailto:{lead.email}
         msg['Subject'] = f'🎯 New Lead: {lead.name} from {lead.company or "Website"}'
         msg['From'] = SENDER_EMAIL
         msg['To'] = RECIPIENT_EMAIL
-        msg['Reply-To'] = lead.email  # So you can reply directly to lead
+        msg['Reply-To'] = lead.email
         
-        # Option 1: ProtonMail Bridge (recommended - if installed on server)
+        # Try ProtonMail Bridge first
         try:
             server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
             server.starttls()
-            # No login needed for Bridge, or use Bridge credentials
             server.send_message(msg)
             server.quit()
             print("Lead notification sent via ProtonMail Bridge")
@@ -329,9 +326,9 @@ Reply to this lead: mailto:{lead.email}
         except Exception as bridge_error:
             print(f"ProtonMail Bridge failed: {bridge_error}")
         
-        # Option 2: Fallback to console logging if email fails
+        # Fallback: log to console (view in Render logs)
         print("=" * 50)
-        print("NEW LEAD CAPTURED (Email failed - save manually)")
+        print("NEW LEAD CAPTURED (Email failed - check dashboard)")
         print(f"Name: {lead.name}")
         print(f"Email: {lead.email}")
         print(f"Company: {lead.company}")
@@ -406,7 +403,7 @@ async def capture_lead(lead: LeadCapture, background_tasks: BackgroundTasks):
 @app.get("/leads")
 def view_leads(password: str = None):
     """Simple lead dashboard - password protected"""
-    if password != "your-secret-password":  # CHANGE THIS
+    if password != "your-secret-password":
         return {"error": "Unauthorized"}
     
     conn = sqlite3.connect('cwc_leads.db')
