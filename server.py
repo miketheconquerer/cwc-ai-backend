@@ -702,7 +702,7 @@ def health_check():
     return {
         "status": "healthy",
         "groq_configured": bool(GROQ_API_KEY),
-        tavily_configured": bool(TAVILY_API_KEY),
+        "tavily_configured": bool(TAVILY_API_KEY),
         "brevo_configured": bool(BREVO_API_KEY)
     }
 
