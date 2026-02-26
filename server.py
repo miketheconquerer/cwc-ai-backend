@@ -4,7 +4,8 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 import requests
 import os
-import sqlite3
+import psycopg2
+import psycopg2.extras
 import json
 import time
 import hashlib
@@ -24,8 +25,9 @@ BREVO_API_KEY   = os.getenv("BREVO_API_KEY", "")
 GROQ_API_KEY    = os.getenv("GROQ_API_KEY")
 TAVILY_API_KEY  = os.getenv("TAVILY_API_KEY")
 ADMIN_PASSWORD  = os.getenv("ADMIN_PASSWORD", "")
-SENDER_EMAIL    = "888nv666@gmail.com"
+SENDER_EMAIL    = os.getenv("SENDER_EMAIL", "888nv666@gmail.com")
 RECIPIENT_EMAIL = "digkasm@proton.me"
+DATABASE_URL    = os.getenv("DATABASE_URL")
 
 # ============================================================
 # RATE LIMITING (in-memory, free)
@@ -98,25 +100,28 @@ app.add_middleware(
 )
 
 # ============================================================
-# DATABASE SETUP
+# DATABASE SETUP — PostgreSQL
 # ============================================================
+def get_db():
+    return psycopg2.connect(DATABASE_URL)
+
 def init_db():
-    conn = sqlite3.connect('cwc_leads.db')
+    conn = get_db()
     c = conn.cursor()
 
     c.execute('''CREATE TABLE IF NOT EXISTS conversations
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 (id SERIAL PRIMARY KEY,
                   session_id TEXT,
                   user_message TEXT,
                   ai_response TEXT,
-                  timestamp DATETIME,
+                  timestamp TIMESTAMP,
                   email TEXT,
                   company TEXT,
                   region TEXT,
                   intent TEXT)''')
 
     c.execute('''CREATE TABLE IF NOT EXISTS leads
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 (id SERIAL PRIMARY KEY,
                   name TEXT,
                   email TEXT,
                   company TEXT,
@@ -127,10 +132,10 @@ def init_db():
                   status TEXT)''')
 
     c.execute('''CREATE TABLE IF NOT EXISTS user_profiles
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 (id SERIAL PRIMARY KEY,
                   session_id TEXT UNIQUE,
-                  first_seen DATETIME,
-                  last_seen DATETIME,
+                  first_seen TIMESTAMP,
+                  last_seen TIMESTAMP,
                   visit_count INTEGER DEFAULT 1,
                   name TEXT,
                   email TEXT,
@@ -139,15 +144,14 @@ def init_db():
                   topics_discussed TEXT,
                   lead_score INTEGER DEFAULT 0,
                   last_intent TEXT,
-                  language TEXT DEFAULT "en",
+                  language TEXT DEFAULT 'en',
                   conversation_summary TEXT)''')
 
-    # UPGRADE H: Response cache table
     c.execute('''CREATE TABLE IF NOT EXISTS response_cache
                  (cache_key TEXT PRIMARY KEY,
                   response TEXT,
                   sources TEXT,
-                  created_at DATETIME)''')
+                  created_at TIMESTAMP)''')
 
     conn.commit()
     conn.close()
@@ -175,29 +179,21 @@ class QuickActionRequest(BaseModel):
     session_id: str = "anonymous"
 
 # ============================================================
-# UPGRADE G — LANGUAGE AUTO-DETECTION (free, no library needed)
+# UPGRADE G — LANGUAGE AUTO-DETECTION
 # ============================================================
 def detect_language(text: str) -> str:
-    """
-    Detect language from character ranges — no library needed.
-    Returns ISO code: 'zh', 'ar', 'es', 'fr', 'de', 'ru', 'en'
-    """
     if not text:
         return "en"
-    # Chinese characters (CJK Unified Ideographs)
-    chinese_chars = len(re.findall(r'[\u4e00-\u9fff\u3400-\u4dbf]', text))
-    # Arabic characters
-    arabic_chars  = len(re.findall(r'[\u0600-\u06ff]', text))
-    # Cyrillic (Russian)
+    chinese_chars  = len(re.findall(r'[\u4e00-\u9fff\u3400-\u4dbf]', text))
+    arabic_chars   = len(re.findall(r'[\u0600-\u06ff]', text))
     cyrillic_chars = len(re.findall(r'[\u0400-\u04ff]', text))
     total = max(len(text), 1)
 
-    if chinese_chars / total > 0.15:  return "zh"
-    if arabic_chars  / total > 0.15:  return "ar"
+    if chinese_chars  / total > 0.15: return "zh"
+    if arabic_chars   / total > 0.15: return "ar"
     if cyrillic_chars / total > 0.15: return "ru"
 
-    # Latin-script language hints via common words
-    lower = text.lower()
+    lower    = text.lower()
     es_words = ["que", "como", "para", "con", "una", "por", "del", "los"]
     fr_words = ["que", "les", "des", "est", "pour", "dans", "avec", "vous"]
     de_words = ["und", "die", "der", "das", "ist", "ich", "mit", "ein"]
@@ -223,19 +219,19 @@ LANGUAGE_INSTRUCTIONS = {
 # USER PROFILE FUNCTIONS
 # ============================================================
 def get_or_create_user_profile(session_id: str, new_session: bool = False) -> dict:
-    conn = sqlite3.connect('cwc_leads.db')
+    conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT * FROM user_profiles WHERE session_id = ?", (session_id,))
+    c.execute("SELECT * FROM user_profiles WHERE session_id = %s", (session_id,))
     profile = c.fetchone()
 
     if profile:
         if new_session:
             c.execute("""UPDATE user_profiles
-                         SET last_seen = ?, visit_count = visit_count + 1
-                         WHERE session_id = ?""",
+                         SET last_seen = %s, visit_count = visit_count + 1
+                         WHERE session_id = %s""",
                       (datetime.now(), session_id))
         else:
-            c.execute("UPDATE user_profiles SET last_seen = ? WHERE session_id = ?",
+            c.execute("UPDATE user_profiles SET last_seen = %s WHERE session_id = %s",
                       (datetime.now(), session_id))
         conn.commit()
         user_profile = {
@@ -257,7 +253,7 @@ def get_or_create_user_profile(session_id: str, new_session: bool = False) -> di
     else:
         c.execute("""INSERT INTO user_profiles
                      (session_id, first_seen, last_seen, visit_count, language)
-                     VALUES (?, ?, ?, 1, 'en')""",
+                     VALUES (%s, %s, %s, 1, 'en')""",
                   (session_id, datetime.now(), datetime.now()))
         conn.commit()
         user_profile = {
@@ -274,7 +270,7 @@ def get_or_create_user_profile(session_id: str, new_session: bool = False) -> di
 
 
 def update_user_profile(session_id: str, **kwargs):
-    conn = sqlite3.connect('cwc_leads.db')
+    conn = get_db()
     c = conn.cursor()
     valid_fields = ['name', 'email', 'company', 'region_interest',
                     'topics_discussed', 'lead_score', 'last_intent',
@@ -282,11 +278,11 @@ def update_user_profile(session_id: str, **kwargs):
     updates, values = [], []
     for key, value in kwargs.items():
         if key in valid_fields and value is not None:
-            updates.append(f"{key} = ?")
+            updates.append(f"{key} = %s")
             values.append(value)
     if updates:
         values.append(session_id)
-        c.execute(f"UPDATE user_profiles SET {', '.join(updates)} WHERE session_id = ?", values)
+        c.execute(f"UPDATE user_profiles SET {', '.join(updates)} WHERE session_id = %s", values)
         conn.commit()
     conn.close()
 
@@ -303,7 +299,6 @@ def calculate_lead_score(user_profile: dict, message: str, intent: str) -> int:
     high_value_keywords = ["budget", "invest", "contract", "serious", "start", "hire", "price"]
     if any(kw in message.lower() for kw in high_value_keywords):
         score += 15
-    # Boost for non-English speakers (often higher-value international leads)
     if user_profile.get('language', 'en') == 'zh':
         score += 20
     elif user_profile.get('language', 'en') != 'en':
@@ -315,11 +310,11 @@ def calculate_lead_score(user_profile: dict, message: str, intent: str) -> int:
 # ============================================================
 def save_conversation(session_id, user_msg, ai_response,
                       email=None, company=None, region=None, intent=None):
-    conn = sqlite3.connect('cwc_leads.db')
+    conn = get_db()
     c = conn.cursor()
     c.execute("""INSERT INTO conversations
                  (session_id, user_message, ai_response, timestamp, email, company, region, intent)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
               (session_id, user_msg, ai_response, datetime.now(),
                email, company, region, intent))
     conn.commit()
@@ -327,10 +322,10 @@ def save_conversation(session_id, user_msg, ai_response,
 
 
 def get_conversation_history(session_id, limit=10):
-    conn = sqlite3.connect('cwc_leads.db')
+    conn = get_db()
     c = conn.cursor()
     c.execute("""SELECT user_message, ai_response FROM conversations
-                 WHERE session_id = ? ORDER BY timestamp DESC LIMIT ?""",
+                 WHERE session_id = %s ORDER BY timestamp DESC LIMIT %s""",
               (session_id, limit))
     history = c.fetchall()
     conn.close()
@@ -338,27 +333,26 @@ def get_conversation_history(session_id, limit=10):
 
 
 def get_message_count(session_id: str) -> int:
-    conn = sqlite3.connect('cwc_leads.db')
+    conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM conversations WHERE session_id = ?", (session_id,))
+    c.execute("SELECT COUNT(*) FROM conversations WHERE session_id = %s", (session_id,))
     count = c.fetchone()[0]
     conn.close()
     return count
 
 # ============================================================
-# UPGRADE H — RESPONSE CACHE (SQLite, free, 24hr TTL)
+# UPGRADE H — RESPONSE CACHE (PostgreSQL, 24hr TTL)
 # ============================================================
 def get_cached_response(query: str) -> tuple[str, list] | None:
-    """Return cached response if fresh (< 24 hours old)."""
     cache_key = hashlib.md5(query.strip().lower().encode()).hexdigest()
-    conn = sqlite3.connect('cwc_leads.db')
+    conn = get_db()
     c = conn.cursor()
     c.execute("""SELECT response, sources, created_at FROM response_cache
-                 WHERE cache_key = ?""", (cache_key,))
+                 WHERE cache_key = %s""", (cache_key,))
     row = c.fetchone()
     conn.close()
     if row:
-        created = datetime.fromisoformat(row[2])
+        created = row[2] if isinstance(row[2], datetime) else datetime.fromisoformat(str(row[2]))
         if datetime.now() - created < timedelta(hours=24):
             sources = json.loads(row[1]) if row[1] else []
             return row[0], sources
@@ -366,19 +360,20 @@ def get_cached_response(query: str) -> tuple[str, list] | None:
 
 
 def set_cached_response(query: str, response: str, sources: list):
-    """Cache a response for 24 hours."""
     cache_key = hashlib.md5(query.strip().lower().encode()).hexdigest()
-    conn = sqlite3.connect('cwc_leads.db')
+    conn = get_db()
     c = conn.cursor()
-    c.execute("""INSERT OR REPLACE INTO response_cache
-                 (cache_key, response, sources, created_at)
-                 VALUES (?, ?, ?, ?)""",
+    c.execute("""INSERT INTO response_cache (cache_key, response, sources, created_at)
+                 VALUES (%s, %s, %s, %s)
+                 ON CONFLICT (cache_key) DO UPDATE
+                 SET response = EXCLUDED.response,
+                     sources  = EXCLUDED.sources,
+                     created_at = EXCLUDED.created_at""",
               (cache_key, response, json.dumps(sources), datetime.now()))
     conn.commit()
     conn.close()
 
 
-# Queries worth caching — factual, stable, frequently asked
 CACHEABLE_PATTERNS = [
     "hainan free trade", "samr", "wfoe", "vat", "fdi rules",
     "what is cwc", "what is china west", "belt and road",
@@ -448,7 +443,9 @@ def search_duckduckgo(query: str) -> tuple[str, list[str]]:
 
 def search_wikipedia(query: str) -> tuple[str, list[str]]:
     try:
-        url = "https://en.wikipedia.org/api/rest_v1/page/summary/" + query.replace(" ", "_")
+        import urllib.parse
+        safe_query = urllib.parse.quote(query.replace(" ", "_"))
+        url = "https://en.wikipedia.org/api/rest_v1/page/summary/" + safe_query
         res = requests.get(url, timeout=8)
         if res.status_code == 200:
             data = res.json()
@@ -510,15 +507,11 @@ def search_web(query: str) -> tuple[str, list[str]]:
     return combined, unique_sources
 
 # ============================================================
-# UPGRADE D — RSS NEWS FEED (Free, real China business news)
+# UPGRADE D — RSS NEWS FEED
 # ============================================================
 _news_cache: dict = {"items": [], "fetched_at": None}
 
 def fetch_china_news() -> list[dict]:
-    """
-    Fetch real China business news from free RSS feeds.
-    Caches for 2 hours to avoid hammering feeds.
-    """
     global _news_cache
     now = datetime.now()
     if (_news_cache["fetched_at"] and
@@ -542,7 +535,6 @@ def fetch_china_news() -> list[dict]:
             if res.status_code != 200:
                 continue
 
-            # Parse each <item> block individually — fixes title/URL mismatch
             item_blocks = re.findall(r'<item[^>]*>(.*?)</item>', res.text, re.DOTALL)
 
             for block in item_blocks[:5]:
@@ -564,11 +556,9 @@ def fetch_china_news() -> list[dict]:
                 date_match = re.search(r'<pubDate>(.*?)</pubDate>', block)
                 date = date_match.group(1).strip()[:16] if date_match else ""
 
-                # Filter out clearly non-China stories
                 skip_keywords = [
                     "ukraine", "russia", "greenland", "denmark", "epstein",
-                    "nato", "israel", "gaza", "afghanistan", "pornographic",
-                    "deepfake",
+                    "nato", "israel", "gaza", "afghanistan", "pornographic", "deepfake",
                 ]
                 if any(kw in title.lower() for kw in skip_keywords):
                     continue
@@ -589,10 +579,7 @@ def fetch_china_news() -> list[dict]:
                 elif any(w in title.lower() for w in ["ship", "freight", "logistics", "port", "supply"]):
                     category = "Logistics"
 
-                items.append({
-                    "title": title, "url": link,
-                    "category": category, "date": date
-                })
+                items.append({"title": title, "url": link, "category": category, "date": date})
 
             if len(items) >= 8:
                 break
@@ -605,7 +592,6 @@ def fetch_china_news() -> list[dict]:
         _news_cache["fetched_at"] = now
         return items[:8]
 
-    # Fallback: return curated static items if all feeds fail
     return [
         {"title": "China announces new FDI incentives for tech sector",
          "url": "", "category": "Policy", "date": ""},
@@ -620,37 +606,23 @@ def fetch_china_news() -> list[dict]:
     ]
 
 # ============================================================
-# UPGRADE E — SAMR COMPANY LOOKUP (Free, China business registry)
+# UPGRADE E — SAMR COMPANY LOOKUP
 # ============================================================
 def lookup_chinese_company(company_name: str) -> dict:
-    """
-    Free preliminary lookup of Chinese companies via:
-    1. SAMR public search (qixin.com proxy, free)
-    2. DuckDuckGo search for public registration info
-    Returns structured dict with what was found.
-    """
     result = {
-        "company": company_name,
-        "found": False,
-        "registration_status": "Unknown",
-        "details": "",
-        "sources": [],
-        "warning": None
+        "company": company_name, "found": False,
+        "registration_status": "Unknown", "details": "",
+        "sources": [], "warning": None
     }
-
-    # Try DuckDuckGo for public business info
     query = f"{company_name} China company registration SAMR business license"
     ddg_content, ddg_sources = search_duckduckgo(query)
     tavily_content, tavily_sources = search_tavily(query)
-
     combined = (tavily_content or ddg_content or "").lower()
     all_sources = tavily_sources + ddg_sources
 
     if combined:
         result["found"] = True
         result["sources"] = all_sources[:3]
-
-        # Look for red flags in results
         red_flags = ["scam", "fraud", "fake", "blacklist", "warning", "complaint",
                      "dispute", "lawsuit", "suspended", "revoked"]
         flags_found = [f for f in red_flags if f in combined]
@@ -659,8 +631,6 @@ def lookup_chinese_company(company_name: str) -> dict:
             result["registration_status"] = "Requires Investigation"
         else:
             result["registration_status"] = "Preliminary search complete — full audit recommended"
-
-        # Extract snippet
         raw = tavily_content or ddg_content
         result["details"] = raw[:400] if raw else ""
     else:
@@ -668,7 +638,6 @@ def lookup_chinese_company(company_name: str) -> dict:
                              "very small, recently registered, or the name may be incorrect. "
                              "A full CWC Due Diligence report is strongly recommended.")
         result["warning"] = "⚠️ No public data found — treat with caution"
-
     return result
 
 # ============================================================
@@ -772,10 +741,7 @@ GROQ_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "company_name": {
-                        "type": "string",
-                        "description": "The Chinese company name to look up"
-                    }
+                    "company_name": {"type": "string", "description": "The Chinese company name to look up"}
                 },
                 "required": ["company_name"]
             }
@@ -795,7 +761,6 @@ def run_tool_call(tool_name: str, tool_args: dict) -> tuple[str, list[str]]:
         elif search_type == "regulation":
             query = f"{query} China regulation compliance 2026"
         return search_web(query)
-
     elif tool_name == "lookup_company":
         company_name = tool_args.get("company_name", "")
         result = lookup_chinese_company(company_name)
@@ -807,18 +772,13 @@ def run_tool_call(tool_name: str, tool_args: dict) -> tuple[str, list[str]]:
         if result.get('warning'):
             summary += f"WARNING: {result['warning']}\n"
         return summary, result.get('sources', [])
-
     return "", []
 
 # ============================================================
 # UPGRADE F — CONVERSATION SUMMARY & MICHAIL HANDOFF BRIEF
 # ============================================================
 def generate_handoff_brief(session_id: str, user_profile: dict) -> str:
-    """
-    Generate a structured briefing for Michail when a user requests consultation.
-    Summarises the full conversation, user profile, lead score, and key needs.
-    """
-    history = get_conversation_history(session_id, limit=20)
+    history   = get_conversation_history(session_id, limit=20)
     conv_text = "\n".join([f"User: {u}\nSophia: {a}" for u, a in history])
 
     name    = user_profile.get('name') or 'Unknown'
@@ -830,7 +790,6 @@ def generate_handoff_brief(session_id: str, user_profile: dict) -> str:
     lang    = user_profile.get('language', 'en')
     intent  = user_profile.get('last_intent', 'Unknown')
 
-    # Score interpretation
     if score >= 70:
         priority = "🔥 HOT — Contact within 24 hours"
     elif score >= 40:
@@ -884,14 +843,8 @@ def _recommend_action(score: int, intent: str, region: str) -> str:
 # UPGRADE B — PROACTIVE QUALIFICATION ENGINE
 # ============================================================
 def check_qualification_gaps(user_profile: dict, message_count: int) -> str | None:
-    """
-    After 3 messages, if Sophia still doesn't know direction/sector/goal,
-    return a proactive qualification prompt to inject into the system.
-    Returns None if user is already qualified.
-    """
     if message_count < 3:
         return None
-
     missing = []
     if not user_profile.get('region_interest'):
         missing.append("their direction (Western into China, or Chinese expanding West)")
@@ -899,7 +852,6 @@ def check_qualification_gaps(user_profile: dict, message_count: int) -> str | No
         missing.append("their industry or sector")
     if not user_profile.get('last_intent') or user_profile.get('last_intent') == 'general':
         missing.append("their specific goal")
-
     if len(missing) >= 2:
         return (
             f"\n⚡ PROACTIVE QUALIFICATION REQUIRED: After {message_count} messages, "
@@ -914,10 +866,6 @@ def check_qualification_gaps(user_profile: dict, message_count: int) -> str | No
 
 def check_escalation_trigger(user_profile: dict, message_count: int,
                                current_message: str) -> bool:
-    """
-    Returns True if Sophia should proactively escalate to Michail
-    (user going in circles, very high score, or explicit urgency signals).
-    """
     urgency_words = ["urgent", "asap", "immediately", "today", "deposit",
                      "already paid", "already transferred", "fraud", "scam",
                      "lost money", "emergency"]
@@ -928,25 +876,21 @@ def check_escalation_trigger(user_profile: dict, message_count: int,
     return False
 
 # ============================================================
-# UPGRADE A — CHAIN OF THOUGHT + UPGRADE C — PERSISTENT MEMORY
-# UPGRADE G embedded — LANGUAGE DETECTION
+# GROQ — MAIN AI FUNCTION
 # ============================================================
 def ask_groq(prompt: str, session_id: str = "anonymous",
              user_profile: dict = None, quick_action: str = None) -> tuple[str, list[str]]:
     if not GROQ_API_KEY:
         return "System temporarily unavailable. Please contact the CWC team directly.", []
 
-    # UPGRADE G: Detect language from current message
     detected_lang = detect_language(prompt)
     if detected_lang != "en" and user_profile:
         update_user_profile(session_id, language=detected_lang)
-        if user_profile:
-            user_profile['language'] = detected_lang
+        user_profile['language'] = detected_lang
 
     lang = (user_profile or {}).get('language', 'en') if user_profile else detected_lang
     lang_instruction = LANGUAGE_INSTRUCTIONS.get(lang, "")
 
-    # Build real message history (Upgrade 2 — already in place)
     raw_history = get_conversation_history(session_id, limit=8)
     messages = []
     for user_msg, ai_resp in raw_history:
@@ -957,7 +901,6 @@ def ask_groq(prompt: str, session_id: str = "anonymous",
     message_count = get_message_count(session_id)
     intent_data   = detect_intent(prompt)
 
-    # UPGRADE C: Build rich returning user context from stored profile
     returning_context = ""
     if user_profile and user_profile.get('is_returning'):
         name    = user_profile.get('name') or 'Unknown'
@@ -975,11 +918,8 @@ INSTRUCTION: Reference their previous interest naturally. Do NOT re-introduce yo
 If you know their name, use it. Advance the conversation — don't restart it.
 """
 
-    # UPGRADE B: Check if proactive qualification is needed
-    qualification_prompt = check_qualification_gaps(user_profile or {}, message_count)
-
-    # UPGRADE B: Check if escalation should be triggered
-    should_escalate = check_escalation_trigger(user_profile or {}, message_count, prompt)
+    qualification_prompt  = check_qualification_gaps(user_profile or {}, message_count)
+    should_escalate       = check_escalation_trigger(user_profile or {}, message_count, prompt)
     escalation_instruction = ""
     if should_escalate:
         escalation_instruction = (
@@ -1000,7 +940,6 @@ If you know their name, use it. Advance the conversation — don't restart it.
         }
         sector_context = sector_map.get(quick_action, "")
 
-    # UPGRADE A: Chain-of-Thought instruction
     cot_instruction = """
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CHAIN OF THOUGHT — THINK BEFORE ANSWERING
@@ -1115,8 +1054,8 @@ FIRST MESSAGE (no history, no quick action): Introduce as Sophia, ask direction.
         }
         res = requests.post(url, headers=headers, json=data, timeout=20)
         res.raise_for_status()
-        content    = res.json()
-        choice     = content["choices"][0]
+        content     = res.json()
+        choice      = content["choices"][0]
         message_obj = choice["message"]
 
         if choice.get("finish_reason") == "tool_calls" and message_obj.get("tool_calls"):
@@ -1146,7 +1085,6 @@ FIRST MESSAGE (no history, no quick action): Introduce as Sophia, ask direction.
         else:
             response_text = message_obj.get("content", "")
 
-        # Update profile, lead score, save conversation
         new_score = calculate_lead_score(user_profile or {}, prompt, intent_data['primary'])
         update_user_profile(session_id,
                             last_intent=intent_data['primary'],
@@ -1157,7 +1095,6 @@ FIRST MESSAGE (no history, no quick action): Introduce as Sophia, ask direction.
                           region=intent_data['region'],
                           intent=intent_data['primary'])
 
-        # UPGRADE C: After every 5 messages, generate a summary of the session
         if message_count > 0 and message_count % 5 == 0:
             _update_conversation_summary(session_id)
 
@@ -1170,10 +1107,6 @@ FIRST MESSAGE (no history, no quick action): Introduce as Sophia, ask direction.
 
 
 def _update_conversation_summary(session_id: str):
-    """
-    UPGRADE C: Periodically summarise the conversation into the user profile
-    so Sophia can reference it in future sessions.
-    """
     if not GROQ_API_KEY:
         return
     history = get_conversation_history(session_id, limit=10)
@@ -1228,17 +1161,15 @@ def send_email_brevo(to_email: str, subject: str, body: str,
 
 
 def send_lead_notification(lead: LeadCapture, session_id: str = None):
-    conn = sqlite3.connect('cwc_leads.db')
+    conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT * FROM user_profiles WHERE session_id = ?",
-              (lead.session_id,))
+    c.execute("SELECT * FROM user_profiles WHERE session_id = %s", (lead.session_id,))
     profile_row = c.fetchone()
     conn.close()
 
     lead_score  = profile_row[10] if profile_row else 0
     visit_count = profile_row[4]  if profile_row else 1
 
-    # Build user_profile dict for handoff brief
     user_profile = {}
     if profile_row:
         user_profile = {
@@ -1250,7 +1181,6 @@ def send_lead_notification(lead: LeadCapture, session_id: str = None):
             "conversation_summary": profile_row[13] if len(profile_row) > 13 else None,
         }
 
-    # UPGRADE F: Generate full handoff brief
     handoff = generate_handoff_brief(lead.session_id, user_profile)
 
     body = f"""
@@ -1283,42 +1213,41 @@ Reply:        mailto:{lead.email}
 
 
 def send_weekly_report():
-    conn = sqlite3.connect('cwc_leads.db')
+    conn = get_db()
     c = conn.cursor()
     week_ago = (datetime.now() - timedelta(days=7)).isoformat()
-    c.execute("SELECT COUNT(DISTINCT session_id) FROM conversations WHERE timestamp > ?", (week_ago,))
+    c.execute("SELECT COUNT(DISTINCT session_id) FROM conversations WHERE timestamp > %s", (week_ago,))
     unique_users = c.fetchone()[0]
-    c.execute("SELECT COUNT(*) FROM conversations WHERE timestamp > ?", (week_ago,))
+    c.execute("SELECT COUNT(*) FROM conversations WHERE timestamp > %s", (week_ago,))
     total_messages = c.fetchone()[0]
-    c.execute("SELECT COUNT(*) FROM leads WHERE timestamp > ?", (week_ago,))
+    c.execute("SELECT COUNT(*) FROM leads WHERE timestamp > %s", (week_ago,))
     new_leads = c.fetchone()[0]
-    c.execute("SELECT COUNT(*) FROM user_profiles WHERE visit_count > 1 AND last_seen > ?", (week_ago,))
+    c.execute("SELECT COUNT(*) FROM user_profiles WHERE visit_count > 1 AND last_seen > %s", (week_ago,))
     returning_users = c.fetchone()[0]
     c.execute("""SELECT intent, COUNT(*) as count FROM conversations
-                 WHERE timestamp > ? GROUP BY intent ORDER BY count DESC LIMIT 5""", (week_ago,))
+                 WHERE timestamp > %s GROUP BY intent ORDER BY count DESC LIMIT 5""", (week_ago,))
     top_intents = c.fetchall()
     c.execute("""SELECT region, COUNT(*) as count FROM conversations
-                 WHERE timestamp > ? AND region IS NOT NULL GROUP BY region ORDER BY count DESC LIMIT 5""", (week_ago,))
+                 WHERE timestamp > %s AND region IS NOT NULL GROUP BY region ORDER BY count DESC LIMIT 5""", (week_ago,))
     top_regions = c.fetchall()
     c.execute("""SELECT name, email, company, region, timestamp FROM leads
-                 WHERE timestamp > ? ORDER BY timestamp DESC LIMIT 10""", (week_ago,))
+                 WHERE timestamp > %s ORDER BY timestamp DESC LIMIT 10""", (week_ago,))
     recent_leads = c.fetchall()
     c.execute("""SELECT name, email, company, lead_score FROM user_profiles
                  WHERE lead_score >= 50 ORDER BY lead_score DESC LIMIT 5""")
     hot_leads = c.fetchall()
-    # Language breakdown
     c.execute("""SELECT language, COUNT(*) as count FROM user_profiles
-                 WHERE last_seen > ? GROUP BY language ORDER BY count DESC""", (week_ago,))
+                 WHERE last_seen > %s GROUP BY language ORDER BY count DESC""", (week_ago,))
     languages = c.fetchall()
     conn.close()
 
-    intent_text  = "\n".join([f"  • {i[0]}: {i[1]} queries" for i in top_intents]) or "  No data"
-    region_text  = "\n".join([f"  • {r[0]}: {r[1]} queries" for r in top_regions]) or "  No data"
-    leads_text   = "\n".join([f"  • {l[0]} ({l[2] or 'No company'}) - {l[1]} [{l[3] or '?'}]"
+    intent_text = "\n".join([f"  • {i[0]}: {i[1]} queries" for i in top_intents]) or "  No data"
+    region_text = "\n".join([f"  • {r[0]}: {r[1]} queries" for r in top_regions]) or "  No data"
+    leads_text  = "\n".join([f"  • {l[0]} ({l[2] or 'No company'}) - {l[1]} [{l[3] or '?'}]"
                               for l in recent_leads]) or "  No new leads"
-    hot_text     = "\n".join([f"  • {h[0]} ({h[2] or 'No company'}) - Score: {h[3]}/100 - {h[1]}"
+    hot_text    = "\n".join([f"  • {h[0]} ({h[2] or 'No company'}) - Score: {h[3]}/100 - {h[1]}"
                               for h in hot_leads if h[0]]) or "  No hot leads"
-    lang_text    = "\n".join([f"  • {l[0].upper()}: {l[1]} users" for l in languages]) or "  No data"
+    lang_text   = "\n".join([f"  • {l[0].upper()}: {l[1]} users" for l in languages]) or "  No data"
 
     body = f"""
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1382,6 +1311,7 @@ def health_check():
         "groq_configured":   bool(GROQ_API_KEY),
         "tavily_configured": bool(TAVILY_API_KEY),
         "brevo_configured":  bool(BREVO_API_KEY),
+        "db_configured":     bool(DATABASE_URL),
         "version":           "3.0.0",
     }
 
@@ -1404,7 +1334,6 @@ async def chat(req: ChatRequest, request: Request):
     if any(word in user_msg for word in ["stop", "shorter", "brief", "short", "too long"]):
         return {"response": "Got it — I'll keep answers brief. What would you like to know about China business opportunities?", "sources": []}
 
-    # UPGRADE H: Check cache for common factual queries
     if is_cacheable(req.message):
         cached = get_cached_response(req.message)
         if cached:
@@ -1417,7 +1346,6 @@ async def chat(req: ChatRequest, request: Request):
 
     reply, sources = ask_groq(req.message, req.session_id, user_profile)
 
-    # UPGRADE F: If consultation requested, also email handoff brief to Michail
     if is_consultation and user_profile.get('lead_score', 0) >= 20:
         brief = generate_handoff_brief(req.session_id, user_profile)
         send_email_brevo(
@@ -1426,7 +1354,6 @@ async def chat(req: ChatRequest, request: Request):
             body=brief
         )
 
-    # Auto-append CTA for high-intent keywords
     high_intent_words = ["price", "cost", "fee", "how much", "start", "begin",
                          "help me", "serious", "interested", "manufacturer",
                          "supplier", "factory", "invest"]
@@ -1434,7 +1361,6 @@ async def chat(req: ChatRequest, request: Request):
         if "consultation" not in reply.lower() and "button" not in reply.lower():
             reply += "\n\nTo discuss next steps, click the 'Speak with Michail' button above."
 
-    # Cache if appropriate
     if is_cacheable(req.message) and reply:
         set_cached_response(req.message, reply, sources)
 
@@ -1460,11 +1386,11 @@ def quick_action(req: QuickActionRequest):
 
 @app.post("/capture-lead")
 async def capture_lead(lead: LeadCapture, background_tasks: BackgroundTasks):
-    conn = sqlite3.connect('cwc_leads.db')
+    conn = get_db()
     c = conn.cursor()
     c.execute("""INSERT INTO leads
                  (name, email, company, region, session_id, source, timestamp, status)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
               (lead.name, lead.email, lead.company, lead.region,
                lead.session_id, lead.source, lead.timestamp, 'new'))
     conn.commit()
@@ -1479,7 +1405,7 @@ async def capture_lead(lead: LeadCapture, background_tasks: BackgroundTasks):
 def view_leads(password: str = None):
     if password != ADMIN_PASSWORD:
         return {"error": "Unauthorized"}
-    conn = sqlite3.connect('cwc_leads.db')
+    conn = get_db()
     c = conn.cursor()
     c.execute("SELECT * FROM leads ORDER BY timestamp DESC LIMIT 50")
     leads = c.fetchall()
@@ -1495,29 +1421,29 @@ def view_leads(password: str = None):
 def get_analytics(password: str = None, days: int = 7):
     if password != ADMIN_PASSWORD:
         return {"error": "Unauthorized"}
-    conn = sqlite3.connect('cwc_leads.db')
+    conn = get_db()
     c = conn.cursor()
     since = (datetime.now() - timedelta(days=days)).isoformat()
-    c.execute("SELECT COUNT(DISTINCT session_id) FROM conversations WHERE timestamp > ?", (since,))
+    c.execute("SELECT COUNT(DISTINCT session_id) FROM conversations WHERE timestamp > %s", (since,))
     unique_users = c.fetchone()[0]
-    c.execute("SELECT COUNT(*) FROM conversations WHERE timestamp > ?", (since,))
+    c.execute("SELECT COUNT(*) FROM conversations WHERE timestamp > %s", (since,))
     total_conversations = c.fetchone()[0]
-    c.execute("SELECT COUNT(*) FROM leads WHERE timestamp > ?", (since,))
+    c.execute("SELECT COUNT(*) FROM leads WHERE timestamp > %s", (since,))
     new_leads = c.fetchone()[0]
-    c.execute("SELECT COUNT(*) FROM user_profiles WHERE visit_count > 1 AND last_seen > ?", (since,))
+    c.execute("SELECT COUNT(*) FROM user_profiles WHERE visit_count > 1 AND last_seen > %s", (since,))
     returning_users = c.fetchone()[0]
     c.execute("""SELECT intent, COUNT(*) as count FROM conversations
-                 WHERE timestamp > ? GROUP BY intent ORDER BY count DESC LIMIT 5""", (since,))
+                 WHERE timestamp > %s GROUP BY intent ORDER BY count DESC LIMIT 5""", (since,))
     top_intents = [{"intent": r[0], "count": r[1]} for r in c.fetchall()]
     c.execute("""SELECT region, COUNT(*) as count FROM conversations
-                 WHERE timestamp > ? AND region IS NOT NULL GROUP BY region ORDER BY count DESC LIMIT 5""", (since,))
+                 WHERE timestamp > %s AND region IS NOT NULL GROUP BY region ORDER BY count DESC LIMIT 5""", (since,))
     top_regions = [{"region": r[0], "count": r[1]} for r in c.fetchall()]
     c.execute("""SELECT name, email, company, lead_score FROM user_profiles
                  WHERE lead_score >= 50 ORDER BY lead_score DESC LIMIT 10""")
     hot_leads = [{"name": r[0], "email": r[1], "company": r[2], "score": r[3]}
                  for r in c.fetchall() if r[0]]
     c.execute("""SELECT language, COUNT(*) as count FROM user_profiles
-                 WHERE last_seen > ? GROUP BY language ORDER BY count DESC""", (since,))
+                 WHERE last_seen > %s GROUP BY language ORDER BY count DESC""", (since,))
     languages = [{"language": r[0], "count": r[1]} for r in c.fetchall()]
     conn.close()
     return {
@@ -1553,41 +1479,27 @@ def test_email(password: str = None):
             if success else {"error": "Email failed"})
 
 
-# UPGRADE D — Live News API Endpoint
 @app.get("/api/news")
 def get_news():
-    """
-    Returns real China business news from RSS feeds.
-    Frontend can call this to show live news in the widget.
-    Updates every 2 hours automatically.
-    """
     news = fetch_china_news()
     return {"news": news, "count": len(news),
             "cached_until": (_news_cache["fetched_at"] + timedelta(hours=2)).isoformat()
             if _news_cache["fetched_at"] else None}
 
 
-# UPGRADE E — Company Lookup API Endpoint
 @app.get("/api/verify-company")
 async def verify_company(name: str, password: str = None):
-    """
-    Preliminary free lookup of a Chinese company.
-    Can be called by the widget when user types a company name in verify flow.
-    No password needed for basic lookup (public data only).
-    """
     if not name or len(name.strip()) < 2:
         return {"error": "Company name required"}
     result = lookup_chinese_company(name.strip())
     return result
 
 
-# PUBLIC API (for other AIs)
 @app.get("/api/sophia")
 async def sophia_public_api(q: str, source: str = "external_ai"):
     if not q or len(q.strip()) < 3:
         return {"error": "Query parameter 'q' is required"}
 
-    # Check cache first
     if is_cacheable(q):
         cached = get_cached_response(q)
         if cached:
@@ -1625,7 +1537,6 @@ End with: "For professional guidance, visit chinawestconnector.com or ask Sophia
     }
 
 
-# llms.txt — AI crawler discovery
 @app.get("/llms.txt", response_class=PlainTextResponse)
 def llms_txt():
     return """# China West Connector (CWC) — AI Intelligence Layer
