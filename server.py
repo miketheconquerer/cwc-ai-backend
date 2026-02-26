@@ -564,9 +564,12 @@ def fetch_china_news() -> list[dict]:
                 date_match = re.search(r'<pubDate>(.*?)</pubDate>', block)
                 date = date_match.group(1).strip()[:16] if date_match else ""
 
-                # Filter out non-China-business stories
-                skip_keywords = ["ukraine", "russia", "greenland", "denmark",
-                                 "epstein", "nato", "israel", "gaza", "afghanistan"]
+                # Filter out clearly non-China stories
+                skip_keywords = [
+                    "ukraine", "russia", "greenland", "denmark", "epstein",
+                    "nato", "israel", "gaza", "afghanistan", "pornographic",
+                    "deepfake",
+                ]
                 if any(kw in title.lower() for kw in skip_keywords):
                     continue
 
