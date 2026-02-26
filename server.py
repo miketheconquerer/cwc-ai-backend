@@ -527,49 +527,70 @@ def fetch_china_news() -> list[dict]:
         return _news_cache["items"]
 
     feeds = [
-        # Reuters China business RSS
-        "https://feeds.reuters.com/reuters/CNbusinessNews",
-        # SCMP business RSS
-        "https://www.scmp.com/rss/5/feed",
-        # Caixin Global
+        "https://www.scmp.com/rss/2/feed",
+        "https://www.scmp.com/rss/4/feed",
         "https://www.caixinglobal.com/rss/latest-stories.xml",
+        "https://www.chinadaily.com.cn/rss/bizchina_rss.xml",
+        "https://www.xinhuanet.com/english/rss/financerss.xml",
     ]
 
     items = []
     for feed_url in feeds:
         try:
             res = requests.get(feed_url, timeout=8,
-                               headers={"User-Agent": "CWC-Sophia/3.0"})
+                               headers={"User-Agent": "Mozilla/5.0 CWC-Sophia/3.0"})
             if res.status_code != 200:
                 continue
-            # Parse RSS with regex (no library needed)
-            titles = re.findall(r'<title><!\[CDATA\[(.*?)\]\]></title>|<title>(.*?)</title>',
-                                res.text, re.DOTALL)
-            links  = re.findall(r'<link>(https?://[^<]+)</link>', res.text)
-            dates  = re.findall(r'<pubDate>(.*?)</pubDate>', res.text)
 
-            for i, title_match in enumerate(titles[1:6]):  # skip feed title, take 5 items
-                title = (title_match[0] or title_match[1]).strip()
+            # Parse each <item> block individually — fixes title/URL mismatch
+            item_blocks = re.findall(r'<item[^>]*>(.*?)</item>', res.text, re.DOTALL)
+
+            for block in item_blocks[:5]:
+                title_match = re.search(
+                    r'<title><!\[CDATA\[(.*?)\]\]></title>|<title>(.*?)</title>',
+                    block, re.DOTALL)
+                if not title_match:
+                    continue
+                title = (title_match.group(1) or title_match.group(2) or "").strip()
+                title = re.sub(r'<[^>]+>', '', title).strip()
                 if not title or len(title) < 10:
                     continue
-                link = links[i] if i < len(links) else ""
-                date = dates[i] if i < len(dates) else ""
-                # Classify category from title keywords
-                category = "Business"
-                if any(w in title.lower() for w in ["trade", "tariff", "export", "import"]):
+
+                link_match = re.search(r'<link>(https?://[^<]+)</link>', block)
+                if not link_match:
+                    link_match = re.search(r'<guid[^>]*>(https?://[^<]+)</guid>', block)
+                link = link_match.group(1).strip() if link_match else feed_url
+
+                date_match = re.search(r'<pubDate>(.*?)</pubDate>', block)
+                date = date_match.group(1).strip()[:16] if date_match else ""
+
+                # Filter out non-China-business stories
+                skip_keywords = ["ukraine", "russia", "greenland", "denmark",
+                                 "epstein", "nato", "israel", "gaza", "afghanistan"]
+                if any(kw in title.lower() for kw in skip_keywords):
+                    continue
+
+                category = "China Business"
+                if any(w in title.lower() for w in ["trade", "tariff", "export", "import", "wto"]):
                     category = "Trade"
-                elif any(w in title.lower() for w in ["invest", "fdi", "fund", "deal"]):
+                elif any(w in title.lower() for w in ["invest", "fdi", "fund", "deal", "acquisition"]):
                     category = "Investment"
-                elif any(w in title.lower() for w in ["policy", "regulat", "law", "rule"]):
+                elif any(w in title.lower() for w in ["policy", "regulat", "law", "rule", "government"]):
                     category = "Policy"
-                elif any(w in title.lower() for w in ["tech", "ai", "robot", "digital"]):
+                elif any(w in title.lower() for w in ["tech", "ai", "robot", "digital", "semiconductor"]):
                     category = "Technology"
-                elif any(w in title.lower() for w in ["energy", "solar", "ev", "battery"]):
+                elif any(w in title.lower() for w in ["energy", "solar", "ev", "battery", "green"]):
                     category = "Energy"
+                elif any(w in title.lower() for w in ["pharma", "biotech", "health", "medical"]):
+                    category = "Biotech"
+                elif any(w in title.lower() for w in ["ship", "freight", "logistics", "port", "supply"]):
+                    category = "Logistics"
+
                 items.append({
                     "title": title, "url": link,
-                    "category": category, "date": date[:16]
+                    "category": category, "date": date
                 })
+
             if len(items) >= 8:
                 break
         except Exception as e:
