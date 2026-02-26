@@ -5,8 +5,6 @@ import requests
 import os
 import sqlite3
 import json
-import smtplib
-from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import asyncio
@@ -148,8 +146,8 @@ Week of {week_ago[:10]} to {datetime.now().strftime('%Y-%m-%d')}
 {leads_text}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📈 Dashboard: https://cwc-ai-backend.onrender.com/analytics?password=your-secret-password
-📊 Leads: https://cwc-ai-backend.onrender.com/leads?password=your-secret-password
+📈 Dashboard: https://cwc-ai-backend.onrender.com/analytics?password={ADMIN_PASSWORD}
+📊 Leads: https://cwc-ai-backend.onrender.com/leads?password={ADMIN_PASSWORD}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 This is an automated weekly report from your CWC AI Assistant.
@@ -182,8 +180,6 @@ origins = [
     "http://localhost:8000",
     "http://localhost:3000",
     "https://localhost",
-    "null",
-    "*"
 ]
 
 app.add_middleware(
@@ -197,6 +193,7 @@ app.add_middleware(
 # ---- API keys ----
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 
 # ---- Database Setup ----
 def init_db():
@@ -264,7 +261,7 @@ class QuickActionRequest(BaseModel):
     session_id: str = "anonymous"
 
 # ---- User Profile Functions ----
-def get_or_create_user_profile(session_id: str) -> dict:
+def get_or_create_user_profile(session_id: str, new_session: bool = False) -> dict:
     conn = sqlite3.connect('cwc_leads.db')
     c = conn.cursor()
     
@@ -272,17 +269,23 @@ def get_or_create_user_profile(session_id: str) -> dict:
     profile = c.fetchone()
     
     if profile:
-        c.execute("""UPDATE user_profiles 
-                     SET last_seen = ?, visit_count = visit_count + 1 
-                     WHERE session_id = ?""", 
-                  (datetime.now(), session_id))
+        if new_session:
+            c.execute("""UPDATE user_profiles 
+                         SET last_seen = ?, visit_count = visit_count + 1 
+                         WHERE session_id = ?""", 
+                      (datetime.now(), session_id))
+        else:
+            c.execute("""UPDATE user_profiles 
+                         SET last_seen = ?
+                         WHERE session_id = ?""", 
+                      (datetime.now(), session_id))
         conn.commit()
         
         user_profile = {
             "session_id": profile[1],
             "first_seen": profile[2],
             "last_seen": profile[3],
-            "visit_count": profile[4] + 1,
+            "visit_count": profile[4] + (1 if new_session else 0),
             "name": profile[5],
             "email": profile[6],
             "company": profile[7],
@@ -807,8 +810,8 @@ def send_lead_notification(lead: LeadCapture):
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-📈 Dashboard: https://cwc-ai-backend.onrender.com/analytics?password=your-secret-password
-📊 Leads: https://cwc-ai-backend.onrender.com/leads?password=your-secret-password
+📈 Dashboard: https://cwc-ai-backend.onrender.com/analytics?password={ADMIN_PASSWORD}
+📊 Leads: https://cwc-ai-backend.onrender.com/leads?password={ADMIN_PASSWORD}
 
 Reply to this lead: mailto:{lead.email}
 
@@ -834,6 +837,12 @@ def health_check():
 @app.get("/")
 def root():
     return {"message": "CWC AI backend running"}
+
+@app.post("/new-session")
+def new_session(req: ChatRequest):
+    """Called once per page load by the frontend to register a new visit."""
+    get_or_create_user_profile(req.session_id, new_session=True)
+    return {"status": "session registered"}
 
 @app.post("/chat")
 def chat(req: ChatRequest):
@@ -965,7 +974,7 @@ async def capture_lead(lead: LeadCapture, background_tasks: BackgroundTasks):
 
 @app.get("/leads")
 def view_leads(password: str = None):
-    if password != "CwC$x7Km9#Lp2QvN@2026!Md":
+    if password != ADMIN_PASSWORD:
         return {"error": "Unauthorized"}
     
     conn = sqlite3.connect('cwc_leads.db')
@@ -990,7 +999,7 @@ def view_leads(password: str = None):
 
 @app.get("/analytics")
 def get_analytics(password: str = None, days: int = 7):
-    if password != "CwC$x7Km9#Lp2QvN@2026!Md":
+    if password != ADMIN_PASSWORD:
         return {"error": "Unauthorized"}
     
     conn = sqlite3.connect('cwc_leads.db')
@@ -1037,7 +1046,7 @@ def get_analytics(password: str = None, days: int = 7):
 
 @app.get("/trigger-report")
 def trigger_report(password: str = None):
-    if password != "CwC$x7Km9#Lp2QvN@2026!Md":
+    if password != ADMIN_PASSWORD:
         return {"error": "Unauthorized"}
     
     try:
@@ -1048,7 +1057,7 @@ def trigger_report(password: str = None):
 
 @app.get("/test-email")
 def test_email(password: str = None):
-    if password != "CwC$x7Km9#Lp2QvN@2026!Md":
+    if password != ADMIN_PASSWORD:
         return {"error": "Unauthorized"}
     
     success = send_email_brevo(
