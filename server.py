@@ -29,7 +29,6 @@ async def schedule_weekly_report():
     
     while scheduler_running:
         now = datetime.now()
-        # Calculate seconds until next Monday 9 AM
         days_until_monday = (7 - now.weekday()) % 7
         if days_until_monday == 0 and now.hour >= 9:
             days_until_monday = 7
@@ -39,7 +38,6 @@ async def schedule_weekly_report():
         
         await asyncio.sleep(seconds_until)
         
-        # Send the report
         try:
             send_weekly_report()
         except Exception as e:
@@ -88,48 +86,38 @@ def send_weekly_report():
     conn = sqlite3.connect('cwc_leads.db')
     c = conn.cursor()
     
-    # Get stats for last 7 days
     week_ago = (datetime.now() - timedelta(days=7)).isoformat()
     
-    # Total conversations
     c.execute("SELECT COUNT(DISTINCT session_id) FROM conversations WHERE timestamp > ?", (week_ago,))
     unique_users = c.fetchone()[0]
     
-    # Total messages
     c.execute("SELECT COUNT(*) FROM conversations WHERE timestamp > ?", (week_ago,))
     total_messages = c.fetchone()[0]
     
-    # New leads
     c.execute("SELECT COUNT(*) FROM leads WHERE timestamp > ?", (week_ago,))
     new_leads = c.fetchone()[0]
     
-    # Returning users
     c.execute("SELECT COUNT(*) FROM user_profiles WHERE visit_count > 1 AND last_seen > ?", (week_ago,))
     returning_users = c.fetchone()[0]
     
-    # Top intents
     c.execute("""SELECT intent, COUNT(*) as count FROM conversations 
                  WHERE timestamp > ? GROUP BY intent ORDER BY count DESC LIMIT 5""", (week_ago,))
     top_intents = c.fetchall()
     
-    # Top regions
     c.execute("""SELECT region, COUNT(*) as count FROM conversations 
                  WHERE timestamp > ? AND region IS NOT NULL GROUP BY region ORDER BY count DESC LIMIT 5""", (week_ago,))
     top_regions = c.fetchall()
     
-    # Recent leads details
     c.execute("""SELECT name, email, company, region, timestamp FROM leads 
                  WHERE timestamp > ? ORDER BY timestamp DESC LIMIT 10""", (week_ago,))
     recent_leads = c.fetchall()
     
-    # Hot leads (high score)
     c.execute("""SELECT name, email, company, lead_score FROM user_profiles 
                  WHERE lead_score >= 50 ORDER BY lead_score DESC LIMIT 5""")
     hot_leads = c.fetchall()
     
     conn.close()
     
-    # Build email
     intent_text = "\n".join([f"  • {i[0]}: {i[1]} queries" for i in top_intents]) if top_intents else "  No data"
     region_text = "\n".join([f"  • {r[0]}: {r[1]} queries" for r in top_regions]) if top_regions else "  No data"
     leads_text = "\n".join([f"  • {l[0]} ({l[2] or 'No company'}) - {l[1]} [{l[3] or 'No region'}]" for l in recent_leads]) if recent_leads else "  No new leads"
@@ -167,7 +155,6 @@ Week of {week_ago[:10]} to {datetime.now().strftime('%Y-%m-%d')}
 This is an automated weekly report from your CWC AI Assistant.
 """
     
-    # Send email via Brevo
     success = send_email_brevo(
         to_email=RECIPIENT_EMAIL,
         subject=f"📊 CWC AI Weekly Report - {unique_users} Users, {new_leads} Leads",
@@ -181,11 +168,8 @@ This is an automated weekly report from your CWC AI Assistant.
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Start background tasks on app startup"""
-    # Start the weekly report scheduler
     asyncio.create_task(schedule_weekly_report())
     yield
-    # Cleanup
     global scheduler_running
     scheduler_running = False
 
@@ -219,7 +203,6 @@ def init_db():
     conn = sqlite3.connect('cwc_leads.db')
     c = conn.cursor()
     
-    # Conversations table
     c.execute('''CREATE TABLE IF NOT EXISTS conversations
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   session_id TEXT,
@@ -231,7 +214,6 @@ def init_db():
                   region TEXT,
                   intent TEXT)''')
     
-    # Leads table
     c.execute('''CREATE TABLE IF NOT EXISTS leads
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   name TEXT,
@@ -243,7 +225,6 @@ def init_db():
                   timestamp TEXT,
                   status TEXT)''')
     
-    # User profiles table (for returning user memory)
     c.execute('''CREATE TABLE IF NOT EXISTS user_profiles
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   session_id TEXT UNIQUE,
@@ -277,9 +258,13 @@ class LeadCapture(BaseModel):
     source: str = "chat_widget"
     timestamp: str = ""
 
+# NEW: Quick action button model
+class QuickActionRequest(BaseModel):
+    action: str  # "robotics" | "energy" | "biotech" | "shipping" | "verify" | "market_entry"
+    session_id: str = "anonymous"
+
 # ---- User Profile Functions ----
 def get_or_create_user_profile(session_id: str) -> dict:
-    """Get existing user profile or create new one"""
     conn = sqlite3.connect('cwc_leads.db')
     c = conn.cursor()
     
@@ -287,7 +272,6 @@ def get_or_create_user_profile(session_id: str) -> dict:
     profile = c.fetchone()
     
     if profile:
-        # Update last seen and increment visit count
         c.execute("""UPDATE user_profiles 
                      SET last_seen = ?, visit_count = visit_count + 1 
                      WHERE session_id = ?""", 
@@ -309,7 +293,6 @@ def get_or_create_user_profile(session_id: str) -> dict:
             "is_returning": True
         }
     else:
-        # Create new profile
         c.execute("""INSERT INTO user_profiles 
                      (session_id, first_seen, last_seen, visit_count)
                      VALUES (?, ?, ?, 1)""", 
@@ -335,7 +318,6 @@ def get_or_create_user_profile(session_id: str) -> dict:
     return user_profile
 
 def update_user_profile(session_id: str, **kwargs):
-    """Update user profile with new information"""
     conn = sqlite3.connect('cwc_leads.db')
     c = conn.cursor()
     
@@ -358,7 +340,6 @@ def update_user_profile(session_id: str, **kwargs):
     conn.close()
 
 def calculate_lead_score(user_profile: dict, message: str, intent: str) -> int:
-    """Calculate lead score based on user behavior"""
     score = user_profile.get('lead_score', 0)
     
     intent_scores = {
@@ -478,10 +459,77 @@ def search_web(query: str) -> str:
         print("Tavily search error:", e)
         return ""
 
-# ---- Groq AI ----
-def ask_groq(prompt: str, session_id: str = "anonymous", user_profile: dict = None) -> str:
+# ---- Quick Action Button Opening Messages ----
+# These are the scripted openers for each of the 6 Quick Action buttons.
+# They are returned instantly (no LLM call needed) to start the conversation flow.
+QUICK_ACTION_OPENERS = {
+    "robotics": (
+        "Great choice — China is currently the world's largest industrial robotics market, "
+        "producing over 70% of global units.\n\n"
+        "Before I connect you with the right intelligence, let me ask:\n\n"
+        "Are you looking to **SOURCE** robotics technology from China for your business, "
+        "or are you a Chinese robotics company seeking **Western partners or markets**?"
+    ),
+    "energy": (
+        "Energy is one of the most dynamic China-West collaboration areas right now. "
+        "China accounts for over 80% of global solar panel production and leads in battery storage technology.\n\n"
+        "To point you in the right direction — what's your energy focus?\n\n"
+        "① Solar PV — panels, inverters, mounting systems\n"
+        "② Battery storage — utility-scale or commercial/industrial\n"
+        "③ EV charging infrastructure\n"
+        "④ Wind energy components\n"
+        "⑤ Green hydrogen technology\n"
+        "⑥ Energy trading or investment opportunities"
+    ),
+    "biotech": (
+        "China's biotech sector is experiencing extraordinary growth — it is now the world's "
+        "second-largest pharmaceutical market and a global leader in biosimilar manufacturing "
+        "and genomic research.\n\n"
+        "What brings you to the Biotech section?\n\n"
+        "① Western pharma/biotech seeking Chinese manufacturing partners (CMO/CDMO)\n"
+        "② Looking to license or access Chinese biotech innovations for Western markets\n"
+        "③ Entering the Chinese healthcare/pharma market with a Western product\n"
+        "④ Seeking R&D or clinical trial partnerships in China\n"
+        "⑤ Medical devices (see also our Medical section)"
+    ),
+    "shipping": (
+        "China handles over 30% of global container shipping volume — getting your logistics "
+        "right is as important as finding the right supplier.\n\n"
+        "What's your shipping challenge?\n\n"
+        "① Moving goods FROM China to my country (import logistics)\n"
+        "② Shipping products TO China (export logistics)\n"
+        "③ Optimising an existing supply chain — reduce costs or lead times\n"
+        "④ Customs clearance, documentation, or compliance\n"
+        "⑤ Maritime technology partnerships with Chinese shipbuilders"
+    ),
+    "verify": (
+        "Smart move — verifying a Chinese company before signing contracts or transferring "
+        "funds is one of the most important steps in any China business engagement. "
+        "CWC's Due Diligence service has protected clients from fraudulent suppliers, "
+        "shell companies, and misrepresented certifications.\n\n"
+        "What do you need to verify?\n\n"
+        "① A Chinese supplier or manufacturer (before placing an order)\n"
+        "② A Chinese business partner or JV candidate\n"
+        "③ A Chinese investment target\n"
+        "④ Certificates or documents a Chinese company has provided (business licence, ISO, CE, etc.)\n"
+        "⑤ A Chinese individual's background and credentials"
+    ),
+    "market_entry": (
+        "Market entry — whether into China or into Western markets using Chinese partnerships "
+        "— is CWC's core expertise. We've guided companies from initial concept to operational "
+        "presence in both directions.\n\n"
+        "First, help me understand your direction:\n\n"
+        "① We are a **Western company** looking to enter the Chinese market\n"
+        "② We are a **Chinese company** looking to expand into Western markets\n"
+        "③ We're considering both — bilateral partnership or trade\n"
+        "④ We're not sure yet — we want to explore the opportunity"
+    )
+}
+
+# ---- UPGRADED Groq AI with Agentic System Prompt ----
+def ask_groq(prompt: str, session_id: str = "anonymous", user_profile: dict = None, quick_action: str = None) -> str:
     if not GROQ_API_KEY:
-        return "System temporarily unavailable. Contact the team at CWC."
+        return "System temporarily unavailable. Please contact the CWC team directly."
 
     history = get_conversation_history(session_id)
     context = ""
@@ -498,119 +546,199 @@ def ask_groq(prompt: str, session_id: str = "anonymous", user_profile: dict = No
         last_intent = user_profile.get('last_intent', '')
         region = user_profile.get('region_interest', '')
         name = user_profile.get('name', '')
-        
         returning_context = f"""
 RETURNING USER DETECTED:
 - Visit count: {visit_count}
 - Last visit intent: {last_intent}
 - Region of interest: {region}
 - Known name: {name if name else 'Unknown'}
-- You SHOULD acknowledge their return warmly if this is their 2nd+ visit
+- Acknowledge their return warmly. No need for full introduction.
 """
 
+    # Sector-specific intelligence injected when a Quick Action was triggered
+    sector_context = ""
+    if quick_action:
+        sector_contexts = {
+            "robotics": """
+ACTIVE SECTOR: ROBOTICS
+The user clicked the Robotics button. Your first priority is to determine:
+- Are they WESTERN (sourcing Chinese robotics) or CHINESE (seeking Western markets)?
+Key CWC services for this sector: supplier sourcing, factory audits, CE certification navigation, 
+distribution partner matching, IP protection in supply agreements.
+For Western buyers: highlight verified manufacturer network, quality benchmarking, on-site audit capability.
+For Chinese sellers: highlight European distribution networks, CE/regulatory guidance, market entry strategy.
+""",
+            "energy": """
+ACTIVE SECTOR: ENERGY
+The user clicked the Energy button. Sub-sectors: solar PV, battery storage, EV infrastructure, wind, hydrogen, energy investment/trading.
+Key CWC services: Tier-1 manufacturer sourcing, bankability assessment, logistics coordination, 
+JV structuring for battery tech, government partnership access (Hainan FTP, Chengdu tech zones).
+For solar: ask about project scale (MW) and geography — these determine manufacturer fit.
+For battery/investment: ask about deal structure preference (equity, JV, offtake).
+""",
+            "biotech": """
+ACTIVE SECTOR: BIOTECH
+The user clicked the Biotech button. Sub-sectors: CMO/CDMO manufacturing, pharma market entry into China, 
+biotech licensing, R&D partnerships, medical devices.
+Key CWC services: CDMO shortlisting, tech transfer IP protection, NMPA registration strategy, 
+distributor matching, Hainan FTP accelerated regulatory pathway access.
+For CDMO: ask about molecule type, development stage, GMP requirements, batch volume.
+For China market entry: explain NMPA pathway, NRDL inclusion strategy, JV vs. WFOE structure.
+""",
+            "shipping": """
+ACTIVE SECTOR: SHIPPING & LOGISTICS
+The user clicked the Shipping button. Sub-sectors: import/export freight, supply chain optimisation, 
+customs compliance, maritime technology partnerships.
+Key CWC services: China Logistics Simplified — vetted forwarder network, customs brokerage, 
+Shenzhen-Greece corridor expertise, incoterms advisory, cost benchmarking (typically 10-25% savings identified).
+For maritime tech: highlight Chinese shipyard partnership facilitation, IP disclosure protection strategy.
+Ask about: shipping volume (FCL/LCL/air), frequency, current pain points.
+""",
+            "verify": """
+ACTIVE SECTOR: DUE DILIGENCE / VERIFY
+The user clicked the Verify button. This is URGENT territory — they likely have a real decision pending.
+Key CWC services: SAMR business registration verification, factory existence confirmation, 
+manufacturing capability assessment, export history check, certificate authentication (ISO, CE, business licence).
+Standard turnaround: 5-7 business days for full report. Certificate verification: 48 hours.
+URGENCY RULE: If they mention a large deposit or imminent payment — flag as HIGH PRIORITY and push 
+immediately toward collecting company name, location, and their email for same-day team response.
+Always ask: company name, location, what they were offered/shown.
+""",
+            "market_entry": """
+ACTIVE SECTOR: MARKET ENTRY
+The user clicked the Market Entry button. This is the highest-value, most strategic flow.
+First determine direction: Western into China, or Chinese expanding West.
+
+FOR WESTERN INTO CHINA:
+- Ask: product/service category, B2B or B2C, timeline, and primary goal (sales, sourcing, JV, or manufacturing base)
+- Deliver a phased roadmap: regulatory → partner selection → launch
+- Highlight: government partnerships (Chengdu, Hainan FTP), CWC's on-ground liaison network
+
+FOR CHINESE INTO WEST:
+- Ask: technology/product type, target countries, deal structure preference (distribution, JV, direct entity, M&A)
+- Highlight: regulatory navigation (EU AI Act, GDPR, CE), reputation strategy for Chinese brands, 
+  CWC networks in Europe, Africa, Middle East, LATAM, Central Asia
+- Be candid about regulatory complexity where relevant (e.g., surveillance tech in EU)
+
+Always end with a tailored roadmap summary and CTA to speak with Michail.
+"""
+        }
+        sector_context = sector_contexts.get(quick_action, "")
+
     system_prompt = f"""
-You are Sophia — the official AI assistant for China West Connector (CWC).
+You are Sophia — the official AI Intelligence assistant for China West Connector (CWC).
 
 CURRENT DATE: February 2026
 
-USER INTENT: {intent_data['primary']}
-REGION: {intent_data['region'] or 'Unknown'}
+USER INTENT DETECTED: {intent_data['primary']}
+REGION DETECTED: {intent_data['region'] or 'Unknown'}
+ACTIVE QUICK ACTION: {quick_action or 'None — organic conversation'}
 {returning_context}
+{sector_context}
 
-CONVERSATION MEMORY: {context}
+CONVERSATION HISTORY: {context}
 
-CRITICAL REGIONAL INTELLIGENCE PROTOCOL:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+YOUR CORE MISSION — AGENTIC BEHAVIOUR
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+You are NOT a passive Q&A bot. You are an active business intelligence advisor.
+Your job is to:
+1. QUALIFY the user (understand their direction, industry, goal, and urgency)
+2. PERSONALISE your response to their specific situation
+3. RECOMMEND the most relevant CWC service with a clear reason why
+4. END every response with a concrete next step — never a dead end
 
-Before discussing ANY specific regions, you must FIRST determine:
-1. Is the user Chinese (asking in Chinese language, mentions Chinese companies expanding, or references being in China)?
-2. Or is the user foreign/Western (English/other languages, looking to enter China)?
+QUALIFICATION PRIORITY (if not yet known, always ask first):
+① Are they Western (looking into China) or Chinese (expanding West)?
+② What industry/sector?
+③ What is their specific goal — sourcing, investment, legal, partnerships, market entry?
+④ What is their urgency/timeline?
 
-IF USER IS CHINESE:
-- Focus on: Africa, Middle East, LATAM, Europe, Central Asia as EXPANSION destinations
-- Frame as: "Where would you like to expand? We bridge Chinese enterprises with these markets"
-- Ask: "Are you looking to expand overseas? Which region interests your organization?"
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ABOUT CWC
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+China West Connector is a premier strategic bridge between Chinese and Western businesses.
+Founded by Michail Digkas — international business lawyer with 10+ years of direct China experience.
+Part of G.P.A. ecosystem: 147+ years combined experience, 2,700+ active projects, 50+ countries.
 
-IF USER IS FOREIGN/WESTERN:
-- Focus on: CHINA as the primary market of interest
-- Frame as: "How can we help you navigate the Chinese market?"
-- Ask about their China goals: sourcing, market entry, partnerships, compliance
-
-NEVER assume Africa or any region without first understanding user origin and intent.
-
-GEOGRAPHIC FOCUS:
-- "The West" includes: Europe, North America, Latin America (LATAM), Africa, Middle East, Central Asia
-- For Chinese users: These are expansion targets
-- For foreign users: China is the destination, these are their home markets
-
-REGIONAL INTELLIGENCE (apply based on user origin):
-- AFRICA: Mining partnerships, infrastructure financing, tech transfer, agri-processing (for Chinese expansion)
-- MIDDLE EAST: Energy partnerships, Belt & Road, fintech bridges (for Chinese expansion)
-- LATAM: Agri-tech, EV supply chain, critical minerals (for Chinese expansion)
-- CENTRAL ASIA: Energy corridors, logistics hubs (for Chinese expansion)
-- EUROPE: Green tech, automotive, luxury goods, compliance (for Chinese expansion OR foreign companies entering China)
-
-ABOUT CWC:
-- China West Connector bridges Chinese markets with Western businesses
-- Founded by Michail Digkas, a practicing international business lawyer with over a decade of experience in China
-- Part of G.P.A. ecosystem: 147+ years experience, 2700+ projects
+Government partnerships: Sichuan International Technical Transfer Center, Chengdu AI Association, 
+Tianfu International Technology Transformation Center, Hainan Free Trade Port, CISTEA.
 
 CWC CORE SERVICES:
-1. CONTRACT & LEGAL - Bilingual contracts, IP protection
-2. SUPPLIER DUE DILIGENCE - Factory audits, verification
-3. JOINT VENTURES - Strategic matching, negotiations
-4. FDI CONSULTING - Market entry, incentives, compliance
-5. LOGISTICS - Supply chain optimization
-6. LIAISON - On-ground China representation
+1. LEGAL SERVICES — bilingual contract drafting, IP protection, dispute resolution
+2. DUE DILIGENCE — factory audits, supplier verification, SAMR registration checks, certificate authentication
+3. B2B PARTNERSHIPS — strategic partner matching, JV structuring, negotiations
+4. FDI CONSULTING — market entry strategy, local incentives, entity setup, compliance
+5. CHINA LOGISTICS SIMPLIFIED — vetted freight forwarder network, customs brokerage, supply chain optimisation
+6. LIAISON & REPRESENTATION — on-ground China representation, government navigation, bilingual communication
 
-RESPONSE STRATEGY:
-- If returning user: Acknowledge their return warmly, reference previous topics if relevant
-- If high_intent_lead: Be consultative, ask qualifying questions, suggest speaking with the team
-- If consultation_request: Direct them to click the "Speak with Michail" button
-- If supplier_verification: Emphasize CWC's audit capabilities
-- If information_gathering: Provide value but always suggest consultation for specifics
+CWC REGIONAL NETWORKS:
+Western companies entering China | Chinese companies expanding to:
+Europe • Africa • Middle East • Latin America • Central Asia • North America
 
-STYLE:
-Max 2 short paragraphs (150 words preferred, never over 180).
-Clear, confident, professional tone.
-Concise and practical.
-No hype, no buzzwords, no exaggerated claims.
-Avoid sounding like marketing.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CRITICAL DIRECTIONAL INTELLIGENCE RULE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+NEVER assume direction without asking.
 
-CORE POSITIONING:
-Present CWC as a strategic bridge between foreign companies and Chinese enterprises.
-Emphasize years of direct China experience, institutional access, and cross-border execution ability.
+IF USER IS WESTERN / FOREIGN:
+- China is the destination market or sourcing hub
+- Focus on: market entry, supplier sourcing, due diligence, legal compliance, China logistics
+- Frame: "How can we help you navigate China?"
 
-QUALIFICATIONS (when asked about credibility):
-- Practicing international lawyer associated with leading firms in China and Greece
-- Director of Foreign-Related Projects at Sichuan Technical Exchange Center (STEC)
-- Represents both foreign companies in China and Chinese companies expanding overseas
-- Over a decade of direct experience in China
-- Facilitates real communication with Chinese companies and local authorities
+IF USER IS CHINESE:
+- Africa, Middle East, LATAM, Europe, Central Asia are expansion targets
+- Focus on: partner matching, regulatory navigation in target market, reputation strategy, entity setup abroad
+- Frame: "Which Western market are you targeting, and what structure are you considering?"
+- If user writes in Chinese: respond in Chinese, flag internally as high-priority Chinese company lead
 
-PERSONALIZATION:
-Adapt emphasis based on user intent:
-- Investors → access, structuring, deal flow
-- Manufacturers → sourcing, factories, compliance
-- Institutions → coordination and government navigation
-- Entrepreneurs → partnerships and execution clarity
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RESPONSE STRATEGY BY INTENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+high_intent_lead → Ask 1-2 qualifying questions, then recommend specific CWC service + push to Michail button
+consultation_request → Validate their request, confirm CWC can help, direct to "Speak with Michail" button
+supplier_verification → Treat as URGENT. Ask for company name + what's at risk. Push to team contact immediately
+information_gathering → Provide real value (specific, credible insight) then offer a deeper consultation
+returning_user → Acknowledge warmly, reference their previous topic if known, advance the conversation
 
-CONVERSION RULE:
-If the user shows serious business intent or asks about consultations:
-ALWAYS direct them to click the "Speak with Michail" button at the top of the chat widget.
-Keep it subtle and professional.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STYLE & FORMAT RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- Maximum 180 words per response (150 preferred)
+- 2-3 short paragraphs OR a short paragraph + a numbered/bulleted list
+- Professional, confident, commercially sharp tone
+- No hype. No buzzwords. No exaggerated claims.
+- Never sound like marketing copy — sound like a senior advisor
+- Use specific numbers and facts where relevant (adds credibility)
+- Adapt language register: formal for legal/finance queries, warmer for exploratory conversations
 
-CRITICAL - CONSULTATION INSTRUCTIONS:
-NEVER mention "calendar link", "click on this link", or "follow this link" - these links DO NOT EXIST.
-When suggesting a consultation, ONLY say: "To arrange a consultation, click the 'Speak with Michail' button above."
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CONSULTATION & ESCALATION RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- NEVER mention calendar links, clickable links, or external URLs — they do not exist in this widget
+- When suggesting a consultation, ONLY say: "To arrange a consultation, click the 'Speak with Michail' button above."
+- Push toward Michail when: user shows serious intent, asks about pricing, mentions a specific deal, 
+  or their need is too complex for the bot to resolve alone
+- For URGENT due diligence cases (large deposit at risk, imminent payment): escalate immediately every time
 
-FIRST MESSAGE PROTOCOL:
-If this is the first message (no conversation history):
-"Hello! I'm Sophia, the CWC AI intelligence. I'm here to help you navigate cross-border business opportunities with China.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FIRST MESSAGE PROTOCOL (no history, no quick action)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+If this is the very first message and no quick action was triggered, introduce as:
+"Hello! I'm Sophia, CWC's AI intelligence advisor. I'm here to help you navigate cross-border 
+business opportunities with China.
 
-To point you in the right direction, may I ask: Are you currently based in China looking to expand internationally, or are you looking to enter the Chinese market?"
+To point you in the right direction — are you currently based in China looking to expand internationally, 
+or are you looking to enter or source from the Chinese market?"
 
-SAFETY:
-No unrealistic promises. No guarantees of outcomes. Stay credible and grounded.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SAFETY & CREDIBILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- No unrealistic promises or guaranteed outcomes
+- If asked about regulatory matters (EU AI Act, GDPR, NMPA, etc.) — give accurate general guidance, 
+  then recommend a proper legal consultation
+- Stay grounded, specific, and honest
+- Never invent facts, contacts, or capabilities CWC does not have
 """
 
     url = "https://api.groq.com/openai/v1/chat/completions"
@@ -650,13 +778,10 @@ No unrealistic promises. No guarantees of outcomes. Stay credible and grounded.
         return response_text
     except Exception as e:
         print("Groq error:", e)
-        return "I apologize, but I'm having trouble connecting. Please reach out to the team at CWC."
+        return "I apologise, but I'm having trouble connecting right now. Please reach out to the CWC team directly."
 
 # ---- Email Notification ----
 def send_lead_notification(lead: LeadCapture):
-    """Send email notification for new lead using Brevo"""
-    
-    # Get user profile for lead score
     conn = sqlite3.connect('cwc_leads.db')
     c = conn.cursor()
     c.execute("SELECT lead_score, visit_count FROM user_profiles WHERE session_id = ?", (lead.session_id,))
@@ -714,11 +839,10 @@ def root():
 def chat(req: ChatRequest):
     user_msg = req.message.lower()
     
-    # Get or create user profile (for returning user detection)
     user_profile = get_or_create_user_profile(req.session_id)
     
     if any(word in user_msg for word in ["stop", "shorter", "brief", "short", "too long"]):
-        return {"response": "Got it. I'll keep my answers brief. What would you like to know about China business opportunities?"}
+        return {"response": "Got it — I'll keep answers brief. What would you like to know about China business opportunities?"}
     
     consultation_keywords = ["book", "consultation", "call", "schedule", "meet", "contact", "michail", "digkas"]
     is_consultation_request = any(kw in user_msg for kw in consultation_keywords)
@@ -731,41 +855,89 @@ def chat(req: ChatRequest):
     if live_data:
         context = f"\n\nRelevant market data:\n{live_data}\n"
     
-    # Check if this is first conversation
     history = get_conversation_history(req.session_id)
-    is_first_message = len(history) <= 1  # Current message just saved, so <=1 means first real exchange
-    
+    is_first_message = len(history) <= 1
+
     returning_hint = ""
     if user_profile.get('is_returning') and user_profile.get('visit_count', 1) > 1:
-        returning_hint = "\n(Note: This is a returning user - acknowledge their return warmly, no need for introduction)"
+        returning_hint = "\n(RETURNING USER — acknowledge their return warmly, no need for introduction)"
     elif is_first_message:
-        returning_hint = "\n(Note: This is the FIRST message - you MUST introduce yourself as Sophia and ask about their origin/China direction)"
+        returning_hint = "\n(FIRST MESSAGE — introduce yourself as Sophia and ask about their direction: Western into China, or Chinese expanding West)"
     else:
-        returning_hint = "\n(Note: Continue conversation naturally, no need for introduction)"
+        returning_hint = "\n(ONGOING CONVERSATION — continue naturally, no introduction needed)"
 
     final_prompt = f"""User question: {req.message}{context}
 
-Respond as Sophia, representing China West Connector.
-Be specific about CWC services. Reference expertise naturally WITHOUT repeating the founder's name excessively.
 {returning_hint}
 
-INTELLIGENCE GATHERING PRIORITY:
-If you don't know user's origin yet:
-- Ask if they are Chinese company expanding abroad OR foreign company entering China
-- This determines whether you discuss China opportunities vs. Africa/Middle East/LATAM/Europe opportunities
+Respond as Sophia, CWC's AI intelligence advisor.
+Be specific and commercially sharp. Reference CWC services naturally where relevant.
+If user shows buying intent or has a complex need, suggest clicking the "Speak with Michail" button above.
+Keep response concise and authoritative (150 words preferred, 180 max).
 
-If user shows buying intent or complex needs, suggest clicking the "Speak with Michail" button above.
-Keep response concise but authoritative (2-4 paragraphs max).
-
-IMPORTANT: Never mention calendar links or clickable links - they do not exist. Only refer to the "Speak with Michail" button."""
+IMPORTANT: Never mention calendar links or clickable links — they do not exist. 
+Only refer to the "Speak with Michail" button when escalating."""
 
     reply = ask_groq(final_prompt, req.session_id, user_profile)
     
-    if any(word in user_msg for word in ["price", "cost", "fee", "how much", "start", "begin", "help me", "serious", "interested", "manufacturer", "supplier", "factory"]):
+    # Auto-append CTA for high-intent keywords if not already present
+    high_intent_words = ["price", "cost", "fee", "how much", "start", "begin", "help me", 
+                         "serious", "interested", "manufacturer", "supplier", "factory", "invest"]
+    if any(word in user_msg for word in high_intent_words):
         if "consultation" not in reply.lower() and "button" not in reply.lower():
             reply += "\n\nTo discuss next steps, click the 'Speak with Michail' button above."
     
     return {"response": reply}
+
+
+# ---- NEW: Quick Action Button Endpoint ----
+@app.post("/quick-action")
+def quick_action(req: QuickActionRequest):
+    """
+    Called when a user clicks one of the 6 Quick Action buttons.
+    Returns the scripted opening message for that sector instantly,
+    then primes the AI with sector-specific context for follow-up messages.
+    
+    Valid actions: robotics | energy | biotech | shipping | verify | market_entry
+    
+    Frontend usage:
+    POST /quick-action  { "action": "robotics", "session_id": "abc123" }
+    → Returns { "response": "...", "action": "robotics" }
+    
+    Then all subsequent /chat calls from this session will carry sector context
+    because the opening message is saved to conversation history.
+    """
+    action = req.action.lower().strip()
+    
+    if action not in QUICK_ACTION_OPENERS:
+        return {
+            "response": "Hello! I'm Sophia, CWC's AI intelligence advisor. How can I help you with China-West business today?",
+            "action": "general"
+        }
+    
+    opening_message = QUICK_ACTION_OPENERS[action]
+    
+    # Save this as the opening bot message in conversation history
+    # so follow-up /chat calls have full context of what sector was triggered
+    save_conversation(
+        session_id=req.session_id,
+        user_msg=f"[Quick Action: {action}]",
+        ai_response=opening_message,
+        intent=action
+    )
+    
+    # Update user profile with sector interest
+    update_user_profile(
+        req.session_id,
+        last_intent=action,
+        topics_discussed=action
+    )
+    
+    return {
+        "response": opening_message,
+        "action": action
+    }
+
 
 @app.post("/capture-lead")
 async def capture_lead(lead: LeadCapture, background_tasks: BackgroundTasks):
@@ -779,7 +951,6 @@ async def capture_lead(lead: LeadCapture, background_tasks: BackgroundTasks):
     conn.commit()
     conn.close()
     
-    # Update user profile with lead info
     update_user_profile(
         lead.session_id,
         name=lead.name,
@@ -794,7 +965,6 @@ async def capture_lead(lead: LeadCapture, background_tasks: BackgroundTasks):
 
 @app.get("/leads")
 def view_leads(password: str = None):
-    """Simple lead dashboard - password protected"""
     if password != "CwC$x7Km9#Lp2QvN@2026!Md":
         return {"error": "Unauthorized"}
     
@@ -820,7 +990,6 @@ def view_leads(password: str = None):
 
 @app.get("/analytics")
 def get_analytics(password: str = None, days: int = 7):
-    """Get analytics data - password protected"""
     if password != "CwC$x7Km9#Lp2QvN@2026!Md":
         return {"error": "Unauthorized"}
     
@@ -829,33 +998,26 @@ def get_analytics(password: str = None, days: int = 7):
     
     since_date = (datetime.now() - timedelta(days=days)).isoformat()
     
-    # Unique users
     c.execute("SELECT COUNT(DISTINCT session_id) FROM conversations WHERE timestamp > ?", (since_date,))
     unique_users = c.fetchone()[0]
     
-    # Total conversations
     c.execute("SELECT COUNT(*) FROM conversations WHERE timestamp > ?", (since_date,))
     total_conversations = c.fetchone()[0]
     
-    # New leads
     c.execute("SELECT COUNT(*) FROM leads WHERE timestamp > ?", (since_date,))
     new_leads = c.fetchone()[0]
     
-    # Returning users
     c.execute("SELECT COUNT(*) FROM user_profiles WHERE visit_count > 1 AND last_seen > ?", (since_date,))
     returning_users = c.fetchone()[0]
     
-    # Top intents
     c.execute("""SELECT intent, COUNT(*) as count FROM conversations 
                  WHERE timestamp > ? GROUP BY intent ORDER BY count DESC LIMIT 5""", (since_date,))
     top_intents = [{"intent": r[0], "count": r[1]} for r in c.fetchall()]
     
-    # Top regions
     c.execute("""SELECT region, COUNT(*) as count FROM conversations 
                  WHERE timestamp > ? AND region IS NOT NULL GROUP BY region ORDER BY count DESC LIMIT 5""", (since_date,))
     top_regions = [{"region": r[0], "count": r[1]} for r in c.fetchall()]
     
-    # High score leads
     c.execute("""SELECT name, email, company, lead_score FROM user_profiles 
                  WHERE lead_score >= 50 ORDER BY lead_score DESC LIMIT 10""")
     hot_leads = [{"name": r[0], "email": r[1], "company": r[2], "score": r[3]} for r in c.fetchall() if r[0]]
@@ -875,7 +1037,6 @@ def get_analytics(password: str = None, days: int = 7):
 
 @app.get("/trigger-report")
 def trigger_report(password: str = None):
-    """Manually trigger weekly report - for testing"""
     if password != "CwC$x7Km9#Lp2QvN@2026!Md":
         return {"error": "Unauthorized"}
     
@@ -887,7 +1048,6 @@ def trigger_report(password: str = None):
 
 @app.get("/test-email")
 def test_email(password: str = None):
-    """Test email functionality"""
     if password != "CwC$x7Km9#Lp2QvN@2026!Md":
         return {"error": "Unauthorized"}
     
