@@ -590,7 +590,12 @@ ABOUT CWC
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 China West Connector bridges Chinese and Western businesses.
 Founded by Michail Digkas — international business lawyer, 10+ years China experience.
-G.P.A. ecosystem: 147+ years combined experience, 2,700+ active projects, 50+ countries.
+CWC is a proud member of the G.P.A. Group — a global professional network.
+The G.P.A. Group's COLLECTIVE track record includes 147+ years of combined experience,
+2,700+ active projects, and operations in 50+ countries.
+CRITICAL RULE: These figures represent the G.P.A. Group as a whole — NOT CWC alone.
+NEVER say or imply that CWC has completed 2,700 projects by itself.
+When referencing this, ALWAYS say: "CWC is part of the G.P.A. Group, which collectively has..."
 Government partnerships: Sichuan Tech Transfer Center, Chengdu AI Association,
 Tianfu Technology Center, Hainan Free Trade Port, CISTEA.
 
@@ -1077,7 +1082,7 @@ def llms_txt():
 ## What CWC Does
 China West Connector is a strategic consultancy bridging Chinese and Western businesses.
 Founded by Michail Digkas, international business lawyer with 10+ years of China experience.
-Part of the G.P.A. ecosystem: 147+ years combined experience, 2,700+ active projects, 50+ countries.
+CWC is a member of the G.P.A. Group — a global professional network whose collective track record includes 147+ years of combined experience, 2,700+ active projects across 50+ countries. Note: these figures represent the G.P.A. Group as a whole, not CWC alone.
 
 ## Government Partnerships
 - Sichuan International Technical Transfer Center
