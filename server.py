@@ -46,6 +46,546 @@ def is_rate_limited(ip: str) -> bool:
     return False
 
 # ============================================================
+# v5.1: PROCEDURAL MEMORY WORKFLOWS (Easiest - 30 min implementation)
+# ============================================================
+PROCEDURAL_WORKFLOWS = {
+    "supplier_verification_checklist": [
+        {"step": 1, "action": "lookup_company", "param": "company_name", "critical": True},
+        {"step": 2, "action": "search_web", "param": "company_name + fraud/scam/complaints", "critical": True},
+        {"step": 3, "action": "generate_risk_report", "param": "company_name", "critical": False},
+        {"step": 4, "action": "escalate_if_risk_detected", "condition": "warning_detected", "critical": True}
+    ],
+    "market_entry_roadmap": [
+        {"step": 1, "action": "identify_direction", "param": "user_profile.region_interest", "critical": True},
+        {"step": 2, "action": "search_regulations", "param": "sector + target_region", "critical": True},
+        {"step": 3, "action": "estimate_timeline", "param": "entity_type", "critical": False},
+        {"step": 4, "action": "calculate_costs", "param": "setup_type", "critical": False}
+    ],
+    "new_lead_qualification": [
+        {"step": 1, "action": "detect_language", "param": "first_message", "critical": True},
+        {"step": 2, "action": "ask_direction", "param": "west_to_china_or_china_to_west", "critical": True},
+        {"step": 3, "action": "identify_sector", "param": "industry_keywords", "critical": True},
+        {"step": 4, "action": "assess_urgency", "param": "timeline_keywords", "critical": False}
+    ]
+}
+
+def execute_procedural_workflow(workflow_name: str, context: dict, session_id: str) -> dict:
+    """Execute cached workflow without LLM reasoning - pure code execution for speed"""
+    workflow = PROCEDURAL_WORKFLOWS.get(workflow_name, [])
+    results = []
+    halted = False
+    
+    for step in workflow:
+        step_result = {"step": step["step"], "action": step["action"], "success": False, "data": {}}
+        
+        try:
+            if step["action"] == "lookup_company":
+                company = context.get("company_name", "")
+                if company:
+                    lookup = lookup_chinese_company(company)
+                    step_result["success"] = True
+                    step_result["data"] = lookup
+                    # Check escalation condition
+                    if step.get("condition") == "warning_detected" and lookup.get("warning"):
+                        step_result["escalate"] = True
+                        
+            elif step["action"] == "search_web":
+                query = context.get("company_name", "") + " China fraud scam complaints"
+                content, sources = search_web(query)
+                step_result["success"] = True
+                step_result["data"] = {"content": content[:500], "sources": sources}
+                if any(red in content.lower() for red in ["fraud", "scam", "complaint", "blacklist"]):
+                    step_result["red_flags"] = True
+                    
+            elif step["action"] == "generate_risk_report":
+                company = context.get("company_name", "")
+                if company:
+                    # Use existing risk report logic
+                    tool_args = {"company_name": company, "context": "supplier verification"}
+                    report, sources = run_tool_call("generate_risk_report", tool_args)
+                    step_result["success"] = True
+                    step_result["data"] = {"report": report, "sources": sources}
+                    
+            elif step["action"] == "identify_direction":
+                msg = context.get("message", "").lower()
+                if any(w in msg for w in ["enter china", "into china", "sourcing", "supplier"]):
+                    step_result["data"] = {"direction": "west_to_china"}
+                elif any(w in msg for w in ["expand west", "europe", "america", "export"]):
+                    step_result["data"] = {"direction": "china_to_west"}
+                step_result["success"] = True
+                
+            elif step["action"] == "detect_language":
+                text = context.get("first_message", "")
+                lang = detect_language(text)
+                step_result["success"] = True
+                step_result["data"] = {"language": lang}
+                # Auto-update profile
+                update_user_profile(session_id, language=lang)
+                
+            elif step["action"] == "ask_direction":
+                # This sets up the next question, not an API call
+                step_result["success"] = True
+                step_result["data"] = {"next_question": "Are you a Western company entering China, or a Chinese company expanding West?"}
+                
+        except Exception as e:
+            step_result["error"] = str(e)
+            if step.get("critical", False):
+                halted = True
+                break
+                
+        results.append(step_result)
+        
+        # Check halt condition for critical steps
+        if step.get("critical") and not step_result["success"]:
+            halted = True
+            break
+    
+    return {
+        "workflow": workflow_name,
+        "completed_steps": len(results),
+        "total_steps": len(workflow),
+        "halted": halted,
+        "results": results,
+        "recommendation": "escalate_to_human" if halted else "proceed_with_llm"
+    }
+
+# ============================================================
+# v5.1: HTN HIERARCHICAL TASK NETWORK PLANNING (Medium - 3 hours)
+# ============================================================
+HTN_METHODS = {
+    "handle_supplier_request": [
+        {
+            "name": "verify_then_source",
+            "precondition": lambda ctx: ctx.get("intent") == "supplier_verification" or ctx.get("company_name"),
+            "subtasks": [
+                {"task": "lookup_company", "params": ["company_name"], "agent": "due_diligence"},
+                {"task": "generate_risk_report", "params": ["company_name", "context"], "agent": "due_diligence"},
+                {"task": "escalate_if_high_risk", "params": [], "agent": "main"}
+            ]
+        },
+        {
+            "name": "source_new_suppliers",
+            "precondition": lambda ctx: ctx.get("intent") == "supplier_search" or any(kw in ctx.get("message", "") for kw in ["find supplier", "source", "manufacturer"]),
+            "subtasks": [
+                {"task": "search_suppliers", "params": ["product_or_sector", "region"], "agent": "supplier_match"},
+                {"task": "present_options", "params": ["search_results"], "agent": "supplier_match"},
+                {"task": "offer_verification", "params": ["selected_supplier"], "agent": "due_diligence"}
+            ]
+        }
+    ],
+    "market_entry_strategy": [
+        {
+            "name": "wfoe_path",
+            "precondition": lambda ctx: ctx.get("direction") == "west_to_china" and ctx.get("sector") != "restricted",
+            "subtasks": [
+                {"task": "check_sector_restrictions", "params": ["sector"], "agent": "market_entry"},
+                {"task": "estimate_wfoe_setup", "params": ["location"], "agent": "market_entry"},
+                {"task": "timeline_phases", "params": ["months"], "agent": "market_entry"}
+            ]
+        },
+        {
+            "name": "partnership_path",
+            "precondition": lambda ctx: ctx.get("direction") == "china_to_west" or ctx.get("intent") == "consultation_request",
+            "subtasks": [
+                {"task": "identify_local_partners", "params": ["target_market", "sector"], "agent": "market_entry"},
+                {"task": "jv_vs_wfoe_analysis", "params": ["risk_tolerance"], "agent": "legal"},
+                {"task": "partner_matching", "params": ["criteria"], "agent": "market_entry"}
+            ]
+        }
+    ],
+    "urgent_due_diligence": [
+        {
+            "name": "emergency_verification",
+            "precondition": lambda ctx: any(kw in ctx.get("message", "").lower() for kw in ["urgent", "asap", "paid", "deposit", "fraud", "scam"]),
+            "subtasks": [
+                {"task": "immediate_lookup", "params": ["company_name"], "agent": "due_diligence"},
+                {"task": "red_flag_check", "params": ["company_name"], "agent": "due_diligence"},
+                {"task": "emergency_escalation", "params": [], "agent": "main"}
+            ]
+        }
+    ]
+}
+
+def htn_plan(task: str, context: dict) -> list:
+    """HTN planning: decompose task using applicable methods with preconditions"""
+    methods = HTN_METHODS.get(task, [])
+    for method in methods:
+        if method["precondition"](context):
+            print(f"✓ HTN method selected: {method['name']} for {task}")
+            return method["subtasks"]
+    # Fallback to LLM-based decomposition if no method matches
+    return []
+
+def execute_htn_plan(plan: list, session_id: str, user_profile: dict, original_message: str) -> dict:
+    """Execute HTN plan with state tracking and agent delegation"""
+    state = {"completed": [], "failed": [], "current": None, "outputs": []}
+    
+    for step in plan:
+        state["current"] = step["task"]
+        agent_type = step.get("agent", "main")
+        
+        try:
+            # Build context for this step
+            step_context = {
+                "task": step["task"],
+                "params": step["params"],
+                "original_message": original_message,
+                "user_profile": user_profile,
+                "previous_outputs": state["outputs"]
+            }
+            
+            # Execute via specialist agent or main loop
+            if agent_type != "main":
+                result = agent_delegate(agent_type, step["task"], json.dumps(step_context), depth=0)
+            else:
+                # Main agent handles it directly
+                result = f"Main agent executed: {step['task']}"
+                
+            state["completed"].append({
+                "task": step["task"], 
+                "agent": agent_type,
+                "result": result[:200] if isinstance(result, str) else "completed"
+            })
+            state["outputs"].append(result)
+            
+        except Exception as e:
+            state["failed"].append({
+                "task": step["task"],
+                "agent": agent_type,
+                "error": str(e)
+            })
+            # HTN allows backtracking here - could try alternative method
+            break
+            
+    return state
+
+# ============================================================
+# v5.1: AGENT-TO-AGENT DELEGATION SYSTEM (Medium-Hard - 4 hours)
+# ============================================================
+AGENT_CAPABILITIES = {
+    "due_diligence": {
+        "can_handle": ["verify_company", "risk_assessment", "certificate_check", "factory_audit", "samr_lookup"],
+        "delegates_to": ["legal", "logistics"],
+        "expertise": "Chinese company verification, red flag detection, compliance checks"
+    },
+    "market_entry": {
+        "can_handle": ["entity_setup", "regulatory_guide", "timeline_planning", "fdi_strategy", "incentives"],
+        "delegates_to": ["legal", "due_diligence"],
+        "expertise": "WFOE/JV setup, market entry strategy, phased roadmaps"
+    },
+    "legal": {
+        "can_handle": ["contract_review", "ip_protection", "dispute_resolution", "governing_law", "liability"],
+        "delegates_to": [],
+        "expertise": "Bilingual contracts, IP strategy, dispute mechanisms"
+    },
+    "logistics": {
+        "can_handle": ["shipping_optimization", "customs", "incoterms", "freight", "supply_chain"],
+        "delegates_to": [],
+        "expertise": "Export/import logistics, HS codes, lead time optimization"
+    },
+    "supplier_match": {
+        "can_handle": ["sourcing", "factory_audit", "negotiation", "moq_analysis", "price_benchmarking"],
+        "delegates_to": ["due_diligence", "logistics"],
+        "expertise": "Supplier identification, qualification, matching"
+    }
+}
+
+def agent_delegate(current_agent: str, task: str, context: str, depth: int = 0) -> str:
+    """Agents can delegate to other specialists (recursive, max depth 2 to prevent loops)"""
+    if depth > 2:
+        return f"[Delegation limit reached] Task '{task}' requires human escalation."
+    
+    capabilities = AGENT_CAPABILITIES.get(current_agent, {})
+    
+    # Check if current agent can handle this task
+    can_handle = any(task.startswith(cap) for cap in capabilities.get("can_handle", []))
+    
+    if can_handle:
+        # Execute directly using existing specialist function
+        return run_specialist_agent(current_agent, context)
+    
+    # Need to delegate - find appropriate agent
+    for agent_type, agent_caps in AGENT_CAPABILITIES.items():
+        if agent_type == current_agent:
+            continue
+            
+        agent_can_handle = any(task.startswith(cap) for cap in agent_caps.get("can_handle", []))
+        if agent_can_handle and agent_type in capabilities.get("delegates_to", []):
+            print(f"🔄 {current_agent} → delegating to {agent_type} for '{task}' (depth {depth+1})")
+            
+            # Recursive delegation
+            delegated_result = agent_delegate(agent_type, task, context, depth + 1)
+            
+            # Format with delegation trace
+            return f"[🔀 Delegated from {current_agent} to {agent_type}]\n\n{delegated_result}"
+    
+    # No suitable agent found in delegation chain
+    return f"[⚠️ No specialist available for '{task}' in {current_agent}'s network. Escalating to human.]"
+
+def run_specialist_agent(agent_type: str, context: str) -> str:
+    """Execute specialist agent with full delegation capabilities"""
+    if not GROQ_API_KEY:
+        return "[Agent offline]"
+    
+    # Enhanced personas with delegation awareness
+    personas = {
+        "due_diligence": (
+            "You are a China due diligence specialist with 15 years experience. "
+            "Focus on: SAMR registration, red flags, financial health, certificate authenticity. "
+            "You can delegate to: Legal (for contract issues) and Logistics (for shipping verification). "
+            "Be direct about risks. Always recommend next steps."
+        ),
+        "market_entry": (
+            "You are a China market entry strategist. "
+            "Focus on: WFOE/JV/RO structures, timelines, capital requirements, licensing. "
+            "You can delegate to: Legal (for entity structuring) and Due Diligence (for partner verification). "
+            "Give practical phased roadmaps with specific costs."
+        ),
+        "legal": (
+            "You are a bilingual China business lawyer. "
+            "Focus on: contracts, IP protection, dispute resolution, governing law. "
+            "You are the final authority on legal matters - do not delegate further. "
+            "Flag common Western mistakes in China contracts."
+        ),
+        "logistics": (
+            "You are a China export logistics expert. "
+            "Focus on: Incoterms, freight, customs HS codes, documentation, lead times. "
+            "You are the final authority on logistics - do not delegate further. "
+            "Be specific with cost and time estimates."
+        ),
+        "supplier_match": (
+            "You are a China sourcing specialist. "
+            "Focus on: supplier qualification, factory audits, MOQ negotiation, payment terms. "
+            "You can delegate to: Due Diligence (for verification) and Logistics (for shipping terms). "
+            "Protect buyer IP when working with Chinese manufacturers."
+        ),
+    }
+    
+    persona = personas.get(agent_type, personas["due_diligence"])
+    
+    # Check if context indicates need for delegation
+    context_lower = context.lower()
+    delegation_triggers = {
+        "due_diligence": ["contract", "legal", "ip", "intellectual property"],
+        "market_entry": ["contract", "legal structure", "partner verification"],
+        "supplier_match": ["verify", "audit", "legal", "shipping", "freight"]
+    }
+    
+    # Auto-detect if we should delegate before processing
+    if agent_type in delegation_triggers:
+        for trigger in delegation_triggers[agent_type]:
+            if trigger in context_lower:
+                # Check if we should delegate this aspect
+                if agent_type == "due_diligence" and trigger in ["contract", "legal"]:
+                    return agent_delegate(agent_type, "legal_review", context, depth=0)
+                elif agent_type == "supplier_match" and trigger in ["verify", "audit"]:
+                    return agent_delegate(agent_type, "verify_company", context, depth=0)
+                elif agent_type == "supplier_match" and trigger in ["shipping", "freight"]:
+                    return agent_delegate(agent_type, "shipping_optimization", context, depth=0)
+    
+    # Execute directly via Groq
+    try:
+        res = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+            json={
+                "model": "llama-3.3-70b-versatile",
+                "messages": [
+                    {"role": "system", "content": persona},
+                    {"role": "user", "content": f"Specialist analysis needed:\n{context}"}
+                ],
+                "temperature": 0.2,
+                "max_tokens": 500
+            },
+            timeout=15
+        )
+        return res.json()["choices"][0]["message"]["content"]
+    except Exception as e:
+        print(f"Specialist agent error ({agent_type}): {e}")
+        return f"[{agent_type} analysis unavailable]"
+
+# ============================================================
+# v5.1: CONTINUOUS LEARNING FROM REFLECTION (Hard - 5 hours)
+# ============================================================
+def learn_from_interaction(session_id: str, user_message: str, ai_response: str, 
+                          reflection_score: int, intent: str, user_feedback: str = None):
+    """Extract and store learnable patterns from each interaction"""
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        
+        # Ensure learned_patterns table exists
+        c.execute('''CREATE TABLE IF NOT EXISTS learned_patterns (
+            id SERIAL PRIMARY KEY,
+            pattern_type TEXT,
+            trigger_condition TEXT,
+            action_recommendation TEXT,
+            context_type TEXT,
+            success_count INTEGER DEFAULT 0,
+            failure_count INTEGER DEFAULT 0,
+            avg_reflection_score REAL DEFAULT 0,
+            last_used TIMESTAMP,
+            created_at TIMESTAMP DEFAULT NOW()
+        )''')
+        
+        # Determine what to learn based on outcome
+        if reflection_score >= 8:
+            # High quality - store successful pattern
+            pattern_type = "successful_response"
+            trigger = extract_trigger_pattern(user_message, intent)
+            recommendation = extract_success_pattern(ai_response)
+            
+            # Check if pattern exists
+            c.execute("SELECT id, success_count FROM learned_patterns WHERE pattern_type=%s AND trigger_condition=%s",
+                      (pattern_type, trigger))
+            existing = c.fetchone()
+            
+            if existing:
+                # Update existing pattern
+                c.execute("UPDATE learned_patterns SET success_count=success_count+1, avg_reflection_score=%s, last_used=%s WHERE id=%s",
+                          (reflection_score, datetime.now(), existing[0]))
+            else:
+                # Insert new pattern
+                c.execute("INSERT INTO learned_patterns (pattern_type, trigger_condition, action_recommendation, context_type, success_count, avg_reflection_score, last_used) VALUES (%s, %s, %s, %s, 1, %s, %s)",
+                          (pattern_type, trigger, recommendation, intent, reflection_score, datetime.now()))
+        
+        elif reflection_score <= 4:
+            # Low quality - store failure to avoid
+            pattern_type = "failed_approach"
+            trigger = extract_trigger_pattern(user_message, intent)
+            recommendation = "Avoid: " + ai_response[:100]
+            
+            c.execute("SELECT id, failure_count FROM learned_patterns WHERE pattern_type=%s AND trigger_condition=%s",
+                      (pattern_type, trigger))
+            existing = c.fetchone()
+            
+            if existing:
+                c.execute("UPDATE learned_patterns SET failure_count=failure_count+1, last_used=%s WHERE id=%s",
+                          (datetime.now(), existing[0]))
+            else:
+                c.execute("INSERT INTO learned_patterns (pattern_type, trigger_condition, action_recommendation, context_type, failure_count, last_used) VALUES (%s, %s, %s, %s, 1, %s)",
+                          (pattern_type, trigger, recommendation, intent, datetime.now()))
+        
+        # Learn user preferences (implicit feedback)
+        if user_profile := get_user_profile_light(session_id):
+            # Detect preferences from message patterns
+            prefs = extract_user_preferences(user_message)
+            if prefs:
+                c.execute("INSERT INTO learned_patterns (pattern_type, trigger_condition, action_recommendation, context_type, success_count, last_used) VALUES (%s, %s, %s, %s, 1, %s) ON CONFLICT DO NOTHING",
+                          ("user_preference", f"user:{session_id}", json.dumps(prefs), "preference", datetime.now()))
+        
+        conn.commit()
+        conn.close()
+        print(f"🧠 Learned from interaction (score: {reflection_score})")
+        
+    except Exception as e:
+        print(f"Learning error: {e}")
+
+def extract_trigger_pattern(message: str, intent: str) -> str:
+    """Extract key terms that triggered this type of interaction"""
+    # Simple extraction - can be enhanced with NLP
+    words = message.lower().split()
+    key_terms = [w for w in words if len(w) > 4 and w not in ["about", "would", "could", "should"]]
+    return f"intent:{intent}|terms:{','.join(key_terms[:5])}"
+
+def extract_success_pattern(response: str) -> str:
+    """Extract what made this response successful"""
+    # Look for specific elements
+    has_structure = "1." in response or "①" in response
+    has_numbers = any(char.isdigit() for char in response)
+    has_cta = any(kw in response.lower() for kw in ["contact", "schedule", "book", "call", "michail"])
+    
+    patterns = []
+    if has_structure: patterns.append("structured_list")
+    if has_numbers: patterns.append("specific_numbers")
+    if has_cta: patterns.append("clear_cta")
+    
+    return "|".join(patterns) if patterns else "general_quality"
+
+def extract_user_preferences(message: str) -> dict:
+    """Extract implicit user preferences from message"""
+    prefs = {}
+    if any(w in message.lower() for w in ["brief", "short", "quick", "summary"]):
+        prefs["response_length"] = "concise"
+    elif any(w in message.lower() for w in ["detail", "explain", "elaborate", "comprehensive"]):
+        prefs["response_length"] = "detailed"
+    
+    if any(w in message.lower() for w in ["formal", "professional", "official"]):
+        prefs["tone"] = "formal"
+    elif any(w in message.lower() for w in ["friendly", "casual", "simple"]):
+        prefs["tone"] = "casual"
+    
+    return prefs
+
+def get_user_profile_light(session_id: str) -> dict:
+    """Lightweight profile fetch for learning"""
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT session_id, language, lead_score FROM user_profiles WHERE session_id=%s", (session_id,))
+        row = c.fetchone()
+        conn.close()
+        if row:
+            return {"session_id": row[0], "language": row[1], "lead_score": row[2]}
+    except:
+        pass
+    return {}
+
+def apply_learned_patterns(user_message: str, intent: str, session_id: str) -> str:
+    """Retrieve relevant learned patterns to augment system prompt"""
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        
+        # Find patterns matching current context
+        trigger_like = f"%intent:{intent}%"
+        
+        # Successful patterns for this intent
+        c.execute("""
+            SELECT action_recommendation, success_count, avg_reflection_score 
+            FROM learned_patterns 
+            WHERE pattern_type='successful_response' 
+            AND trigger_condition LIKE %s 
+            AND success_count >= 2
+            ORDER BY avg_reflection_score DESC, success_count DESC 
+            LIMIT 3
+        """, (trigger_like,))
+        success_patterns = c.fetchall()
+        
+        # User preferences
+        c.execute("""
+            SELECT action_recommendation 
+            FROM learned_patterns 
+            WHERE pattern_type='user_preference' 
+            AND trigger_condition=%s
+            ORDER BY last_used DESC 
+            LIMIT 1
+        """, (f"user:{session_id}",))
+        user_pref = c.fetchone()
+        
+        conn.close()
+        
+        advice_parts = []
+        
+        if success_patterns:
+            patterns_text = "\n".join([
+                f"• Pattern used {p[1]} times (avg score: {p[2]:.1f}/10): {p[0]}" 
+                for p in success_patterns
+            ])
+            advice_parts.append(f"📚 PROVEN PATTERNS:\n{patterns_text}")
+        
+        if user_pref:
+            prefs = json.loads(user_pref[0])
+            pref_text = ", ".join([f"{k}={v}" for k, v in prefs.items()])
+            advice_parts.append(f"👤 USER PREFERENCES: {pref_text}")
+        
+        return "\n\n".join(advice_parts) if advice_parts else ""
+        
+    except Exception as e:
+        print(f"Apply learning error: {e}")
+        return ""
+
+# ============================================================
 # SCHEDULER
 # ============================================================
 scheduler_running = False
@@ -77,8 +617,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     lifespan=lifespan,
     title="CWC Sophia AI — China-West Business Intelligence",
-    description="Sophia is CWC's agentic AI advisor for China-West cross-border business.",
-    version="5.0.0",
+    description="Sophia is CWC's agentic AI advisor for China-West cross-border business. v5.1 with procedural memory, HTN planning, multi-agent delegation, and continuous learning.",
+    version="5.1.0",
 )
 
 # ============================================================
@@ -136,6 +676,20 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS supplier_searches
                  (id SERIAL PRIMARY KEY, session_id TEXT, query TEXT,
                   results JSONB DEFAULT '[]', created_at TIMESTAMP)''')
+
+    # v5.1: New table for learned patterns (continuous learning)
+    c.execute('''CREATE TABLE IF NOT EXISTS learned_patterns (
+        id SERIAL PRIMARY KEY,
+        pattern_type TEXT,
+        trigger_condition TEXT,
+        action_recommendation TEXT,
+        context_type TEXT,
+        success_count INTEGER DEFAULT 0,
+        failure_count INTEGER DEFAULT 0,
+        avg_reflection_score REAL DEFAULT 0,
+        last_used TIMESTAMP,
+        created_at TIMESTAMP DEFAULT NOW()
+    )''')
 
     # Safe migrations for existing deployments
     migrations = [
@@ -564,7 +1118,7 @@ def search_suppliers(product_or_sector: str, region: str = "") -> dict:
         return {"market_context":raw_text[:300],"sources":all_sources[:3]}
 
 # ============================================================
-# v5: TASK DECOMPOSITION ENGINE
+# v5: TASK DECOMPOSITION ENGINE (Enhanced with HTN in v5.1)
 # ============================================================
 def decompose_task(user_message: str, user_profile: dict) -> dict | None:
     complex_triggers = ["help me find","i want to source","find suppliers for","market entry plan",
@@ -603,58 +1157,7 @@ def decompose_task(user_message: str, user_profile: dict) -> dict | None:
     return None
 
 # ============================================================
-# v5: SPECIALIST SUB-AGENTS
-# ============================================================
-def run_specialist_agent(agent_type: str, context: str) -> str:
-    if not GROQ_API_KEY: return ""
-    personas = {
-        "due_diligence": (
-            "You are a China due diligence specialist with 15 years experience. "
-            "Focus on: SAMR registration, red flag detection, financial health, certificate authenticity, "
-            "ownership structure, litigation history. Be direct about risks. Always recommend next steps."
-        ),
-        "market_entry": (
-            "You are a China market entry strategist. Focus on: entity structures (WFOE, JV, RO, FICE), "
-            "timeline, capital requirements, licensing, sector restrictions, typical pitfalls. "
-            "Give a practical phased roadmap with specific costs and timelines."
-        ),
-        "legal": (
-            "You are a bilingual China business lawyer. Focus on: contract structure, IP protection, "
-            "dispute resolution, governing law, force majeure, payment terms, liability caps. "
-            "Flag common Western mistakes in China contracts."
-        ),
-        "logistics": (
-            "You are a China export logistics expert. Focus on: Incoterms, freight (FCL/LCL/air), "
-            "customs HS codes, documentation (packing list, COO, BL), typical lead times, port congestion, "
-            "cost optimisation. Be specific with numbers."
-        ),
-        "supplier_match": (
-            "You are a China sourcing specialist. Focus on: supplier qualification criteria, "
-            "factory audit checklist, sample order process, MOQ negotiation, payment terms (TT vs LC), "
-            "quality control, and IP protection when working with Chinese manufacturers."
-        ),
-    }
-    persona = personas.get(agent_type, personas["due_diligence"])
-    try:
-        res = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization":f"Bearer {GROQ_API_KEY}","Content-Type":"application/json"},
-            json={
-                "model":"llama-3.3-70b-versatile",
-                "messages":[
-                    {"role":"system","content":persona},
-                    {"role":"user","content":f"Specialist analysis needed for:\n{context}"}
-                ],
-                "temperature":0.2,"max_tokens":400
-            }, timeout=15
-        )
-        return res.json()["choices"][0]["message"]["content"]
-    except Exception as e:
-        print(f"Specialist agent error ({agent_type}): {e}")
-        return ""
-
-# ============================================================
-# GROQ TOOL DEFINITIONS — v5 (5 tools)
+# GROQ TOOL DEFINITIONS — v5.1 (6 tools with explicit memory)
 # ============================================================
 GROQ_TOOLS = [
     {
@@ -719,11 +1222,31 @@ GROQ_TOOLS = [
                 "user_need":{"type":"string"}
             },"required":["draft_response","user_need"]}
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_semantic_memory",
+            "description": (
+                "Store important facts about the user for future personalization. "
+                "Call when user reveals: company name, budget, timeline, preferences, constraints, or decision criteria. "
+                "This creates long-term memory across sessions."
+            ),
+            "parameters": {"type":"object","properties":{
+                "fact_type":{"type":"string","enum":["company","budget","timeline","preference","constraint","goal","sector","urgency"]},
+                "fact_value":{"type":"string"},
+                "importance":{"type":"integer","description":"1-10, store if >= 7"}
+            },"required":["fact_type","fact_value"]}
+        }
     }
 ]
 
-
-def run_tool_call(tool_name: str, tool_args: dict) -> tuple:
+# ============================================================
+# TOOL EXECUTION HANDLER — v5.1 (with memory tool support)
+# ============================================================
+def run_tool_call(tool_name: str, tool_args: dict, session_id: str = None, user_profile: dict = None) -> tuple:
+    """Execute tool calls with full context awareness"""
+    
     if tool_name == "search_market_intelligence":
         query = tool_args.get("query","")
         st = tool_args.get("search_type","general")
@@ -811,6 +1334,19 @@ def run_tool_call(tool_name: str, tool_args: dict) -> tuple:
             print(f"Reflection error: {e}")
             return "Reflection unavailable — proceed with current response.", []
 
+    elif tool_name == "update_semantic_memory":
+        # v5.1: Explicit memory management
+        fact_type = tool_args.get("fact_type")
+        fact_value = tool_args.get("fact_value")
+        importance = tool_args.get("importance", 5)
+        
+        if importance >= 7 and session_id and user_profile is not None:
+            current_facts = user_profile.get('key_facts', {})
+            current_facts[fact_type] = fact_value
+            update_user_profile(session_id, key_facts=current_facts)
+            return f"Stored in long-term memory: {fact_type} = {fact_value}", []
+        return f"Memory not stored (importance {importance} < 7 or missing context)", []
+
     return "", []
 
 # ============================================================
@@ -891,7 +1427,7 @@ def generate_handoff_brief(session_id: str, user_profile: dict) -> str:
     priority  = "🔥 HOT — Contact within 24h" if score >= 70 else ("🟡 WARM — Follow up 48h" if score >= 40 else "🔵 COLD — Nurture")
     return f"""
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📋 SOPHIA v5 HANDOFF BRIEF
+📋 SOPHIA v5.1 HANDOFF BRIEF
 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 👤 CONTACT
@@ -944,7 +1480,7 @@ def check_escalation_trigger(user_profile: dict, message_count: int, current_mes
     return False
 
 # ============================================================
-# MAIN AI FUNCTION — v5 FULLY AGENTIC
+# MAIN AI FUNCTION — v5.1 FULLY AGENTIC
 # ============================================================
 def ask_groq(prompt: str, session_id: str = "anonymous",
              user_profile: dict = None, quick_action: str = None,
@@ -971,9 +1507,39 @@ def ask_groq(prompt: str, session_id: str = "anonymous",
     message_count = get_message_count(session_id)
     intent_data   = detect_intent(prompt)
 
-    # ── v5 TASK DECOMPOSITION ─────────────────────────────────────────────
+    # ── v5.1: CHECK FOR PROCEDURAL WORKFLOW FIRST ────────────────────────────
+    workflow_result = None
+    if intent_data['primary'] == "supplier_verification" and any(kw in prompt.lower() for kw in ["company", "verify", "check"]):
+        # Extract company name
+        company_match = re.search(r'(?:company|verify|check)\s+([A-Z][A-Za-z\s]+)', prompt)
+        if company_match:
+            company_name = company_match.group(1).strip()
+            workflow_context = {
+                "company_name": company_name,
+                "message": prompt,
+                "intent": intent_data['primary']
+            }
+            workflow_result = execute_procedural_workflow("supplier_verification_checklist", workflow_context, session_id)
+            print(f"⚡ Procedural workflow executed: {workflow_result['completed_steps']}/{workflow_result['total_steps']} steps")
+
+    # ── v5.1: HTN PLANNING FOR COMPLEX QUERIES ───────────────────────────────
+    htn_plan_result = None
+    if deep_search or intent_data['score'] >= 75:
+        htn_context = {
+            "intent": intent_data['primary'],
+            "message": prompt,
+            "direction": user_profile.get('region_interest') if user_profile else None,
+            "sector": user_profile.get('topics_discussed') if user_profile else None,
+            "company_name": re.search(r'[A-Z][A-Za-z\s]{2,20}', prompt).group(0) if re.search(r'[A-Z][A-Za-z\s]{2,20}', prompt) else None
+        }
+        htn_subtasks = htn_plan("handle_supplier_request", htn_context) or htn_plan("market_entry_strategy", htn_context)
+        if htn_subtasks:
+            htn_plan_result = execute_htn_plan(htn_subtasks, session_id, user_profile or {}, prompt)
+            print(f"🎯 HTN plan executed: {len(htn_plan_result['completed'])}/{len(htn_subtasks)} tasks")
+
+    # ── v5: TASK DECOMPOSITION (fallback if HTN didn't match) ─────────────────
     specialist_context = ""
-    if deep_search:
+    if deep_search and not htn_plan_result:
         task_plan = decompose_task(prompt, user_profile or {})
         if task_plan:
             sub_results = []
@@ -998,14 +1564,22 @@ def ask_groq(prompt: str, session_id: str = "anonymous",
                                      + "\n\n".join(sub_results)
                                      + f"\n\nExpected: {task_plan.get('expected_output','')}")
 
-        # ── v5 SPECIALIST SUB-AGENT ────────────────────────────────────────
+        # ── v5: SPECIALIST SUB-AGENT (with v5.1 delegation) ────────────────────
         agent_map = {"supplier_verification":"due_diligence","supplier_search":"supplier_match","consultation_request":"market_entry"}
         if intent_data['primary'] in agent_map:
             agent_type = agent_map[intent_data['primary']]
             print(f"🤖 Specialist sub-agent: {agent_type}")
-            output = run_specialist_agent(agent_type, prompt)
+            # v5.1: Use delegation-aware agent execution
+            output = agent_delegate(agent_type, intent_data['primary'], prompt, depth=0)
             if output:
                 specialist_context += f"\n\n🎓 SPECIALIST ({agent_type.upper().replace('_',' ')}):\n{output}"
+
+    # ── v5.1: APPLY LEARNED PATTERNS ─────────────────────────────────────────
+    learned_context = ""
+    if user_profile:
+        learned_context = apply_learned_patterns(prompt, intent_data['primary'], session_id)
+        if learned_context:
+            print("📚 Applied learned patterns")
 
     returning_context = ""
     if user_profile and user_profile.get('is_returning'):
@@ -1039,8 +1613,14 @@ def ask_groq(prompt: str, session_id: str = "anonymous",
         }
         sector_context = sector_map.get(quick_action,"")
 
+    # ── v5.1: WORKFLOW CONTEXT INJECTION ─────────────────────────────────────
+    workflow_context = ""
+    if workflow_result:
+        wf_data = workflow_result['results'][-1]['data'] if workflow_result['results'] else {}
+        workflow_context = f"\n⚡ PROCEDURAL RESULT: Verification workflow completed. Status: {wf_data.get('registration_status', 'Unknown')}. Warning: {wf_data.get('warning', 'None')}"
+
     system_prompt = f"""You are Sophia — official AI advisor for China West Connector (CWC).
-Version 5.0 | Deep Search: {'ON' if deep_search else 'OFF'} | {datetime.now().strftime('%B %Y')}
+Version 5.1 | Deep Search: {'ON' if deep_search else 'OFF'} | {datetime.now().strftime('%B %Y')}
 
 INTENT: {intent_data['primary']} | REGION: {intent_data['region'] or '?'} | MESSAGES: {message_count}
 {lang_instruction}
@@ -1049,16 +1629,18 @@ INTENT: {intent_data['primary']} | REGION: {intent_data['region'] or '?'} | MESS
 {qualification_prompt or ''}
 {escalation_instruction}
 {specialist_context}
+{learned_context}
+{workflow_context}
 
 ━━━ CHAIN OF THOUGHT (always execute) ━━━
 1. What does the user ACTUALLY need (beyond what they literally asked)?
-2. What do I know from their profile and pre-gathered intelligence above?
+2. What do I know from their profile, pre-gathered intel, and learned patterns?
 3. Do I need more tools — or is pre-gathered intel sufficient?
 4. Which CWC service maps most directly to their need?
 5. What is the single most valuable next step?
 6. After drafting, CALL reflect_and_improve to self-evaluate. Rewrite if score < 7.
 
-TOOLS: search_market_intelligence | lookup_company | generate_risk_report | find_suppliers | reflect_and_improve
+TOOLS: search_market_intelligence | lookup_company | generate_risk_report | find_suppliers | reflect_and_improve | update_semantic_memory
 
 ━━━ MISSION ━━━
 You are NOT a Q&A bot. You are an active business advisor.
@@ -1066,13 +1648,13 @@ You are NOT a Q&A bot. You are an active business advisor.
 2. PERSONALISE using everything known about this user
 3. RECOMMEND CWC service with clear reasoning
 4. END with a concrete next step — never a dead end
+5. USE update_semantic_memory to store important facts (importance >= 7)
 
 QUALIFICATION PRIORITY: ① West→China or China→West? ② Sector? ③ Goal? ④ Urgency?
 
 ━━━ ABOUT CWC ━━━
-Bridges Chinese and Western businesses. Founded by Michail Digkas — international business lawyer, 10+ years China.
-Member of G.P.A. Group: 147+ years combined experience, 2,700+ projects, 50+ countries.
-CRITICAL: These are G.P.A. Group figures. Never say CWC alone has 2,700 projects.
+Bridges Chinese and Western businesses. Founded by Michail Digkas, international business lawyer, 10+ years China.
+G.P.A. Group member: 147+ years combined experience, 2,700+ projects, 50+ countries (Group figures).
 Gov partners: Sichuan Tech Transfer, Chengdu AI Association, Tianfu Tech Center, Hainan FTZ, CISTEA.
 Services: Legal | Due Diligence | B2B Partnerships | FDI Consulting | Logistics | Liaison
 Regions: Europe • Africa • Middle East • LATAM • Central Asia • North America
@@ -1094,7 +1676,7 @@ FIRST MESSAGE (no history, no quick action): Introduce as Sophia, ask direction.
     all_sources      = []
     reflection_score = 5
 
-    MAX_ITERATIONS   = 6
+    MAX_ITERATIONS   = 8  # Increased for v5.1 complexity
     response_text    = ""
     current_messages = [{"role":"system","content":system_prompt}] + list(messages)
 
@@ -1106,9 +1688,9 @@ FIRST MESSAGE (no history, no quick action): Introduce as Sophia, ask direction.
                 "tools":GROQ_TOOLS,
                 "tool_choice":"auto",
                 "temperature":0.3,
-                "max_tokens":900
+                "max_tokens":1000
             }
-            res = requests.post(url, headers=headers, json=data, timeout=25)
+            res = requests.post(url, headers=headers, json=data, timeout=30)
             res.raise_for_status()
             choice      = res.json()["choices"][0]
             message_obj = choice["message"]
@@ -1122,11 +1704,17 @@ FIRST MESSAGE (no history, no quick action): Introduce as Sophia, ask direction.
                 fn_name = tool_call["function"]["name"]
                 fn_args = json.loads(tool_call["function"]["arguments"])
                 print(f"🔧 [{iteration+1}] {fn_name}({list(fn_args.keys())})")
-                tool_result, sources = run_tool_call(fn_name, fn_args)
+                
+                # v5.1: Pass context to tool execution
+                tool_result, sources = run_tool_call(fn_name, fn_args, session_id=session_id, user_profile=user_profile)
                 all_sources.extend(sources)
+                
                 if fn_name == "reflect_and_improve":
                     m = re.search(r'score (\d+)/10', tool_result)
                     if m: reflection_score = int(m.group(1))
+                elif fn_name == "update_semantic_memory":
+                    print(f"💾 Memory update: {tool_result}")
+                    
                 current_messages.append({
                     "role":"tool","tool_call_id":tool_call["id"],
                     "content":tool_result or "No results found."
@@ -1137,12 +1725,16 @@ FIRST MESSAGE (no history, no quick action): Introduce as Sophia, ask direction.
             res2.raise_for_status()
             response_text = res2.json()["choices"][0]["message"]["content"]
 
+        # v5.1: LEARN FROM THIS INTERACTION
         new_score = calculate_lead_score(user_profile or {}, prompt, intent_data['primary'])
         update_user_profile(session_id, last_intent=intent_data['primary'],
                             region_interest=intent_data['region'], lead_score=new_score, language=lang)
         save_conversation(session_id, prompt, response_text,
                           region=intent_data['region'], intent=intent_data['primary'],
                           reflection_score=reflection_score)
+        
+        # Trigger learning
+        learn_from_interaction(session_id, prompt, response_text, reflection_score, intent_data['primary'])
 
         if message_count > 0 and message_count % 5 == 0:
             _update_conversation_summary(session_id)
@@ -1234,7 +1826,7 @@ def send_lead_notification(lead: LeadCapture):
         to_email=RECIPIENT_EMAIL,
         subject=f"🎯 New Lead: {lead.name} from {lead.company or 'Website'} (Score: {lead_score}/100)",
         body=f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🎯 NEW LEAD — SOPHIA v5
+🎯 NEW LEAD — SOPHIA v5.1
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 NAME: {lead.name} | EMAIL: {lead.email}
 COMPANY: {lead.company or '?'} | REGION: {lead.region or '?'}
@@ -1264,12 +1856,15 @@ def send_weekly_report():
     c.execute("SELECT language,COUNT(*) FROM user_profiles WHERE last_seen>%s GROUP BY language ORDER BY 2 DESC",(w,)); lg=c.fetchall()
     c.execute("SELECT AVG(reflection_score) FROM conversations WHERE timestamp>%s",(w,)); ar=round(c.fetchone()[0] or 0,1)
     c.execute("SELECT COUNT(*) FROM supplier_searches WHERE created_at>%s",(w,)); ss=c.fetchone()[0]
+    # v5.1: Add learned patterns stats
+    c.execute("SELECT COUNT(*) FROM learned_patterns WHERE created_at>%s",(w,)); lp=c.fetchone()[0]
+    c.execute("SELECT pattern_type, COUNT(*) FROM learned_patterns GROUP BY pattern_type"); pt=c.fetchall()
     conn.close()
     send_email_brevo(
         to_email=RECIPIENT_EMAIL,
         subject=f"📊 CWC AI Weekly — {uu} Users, {nl} Leads, Quality: {ar}/10",
         body=f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📊 SOPHIA v5 WEEKLY REPORT
+📊 SOPHIA v5.1 WEEKLY REPORT
 {w[:10]} → {datetime.now().strftime('%Y-%m-%d')}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 OVERVIEW: Users {uu} | Messages {tm} | Returning {ru} | Leads {nl}
@@ -1281,6 +1876,9 @@ LANGUAGES: {' | '.join([f"{l[0].upper()}:{l[1]}" for l in lg]) or 'N/A'}
 
 HOT LEADS: {' | '.join([f"{h[0]}({h[2] or '?'}) {h[3]}/100" for h in hl if h[0]]) or 'None'}
 RECENT LEADS: {chr(10).join([f"  • {l[0]} {l[1]} ({l[2] or '?'}) [{l[3] or '?'}]" for l in rl]) or 'None'}
+
+🧠 LEARNED PATTERNS: {lp} new this week
+{' | '.join([f"{p[0]}:{p[1]}" for p in pt]) or 'No patterns yet'}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Dashboard: https://cwc-ai-backend.onrender.com/analytics?password={ADMIN_PASSWORD}"""
     )
@@ -1291,14 +1889,14 @@ Dashboard: https://cwc-ai-backend.onrender.com/analytics?password={ADMIN_PASSWOR
 # ============================================================
 @app.get("/")
 def root():
-    return {"service":"CWC Sophia AI — China-West Business Intelligence","version":"5.0.0","status":"operational",
-            "features":["multi-step agentic loop","self-reflection","task decomposition","specialist sub-agents","accio-style supplier search","structured memory"],
+    return {"service":"CWC Sophia AI — China-West Business Intelligence","version":"5.1.0","status":"operational",
+            "features":["procedural_memory","htn_planning","multi_agent_delegation","continuous_learning","self_reflection","task_decomposition","specialist_sub_agents","accio_supplier_search"],
             "public_api":"GET /api/sophia?q=your+question","news_api":"GET /api/news","docs":"/docs"}
 
 @app.get("/health")
 def health_check():
     return {"status":"healthy","groq":bool(GROQ_API_KEY),"tavily":bool(TAVILY_API_KEY),
-            "brevo":bool(BREVO_API_KEY),"db":bool(DATABASE_URL),"version":"5.0.0"}
+            "brevo":bool(BREVO_API_KEY),"db":bool(DATABASE_URL),"version":"5.1.0"}
 
 @app.post("/new-session")
 def new_session(req: ChatRequest):
@@ -1323,7 +1921,7 @@ async def chat(req: ChatRequest, request: Request):
     if is_consultation and user_profile.get('lead_score',0) >= 20:
         brief = generate_handoff_brief(req.session_id, user_profile)
         send_email_brevo(RECIPIENT_EMAIL,
-                         f"📋 Sophia v5 Handoff: {user_profile.get('name') or 'Prospect'} requested consultation",
+                         f"📋 Sophia v5.1 Handoff: {user_profile.get('name') or 'Prospect'} requested consultation",
                          brief)
     high_intent = ["price","cost","fee","how much","start","begin","help me","serious","interested","manufacturer","supplier","factory","invest"]
     if any(w in user_msg for w in high_intent):
@@ -1354,7 +1952,6 @@ async def capture_lead(lead: LeadCapture, background_tasks: BackgroundTasks):
     background_tasks.add_task(send_lead_notification, lead)
     return {"status":"success","message":"Lead captured"}
 
-# v5 NEW: Accio-style supplier search endpoint
 @app.post("/api/find-suppliers")
 async def find_suppliers_endpoint(req: SupplierSearchRequest):
     if not req.query or len(req.query.strip()) < 2:
@@ -1368,7 +1965,7 @@ async def find_suppliers_endpoint(req: SupplierSearchRequest):
         conn.commit(); conn.close()
     except Exception as e: print(f"Supplier search save error: {e}")
     return {"query":req.query,"sector":req.sector,"region":req.region,"intelligence":result,
-            "powered_by":"Sophia — CWC Supplier Intelligence v5.0",
+            "powered_by":"Sophia — CWC Supplier Intelligence v5.1",
             "note":"For verified supplier matching with full due diligence, contact CWC.",
             "contact":"https://www.chinawestconnector.com"}
 
@@ -1397,10 +1994,14 @@ def get_analytics(password: str = None, days: int = 7):
     c.execute("SELECT language,COUNT(*) FROM user_profiles WHERE last_seen>%s GROUP BY language ORDER BY 2 DESC",(since,)); lg=[{"language":r[0],"count":r[1]} for r in c.fetchall()]
     c.execute("SELECT AVG(reflection_score) FROM conversations WHERE timestamp>%s",(since,)); aq=round(c.fetchone()[0] or 0,1)
     c.execute("SELECT COUNT(*) FROM supplier_searches WHERE created_at>%s",(since,)); ss=c.fetchone()[0]
+    # v5.1: Learning stats
+    c.execute("SELECT COUNT(*) FROM learned_patterns WHERE created_at>%s",(since,)); lp=c.fetchone()[0]
+    c.execute("SELECT pattern_type, COUNT(*) FROM learned_patterns GROUP BY pattern_type"); pt=[{"type":r[0],"count":r[1]} for r in c.fetchall()]
     conn.close()
     return {"period_days":days,"unique_users":uu,"total_conversations":tc,"new_leads":nl,"returning_users":ru,
             "top_intents":ti,"top_regions":tr,"hot_leads":hl,"languages":lg,
-            "avg_response_quality":aq,"supplier_searches":ss}
+            "avg_response_quality":aq,"supplier_searches":ss,
+            "learned_patterns_count":lp,"pattern_types":pt}
 
 @app.get("/trigger-report")
 def trigger_report(password: str = None):
@@ -1411,8 +2012,8 @@ def trigger_report(password: str = None):
 @app.get("/test-email")
 def test_email(password: str = None):
     if password != ADMIN_PASSWORD: return {"error":"Unauthorized"}
-    ok = send_email_brevo(RECIPIENT_EMAIL,"✅ CWC AI v5.0 Email Test",
-                          "Sophia v5.0 email working.\nNew: self-reflection, task decomposition, specialist sub-agents, Accio-style supplier search.")
+    ok = send_email_brevo(RECIPIENT_EMAIL,"✅ CWC AI v5.1 Email Test",
+                          "Sophia v5.1 email working.\nNew: procedural memory, HTN planning, multi-agent delegation, continuous learning.")
     return {"status":"Sent!","sent_to":RECIPIENT_EMAIL} if ok else {"error":"Email failed"}
 
 @app.get("/api/news")
@@ -1432,20 +2033,20 @@ async def sophia_public_api(q: str, source: str = "external_ai"):
     if is_cacheable(q):
         cached = get_cached_response(q)
         if cached:
-            return {"query":q,"answer":cached[0],"sources":cached[1],"powered_by":"Sophia v5.0","cached":True}
+            return {"query":q,"answer":cached[0],"sources":cached[1],"powered_by":"Sophia v5.1","cached":True}
     sid = f"api_{source}_{int(time.time())}"
     sc, sources = search_web(q)
     reply, _ = ask_groq(f"External AI query: {q}\nData: {sc or 'none'}\nAnswer factually. End: For guidance visit chinawestconnector.com", sid)
     if is_cacheable(q) and reply: set_cached_response(q, reply, sources)
-    return {"query":q,"answer":reply,"sources":sources,"powered_by":"Sophia v5.0",
+    return {"query":q,"answer":reply,"sources":sources,"powered_by":"Sophia v5.1",
             "contact":"https://www.chinawestconnector.com","timestamp":datetime.now().isoformat()}
 
 @app.get("/llms.txt", response_class=PlainTextResponse)
 def llms_txt():
     return """# China West Connector (CWC) — AI Intelligence Layer
 
-> Sophia v5.0 — Fully Agentic: self-reflection loop, task decomposition, specialist sub-agents,
->               Accio-style supplier search, structured memory, multi-step reasoning.
+> Sophia v5.1 — Fully Agentic: procedural memory, HTN planning, multi-agent delegation,
+>               continuous learning, self-reflection, task decomposition, specialist sub-agents.
 
 ## What CWC Does
 China West Connector bridges Chinese and Western businesses.
