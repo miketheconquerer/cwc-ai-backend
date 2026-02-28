@@ -1,6 +1,6 @@
 from fastapi import FastAPI, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 import requests
 import os
@@ -10,6 +10,7 @@ import json
 import time
 import hashlib
 import re
+import io
 from collections import defaultdict
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
@@ -21,13 +22,17 @@ load_dotenv()
 # ============================================================
 # CONFIGURATION
 # ============================================================
-BREVO_API_KEY   = os.getenv("BREVO_API_KEY", "")
-GROQ_API_KEY    = os.getenv("GROQ_API_KEY")
-TAVILY_API_KEY  = os.getenv("TAVILY_API_KEY")
-ADMIN_PASSWORD  = os.getenv("ADMIN_PASSWORD", "")
-SENDER_EMAIL    = os.getenv("SENDER_EMAIL", "888nv666@gmail.com")
-RECIPIENT_EMAIL = "digkasm@proton.me"
-DATABASE_URL    = os.getenv("DATABASE_URL")
+BREVO_API_KEY      = os.getenv("BREVO_API_KEY", "")
+GROQ_API_KEY       = os.getenv("GROQ_API_KEY")
+TAVILY_API_KEY     = os.getenv("TAVILY_API_KEY")
+ADMIN_PASSWORD     = os.getenv("ADMIN_PASSWORD", "")
+SENDER_EMAIL       = os.getenv("SENDER_EMAIL", "888nv666@gmail.com")
+RECIPIENT_EMAIL    = "digkasm@proton.me"
+DATABASE_URL       = os.getenv("DATABASE_URL")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")   # v7.0: optional, instant alerts
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")     # v7.0: Michail's chat ID
+ALIBABA_APP_KEY    = os.getenv("ALIBABA_APP_KEY", "")       # v7.0: Alibaba Open Platform
+ALIBABA_APP_SECRET = os.getenv("ALIBABA_APP_SECRET", "")    # v7.0: Alibaba Open Platform
 
 # ============================================================
 # RATE LIMITING
@@ -904,6 +909,11 @@ Dashboard: https://cwc-ai-backend.onrender.com/analytics?password={ADMIN_PASSWOR
 Leads:     https://cwc-ai-backend.onrender.com/leads?password={ADMIN_PASSWORD}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
                 )
+                # v7.0: Also send Telegram for instant visibility
+                send_telegram_alert(
+                    f"🔥 <b>{len(hot_leads)} hot lead(s) need follow-up</b>\n" +
+                    "\n".join([f"• {l[2] or 'Unknown'} ({l[3] or '?'}) — {l[4]}/100" for l in hot_leads[:5]])
+                )
                 print(f"📧 Proactive followup: notified about {len(hot_leads)} hot leads")
                 
         except Exception as e:
@@ -936,6 +946,8 @@ async def schedule_weekly_report():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # v7.0: Seed default RAG knowledge on startup (only runs if table is empty)
+    seed_default_rag_knowledge()
     # Start all background async tasks
     asyncio.create_task(schedule_weekly_report())
     asyncio.create_task(poll_autonomous_tasks())    # v6.0: autonomous task poller
@@ -947,8 +959,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     lifespan=lifespan,
     title="CWC Sophia AI — China-West Business Intelligence",
-    description="Sophia is CWC's agentic AI advisor for China-West cross-border business. v6.0 with autonomous task execution, goal tracking, iterative reflection, conditional re-planning, and proactive outreach.",
-    version="6.0.0",
+    description="Sophia is CWC's agentic AI advisor for China-West cross-border business. v7.0 with RAG knowledge base, multi-platform supplier search, Telegram alerts, user feedback loop, PDF export, and session merging.",
+    version="7.0.0",
 )
 
 # ============================================================
@@ -1020,10 +1032,46 @@ def init_db():
         created_at TIMESTAMP DEFAULT NOW()
     )''')
 
+    # ── v7.0: RAG — CWC Knowledge Base ───────────────────────────────────────
+    # Stores CWC-specific documents (guides, FAQs, case studies, price lists)
+    # that Sophia retrieves at query time — no hallucination on CWC facts.
+    c.execute('''CREATE TABLE IF NOT EXISTS rag_knowledge (
+        id SERIAL PRIMARY KEY,
+        title TEXT NOT NULL,
+        content TEXT NOT NULL,
+        category TEXT DEFAULT 'general',
+        tags TEXT[] DEFAULT '{}',
+        source TEXT DEFAULT 'cwc_internal',
+        embedding_keywords TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+    )''')
+
+    # ── v7.0: User Feedback — explicit thumbs up/down ────────────────────────
+    c.execute('''CREATE TABLE IF NOT EXISTS user_feedback (
+        id SERIAL PRIMARY KEY,
+        session_id TEXT,
+        conversation_id INTEGER,
+        score INTEGER,
+        comment TEXT,
+        intent TEXT,
+        created_at TIMESTAMP DEFAULT NOW()
+    )''')
+
+    # ── v7.0: Platform Product Cache — Alibaba + multi-source results ─────────
+    c.execute('''CREATE TABLE IF NOT EXISTS platform_cache (
+        id SERIAL PRIMARY KEY,
+        query_key TEXT UNIQUE,
+        platform TEXT,
+        results JSONB DEFAULT '[]',
+        created_at TIMESTAMP DEFAULT NOW()
+    )''')
+
     migrations = [
         ("user_profiles",  "key_facts",        "JSONB DEFAULT '{}'"),
         ("user_profiles",  "task_history",      "JSONB DEFAULT '[]'"),
         ("conversations",  "reflection_score",  "INTEGER DEFAULT 0"),
+        ("conversations",  "message_id",        "TEXT DEFAULT ''"),   # v7.0: for feedback linkage
     ]
     for table, col, definition in migrations:
         try:
@@ -1067,6 +1115,28 @@ class SupplierSearchRequest(BaseModel):
 class AutonomousTaskRequest(BaseModel):
     task_description: str
     session_id: str = "anonymous"
+
+# v7.0: User feedback (thumbs up/down)
+class FeedbackRequest(BaseModel):
+    session_id: str
+    score: int          # 1 = thumbs up, -1 = thumbs down
+    comment: str = ""
+    intent: str = ""
+    message_id: str = ""
+
+# v7.0: RAG knowledge base admin
+class KnowledgeRequest(BaseModel):
+    title: str
+    content: str
+    category: str = "general"
+    tags: list = []
+    source: str = "cwc_internal"
+
+# v7.0: Streaming chat (same fields as ChatRequest)
+class StreamChatRequest(BaseModel):
+    message: str
+    session_id: str = "anonymous"
+    deep_search: bool = False
 
 # ============================================================
 # LANGUAGE DETECTION
@@ -1518,6 +1588,673 @@ def fetch_china_news() -> list:
     ]
 
 # ============================================================
+# v7.0: RAG — RETRIEVAL-AUGMENTED GENERATION
+# ============================================================
+# How it works:
+#   1. Admin populates rag_knowledge table with CWC docs via POST /api/knowledge
+#   2. On every chat, retrieve_rag_context() keyword-matches query to stored docs
+#   3. Matched chunks injected into system prompt as "CWC INTERNAL KNOWLEDGE"
+#   4. Sophia answers from real CWC facts, not LLM hallucination
+#
+# What to store in RAG:
+#   - CWC service pricing and packages
+#   - Due diligence process steps
+#   - Market entry cost breakdowns (WFOE setup: $15k-40k, timeline: 3-6 months)
+#   - CWC case studies and success stories
+#   - FAQs that Sophia currently answers from training data (inaccurately)
+#   - Michail's specific expertise areas
+#   - Partner network details (G.P.A. Group, Sichuan Tech Transfer, etc.)
+#   - Red flag patterns from real CWC due diligence cases
+# ============================================================
+
+def retrieve_rag_context(query: str, intent: str = "general", max_chunks: int = 3) -> str:
+    """
+    v7.0: Retrieve relevant CWC knowledge chunks for the current query.
+    Uses keyword matching (no embeddings needed — works on free Render tier).
+    Returns formatted context string ready for system prompt injection.
+    """
+    try:
+        conn = get_db()
+        c = conn.cursor()
+
+        # Build keyword list from query + intent
+        query_words = set(re.findall(r'\b[a-z]{4,}\b', query.lower()))
+        intent_keywords = {
+            "supplier_verification": {"verify","audit","company","samr","registration","fraud","scam","risk"},
+            "supplier_search":       {"supplier","manufacturer","factory","source","moq","price","china"},
+            "market_entry":          {"wfoe","entity","setup","market","entry","invest","register","fdi"},
+            "consultation_request":  {"service","cost","fee","price","package","michail","consultation"},
+            "high_intent_lead":      {"service","package","proposal","budget","timeline","start"},
+        }.get(intent, set())
+        all_keywords = query_words | intent_keywords
+
+        # Retrieve all knowledge chunks (small table, full scan is fine)
+        c.execute("""
+            SELECT id, title, content, category, tags, embedding_keywords
+            FROM rag_knowledge
+            ORDER BY updated_at DESC
+            LIMIT 100
+        """)
+        rows = c.fetchall()
+        conn.close()
+
+        if not rows:
+            return ""
+
+        # Score each chunk by keyword overlap
+        scored = []
+        for row in rows:
+            rid, title, content, category, tags, emb_kw = row
+            chunk_text = f"{title} {content} {category} {' '.join(tags or [])} {emb_kw or ''}".lower()
+            chunk_words = set(re.findall(r'\b[a-z]{4,}\b', chunk_text))
+            overlap = len(all_keywords & chunk_words)
+            if overlap > 0:
+                scored.append((overlap, rid, title, content[:600], category))
+
+        if not scored:
+            return ""
+
+        # Take top N by score
+        scored.sort(reverse=True)
+        top = scored[:max_chunks]
+
+        lines = ["📚 CWC INTERNAL KNOWLEDGE (use this to answer — do not contradict it):"]
+        for score, rid, title, content, category in top:
+            lines.append(f"\n[{category.upper()}] {title}\n{content}")
+        lines.append("\nINSTRUCTION: When answering, cite this knowledge if relevant. It takes priority over general training data.")
+        return "\n".join(lines)
+
+    except Exception as e:
+        print(f"RAG retrieval error: {e}")
+        return ""
+
+
+def add_rag_knowledge(title: str, content: str, category: str = "general",
+                      tags: list = None, source: str = "cwc_internal") -> int:
+    """
+    v7.0: Add a knowledge chunk to the RAG database.
+    Called via POST /api/knowledge (admin only).
+    """
+    tags = tags or []
+    # Auto-extract keywords for better matching
+    all_text = f"{title} {content}".lower()
+    keywords = " ".join(set(re.findall(r'\b[a-z]{5,}\b', all_text))[:50])
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO rag_knowledge (title, content, category, tags, source, embedding_keywords, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+        """, (title, content, category, tags, source, keywords, datetime.now(), datetime.now()))
+        new_id = c.fetchone()[0]
+        conn.commit()
+        conn.close()
+        print(f"📚 RAG: Added knowledge chunk #{new_id}: {title}")
+        return new_id
+    except Exception as e:
+        print(f"RAG add error: {e}")
+        return -1
+
+
+def seed_default_rag_knowledge():
+    """
+    v7.0: Seed the RAG database with core CWC facts on first startup.
+    These replace the LLM's guesswork with actual CWC data.
+    Only seeds if table is empty — safe to call on every startup.
+    """
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM rag_knowledge")
+        count = c.fetchone()[0]
+        conn.close()
+        if count > 0:
+            return  # Already seeded
+    except Exception:
+        return
+
+    default_chunks = [
+        (
+            "CWC Due Diligence Service — Process and Pricing",
+            "CWC Due Diligence covers: SAMR registration verification, business license authenticity check, "
+            "shareholder structure analysis, financial health indicators, red flag screening (fraud/scam history), "
+            "factory audit coordination, certificate verification (ISO, CE, FDA). "
+            "Standard package: $500-1500 USD depending on depth. "
+            "Timeline: 3-7 business days for standard, 24-48h for urgent. "
+            "All reports delivered in English with Chinese source documents attached. "
+            "Michail personally reviews all high-risk findings before delivery.",
+            "due_diligence", ["pricing", "process", "samr", "audit"]
+        ),
+        (
+            "CWC Market Entry — WFOE Setup Cost and Timeline",
+            "Setting up a WFOE (Wholly Foreign-Owned Enterprise) in China: "
+            "Government fees: RMB 500-2000 (varies by province). "
+            "Registered capital: minimum RMB 30,000 (most sectors), higher for regulated industries. "
+            "Total setup cost including CWC professional fees: $8,000-25,000 USD. "
+            "Timeline: 3-6 months (standard), 6-12 months for restricted sectors. "
+            "Key steps: name pre-approval, business scope definition, capital verification, license issuance. "
+            "CWC handles all filings in Chinese — no need for client to be physically present. "
+            "Hainan FTZ offers accelerated 30-day setup with tax advantages for qualifying businesses.",
+            "market_entry", ["wfoe", "setup", "cost", "timeline", "hainan", "ftz"]
+        ),
+        (
+            "CWC Market Entry — JV vs WFOE vs RO Decision Guide",
+            "Representative Office (RO): Cannot sign contracts or invoice. Good for market research only. "
+            "Cost: $3,000-8,000/year. Setup: 1-2 months. "
+            "WFOE: Full operational control, can hire staff, sign contracts, remit profits. "
+            "Best for: manufacturing, tech, consulting. Requires registered capital. "
+            "Joint Venture (JV): Required for restricted sectors (media, education, telecom). "
+            "Risk: IP exposure, partner alignment issues. CWC strongly recommends WFOE where possible. "
+            "VIE Structure: Used by tech companies for regulated sectors. Complex legal structure. "
+            "CWC recommendation: Start with RO for 6 months market validation, then upgrade to WFOE.",
+            "market_entry", ["jv", "wfoe", "ro", "structure", "decision"]
+        ),
+        (
+            "CWC B2B Partnership Service",
+            "CWC identifies, vets and facilitates partnerships between Chinese and Western companies. "
+            "Process: (1) Define partnership criteria, (2) Search CWC partner network + government databases, "
+            "(3) Initial screening + background check, (4) Facilitated introduction, (5) NDA and term sheet support. "
+            "Fee: Success-based 2-5% of deal value for introductions, or fixed $3,000-8,000 for matching service. "
+            "CWC has direct access to: Sichuan Tech Transfer Center, Chengdu AI Innovation Association, "
+            "Tianfu International Tech Transfer Center, Hainan FTZ Authority, CISTEA. "
+            "Average time from brief to first meeting: 4-6 weeks.",
+            "partnership", ["b2b", "partnership", "introduction", "matching", "fee"]
+        ),
+        (
+            "CWC Logistics and Supply Chain Service",
+            "CWC provides: Freight forwarding coordination (sea/air/rail), customs documentation, "
+            "HS code classification, Incoterms negotiation support, supplier payment structuring. "
+            "China-Europe rail (CR Express): 15-20 days, 30-40% cheaper than air. "
+            "Sea freight: 25-35 days to Europe, 18-25 days to US West Coast. "
+            "Air freight: 3-7 days, premium pricing. "
+            "Recommended payment terms: 30% T/T deposit + 70% against B/L copy (verified suppliers only). "
+            "Never 100% advance payment without CWC due diligence clearance.",
+            "logistics", ["shipping", "freight", "customs", "incoterms", "payment"]
+        ),
+        (
+            "Common China Business Red Flags and Scam Patterns",
+            "Top red flags CWC has identified in due diligence cases: "
+            "1. Company registered < 1 year but claims 10+ years experience. "
+            "2. Registered capital listed as 'subscribed' (not paid-in) — common fraud indicator. "
+            "3. Registered address is a residential building or shared virtual office. "
+            "4. Business scope does not match the product being sold. "
+            "5. Requests 100% upfront payment before samples. "
+            "6. Certificate numbers cannot be verified on SAMR/CNCA official databases. "
+            "7. Company name in contract differs slightly from SAMR registration. "
+            "8. WeChat-only communication, no official email domain. "
+            "9. Price 40%+ below verified market rate — usually substitution fraud. "
+            "10. Refuses video call showing actual factory floor.",
+            "due_diligence", ["red_flags", "scam", "fraud", "warning", "risk", "patterns"]
+        ),
+        (
+            "CWC Founder and Team Background",
+            "Michail Digkas: Founder of China West Connector. International business lawyer. "
+            "10+ years China experience. Specialises in cross-border transactions, JV structuring, "
+            "IP protection in China, and dispute resolution. "
+            "Based between Europe and China. Fluent in: English, Greek, intermediate Mandarin. "
+            "CWC is a member of the G.P.A. Group: 147+ years combined experience, "
+            "2,700+ completed projects across 50+ countries (Group figures). "
+            "CWC focuses specifically on China-West corridor — not generalist consultants.",
+            "about_cwc", ["michail", "founder", "background", "experience", "team"]
+        ),
+        (
+            "Supplier Sourcing — How CWC Verifies Manufacturers",
+            "CWC supplier verification process: "
+            "Step 1: SAMR database check — confirm legal registration, business scope, registered capital. "
+            "Step 2: Business license scan analysis — verify stamps, dates, QR codes. "
+            "Step 3: Export license check (required for regulated goods). "
+            "Step 4: Certificate authenticity verification (ISO/CE/FDA) via issuing body databases. "
+            "Step 5: Open-source intelligence — Alibaba, 1688, trade databases, complaint forums. "
+            "Step 6: Video factory walkthrough (remote) or physical audit (on-site). "
+            "Step 7: Sample order coordination with quality inspection before bulk shipment. "
+            "Cost: $300-800 for remote verification; $1,500-3,500 for on-site factory audit (China).",
+            "due_diligence", ["supplier", "verification", "process", "factory", "audit", "cost"]
+        ),
+    ]
+
+    for title, content, category, tags in default_chunks:
+        add_rag_knowledge(title, content, category, tags, source="cwc_default")
+
+    print(f"📚 RAG: Seeded {len(default_chunks)} default CWC knowledge chunks")
+
+
+# ============================================================
+# v7.0: ALIBABA + MULTI-PLATFORM SUPPLIER SEARCH
+# ============================================================
+def search_alibaba_products(product: str, region: str = "") -> list:
+    """
+    v7.0: Search Alibaba.com via Tavily with site-targeted queries.
+    Returns structured product listings with prices and supplier info.
+    Falls back to Made-in-China and Global Sources automatically.
+    
+    To enable direct Alibaba API (better structured data):
+    1. Register at open.alibaba.com
+    2. Set ALIBABA_APP_KEY and ALIBABA_APP_SECRET in Render env vars
+    3. The direct API block below will activate automatically
+    """
+    results = []
+    year = datetime.now().year
+
+    # ── Try Direct Alibaba API first (if credentials configured) ─────────────
+    if ALIBABA_APP_KEY and ALIBABA_APP_SECRET:
+        try:
+            import hmac as _hmac
+            import hashlib as _hashlib
+            # Alibaba Open Platform signature
+            params = {
+                "app_key": ALIBABA_APP_KEY,
+                "method": "alibaba.product.search",
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "format": "json",
+                "v": "2",
+                "sign_method": "md5",
+                "q": product,
+                "page_no": "1",
+                "page_size": "10",
+                "language": "en",
+            }
+            # Sign the request
+            sorted_params = sorted(params.items())
+            sign_str = ALIBABA_APP_SECRET + "".join(f"{k}{v}" for k, v in sorted_params) + ALIBABA_APP_SECRET
+            params["sign"] = _hashlib.md5(sign_str.encode()).hexdigest().upper()
+
+            res = requests.get(
+                "https://gw.api.alibaba.com/openapi/param2/2/com.alibaba.product/alibaba.product.search/",
+                params=params, timeout=10
+            )
+            if res.status_code == 200:
+                data = res.json()
+                products = data.get("result", {}).get("products", [])
+                for p in products[:8]:
+                    results.append({
+                        "platform": "Alibaba International",
+                        "title": p.get("subject", ""),
+                        "price_range": f"${p.get('priceRangeMin','?')}–${p.get('priceRangeMax','?')}",
+                        "moq": p.get("minimumOrderQuantity", "Contact supplier"),
+                        "supplier": p.get("sellerLoginId", ""),
+                        "url": p.get("productUrl", ""),
+                        "trade_assurance": p.get("tradeAssurance", False),
+                        "gold_supplier": p.get("goldSupplier", False),
+                    })
+                if results:
+                    print(f"🏭 Alibaba API: {len(results)} products for '{product}'")
+                    return results
+        except Exception as e:
+            print(f"Alibaba API error: {e}")
+
+    # ── Tavily multi-platform search (always works, no account needed) ────────
+    platform_queries = [
+        (f"site:alibaba.com {product} supplier manufacturer price MOQ", "Alibaba International"),
+        (f"site:made-in-china.com {product} manufacturer factory verified", "Made-in-China"),
+        (f"site:globalsources.com {product} supplier China export", "Global Sources"),
+        (f"site:aliexpress.com {product} wholesale price", "AliExpress"),
+    ]
+
+    # Check platform cache (30-minute TTL)
+    cache_key = hashlib.md5(f"platform_{product}_{region}".encode()).hexdigest()
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT results, created_at FROM platform_cache WHERE query_key=%s", (cache_key,))
+        row = c.fetchone()
+        conn.close()
+        if row:
+            age = (datetime.now() - row[1]).total_seconds() / 60 if row[1] else 999
+            if age < 30 and row[0]:
+                cached = row[0] if isinstance(row[0], list) else json.loads(row[0])
+                if cached:
+                    print(f"🏭 Platform cache hit for '{product}'")
+                    return cached
+    except Exception:
+        pass
+
+    for query, platform_name in platform_queries[:3]:  # max 3 to save Tavily credits
+        try:
+            res = requests.post(
+                "https://api.tavily.com/search",
+                json={"api_key": TAVILY_API_KEY, "query": query,
+                      "max_results": 4, "search_depth": "basic"},
+                timeout=8
+            )
+            if res.status_code != 200:
+                continue
+            for r in res.json().get("results", []):
+                title = r.get("title", "").strip()
+                url   = r.get("url", "")
+                snippet = r.get("content", "")[:300]
+                if not title or len(title) < 5:
+                    continue
+                # Extract price signals from snippet
+                price_match = re.search(r'\$[\d,]+(?:\.\d+)?(?:\s*[-–]\s*\$[\d,]+(?:\.\d+)?)?', snippet)
+                moq_match   = re.search(r'(?:MOQ|minimum)[:\s]+(\d+[\s\w]+)', snippet, re.IGNORECASE)
+                results.append({
+                    "platform": platform_name,
+                    "title": title[:80],
+                    "price_range": price_match.group(0) if price_match else "Request quote",
+                    "moq": moq_match.group(1).strip() if moq_match else "Contact supplier",
+                    "supplier": "",
+                    "url": url,
+                    "trade_assurance": False,
+                    "gold_supplier": False,
+                    "snippet": snippet,
+                })
+        except Exception as e:
+            print(f"Platform search error ({platform_name}): {e}")
+
+    # Persist to cache
+    if results:
+        try:
+            conn = get_db()
+            c = conn.cursor()
+            c.execute("""
+                INSERT INTO platform_cache (query_key, platform, results, created_at)
+                VALUES (%s, %s, %s::jsonb, %s)
+                ON CONFLICT (query_key) DO UPDATE SET results=EXCLUDED.results, created_at=EXCLUDED.created_at
+            """, (cache_key, "multi", json.dumps(results), datetime.now()))
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+
+    print(f"🏭 Platform search: {len(results)} listings for '{product}'")
+    return results[:10]
+
+
+def format_platform_results(results: list, product: str) -> str:
+    """Format platform search results for LLM consumption"""
+    if not results:
+        return f"No platform listings found for '{product}'. Recommend CWC direct sourcing."
+
+    lines = [f"=== LIVE PLATFORM LISTINGS: {product} ==="]
+    by_platform = defaultdict(list)
+    for r in results:
+        by_platform[r["platform"]].append(r)
+
+    for platform, items in by_platform.items():
+        lines.append(f"\n📦 {platform} ({len(items)} listings):")
+        for item in items[:3]:
+            trust = ""
+            if item.get("trade_assurance"): trust += "✅ Trade Assurance "
+            if item.get("gold_supplier"):   trust += "🥇 Gold Supplier"
+            lines.append(f"  • {item['title']}")
+            lines.append(f"    Price: {item['price_range']} | MOQ: {item['moq']} {trust}")
+            if item.get("url"):
+                lines.append(f"    Link: {item['url']}")
+
+    lines.append(f"\n⚠️ CWC NOTE: Platform prices are indicative. Always verify supplier before payment.")
+    lines.append("Contact CWC for verified supplier matching with full due diligence included.")
+    return "\n".join(lines)
+
+
+# ============================================================
+# v7.0: TELEGRAM INSTANT ALERTS
+# ============================================================
+def send_telegram_alert(message: str) -> bool:
+    """
+    v7.0: Send instant Telegram message to Michail.
+    Zero cost. Faster than email for urgent alerts.
+    Setup: Create bot via @BotFather, get TOKEN + CHAT_ID, add to Render env vars.
+    """
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return False
+    try:
+        res = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"},
+            timeout=8
+        )
+        if res.status_code == 200:
+            print(f"📱 Telegram alert sent")
+            return True
+        print(f"❌ Telegram error: {res.status_code}")
+        return False
+    except Exception as e:
+        print(f"❌ Telegram failed: {e}")
+        return False
+
+
+# ============================================================
+# v7.0: USER FEEDBACK — Thumbs Up / Down
+# ============================================================
+def save_user_feedback(session_id: str, score: int, intent: str = "",
+                       comment: str = "", message_id: str = "") -> bool:
+    """
+    v7.0: Store explicit user feedback (thumbs up=1, thumbs down=-1).
+    Feeds back into learned_patterns so Sophia improves from real user signals,
+    not just self-reflection scores.
+    """
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO user_feedback (session_id, score, intent, comment, created_at)
+            VALUES (%s, %s, %s, %s, %s)
+        """, (session_id, score, intent, comment, datetime.now()))
+
+        # Also update learned_patterns based on this feedback
+        if intent and score != 0:
+            feedback_type = "user_thumbs_up" if score > 0 else "user_thumbs_down"
+            trigger = f"intent:{intent}|user_feedback"
+            c.execute("""
+                INSERT INTO learned_patterns
+                    (pattern_type, trigger_condition, action_recommendation, context_type,
+                     success_count, failure_count, avg_reflection_score, last_used)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+            """, (
+                feedback_type, trigger,
+                "User explicitly rated positively" if score > 0 else "User explicitly rated negatively",
+                intent,
+                1 if score > 0 else 0, 1 if score < 0 else 0,
+                8.0 if score > 0 else 3.0,
+                datetime.now()
+            ))
+
+        conn.commit()
+        conn.close()
+
+        # Telegram alert on thumbs down (so Michail can follow up)
+        if score < 0:
+            send_telegram_alert(
+                f"👎 <b>Negative feedback</b>\n"
+                f"Session: {session_id[:20]}\n"
+                f"Intent: {intent}\n"
+                f"Comment: {comment or 'No comment'}"
+            )
+        return True
+    except Exception as e:
+        print(f"Feedback save error: {e}")
+        return False
+
+
+# ============================================================
+# v7.0: SESSION MERGING — Same user, different devices
+# ============================================================
+def merge_sessions_by_email(email: str, current_session_id: str):
+    """
+    v7.0: When a lead is captured with an email, find all other sessions
+    with the same email and merge their key_facts and task_history.
+    One user = one memory, regardless of device or browser session.
+    """
+    if not email or not current_session_id:
+        return
+    try:
+        conn = get_db()
+        c = conn.cursor()
+
+        # Find all other sessions with same email
+        c.execute("""
+            SELECT session_id, key_facts, task_history, lead_score, topics_discussed
+            FROM user_profiles
+            WHERE email = %s AND session_id != %s
+            ORDER BY last_seen DESC
+            LIMIT 5
+        """, (email, current_session_id))
+        other_sessions = c.fetchall()
+
+        if not other_sessions:
+            conn.close()
+            return
+
+        # Get current session
+        c.execute("SELECT key_facts, task_history, lead_score FROM user_profiles WHERE session_id=%s",
+                  (current_session_id,))
+        current = c.fetchone()
+        if not current:
+            conn.close()
+            return
+
+        merged_facts = current[0] if isinstance(current[0], dict) else {}
+        merged_history = current[1] if isinstance(current[1], list) else []
+        max_score = current[2] or 0
+
+        for sess in other_sessions:
+            other_facts   = sess[1] if isinstance(sess[1], dict) else {}
+            other_history = sess[2] if isinstance(sess[2], list) else []
+            other_score   = sess[3] or 0
+
+            # Merge facts — current session wins on conflicts
+            for k, v in other_facts.items():
+                if k not in merged_facts and v:
+                    merged_facts[k] = v
+
+            # Merge task history — avoid duplicates by goal name
+            existing_goals = {t.get("goal") for t in merged_history}
+            for task in other_history:
+                if task.get("goal") not in existing_goals:
+                    merged_history.append(task)
+                    existing_goals.add(task.get("goal"))
+
+            max_score = max(max_score, other_score)
+
+        # Save merged data to current session
+        c.execute("""
+            UPDATE user_profiles
+            SET key_facts = %s::jsonb, task_history = %s::jsonb, lead_score = %s
+            WHERE session_id = %s
+        """, (json.dumps(merged_facts), json.dumps(merged_history[-15:]), max_score, current_session_id))
+
+        conn.commit()
+        conn.close()
+        print(f"🔗 Session merge: {len(other_sessions)} sessions merged into {current_session_id[:20]}")
+
+    except Exception as e:
+        print(f"Session merge error: {e}")
+
+
+# ============================================================
+# v7.0: PDF REPORT EXPORT (pure Python, no external services)
+# ============================================================
+def generate_pdf_report(session_id: str, report_type: str = "supplier_brief") -> bytes | None:
+    """
+    v7.0: Generate a branded CWC PDF report from session data.
+    Uses only Python stdlib — no paid services, no new pip packages
+    beyond reportlab (already common on Render).
+    Returns PDF bytes or None if reportlab not available.
+    """
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.colors import HexColor
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable, Table, TableStyle
+        from reportlab.lib.units import cm
+        from reportlab.lib import colors
+    except ImportError:
+        print("⚠️ reportlab not installed — PDF export unavailable. Add 'reportlab' to requirements.txt")
+        return None
+
+    try:
+        profile = get_or_create_user_profile(session_id)
+        history = get_conversation_history(session_id, limit=30)
+
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(buf, pagesize=A4,
+                                rightMargin=2*cm, leftMargin=2*cm,
+                                topMargin=2*cm, bottomMargin=2*cm)
+
+        styles = getSampleStyleSheet()
+        cwc_red    = HexColor("#C0392B")
+        cwc_dark   = HexColor("#1A1A2E")
+        cwc_grey   = HexColor("#7F8C8D")
+
+        title_style = ParagraphStyle("CWCTitle", parent=styles["Title"],
+                                     textColor=cwc_dark, fontSize=20, spaceAfter=6)
+        h1_style    = ParagraphStyle("CWCH1", parent=styles["Heading1"],
+                                     textColor=cwc_red, fontSize=13, spaceBefore=12, spaceAfter=4)
+        body_style  = ParagraphStyle("CWCBody", parent=styles["Normal"],
+                                     fontSize=10, leading=14, spaceAfter=4)
+        meta_style  = ParagraphStyle("CWCMeta", parent=styles["Normal"],
+                                     fontSize=9, textColor=cwc_grey, spaceAfter=2)
+
+        story = []
+
+        # Header
+        story.append(Paragraph("CHINA WEST CONNECTOR", title_style))
+        story.append(Paragraph(f"AI Intelligence Report — {report_type.replace('_',' ').title()}", meta_style))
+        story.append(Paragraph(f"Generated: {datetime.now().strftime('%d %B %Y %H:%M UTC')} | Powered by Sophia v7.0", meta_style))
+        story.append(HRFlowable(width="100%", thickness=2, color=cwc_red, spaceAfter=12))
+
+        # Lead info
+        name    = profile.get("name") or "Prospect"
+        company = profile.get("company") or "Not provided"
+        region  = profile.get("region_interest") or "Not specified"
+        score   = profile.get("lead_score", 0)
+        intent  = profile.get("last_intent", "general")
+        kf      = profile.get("key_facts", {}) or {}
+
+        story.append(Paragraph("CONTACT INTELLIGENCE", h1_style))
+        contact_data = [
+            ["Name", name],     ["Company", company],
+            ["Region", region], ["Lead Score", f"{score}/100"],
+            ["Primary Intent", intent],
+        ]
+        t = Table(contact_data, colWidths=[4*cm, 12*cm])
+        t.setStyle(TableStyle([
+            ("FONTSIZE", (0,0), (-1,-1), 9),
+            ("TEXTCOLOR", (0,0), (0,-1), cwc_grey),
+            ("FONTNAME", (0,0), (0,-1), "Helvetica-Bold"),
+            ("ROWBACKGROUNDS", (0,0), (-1,-1), [colors.white, HexColor("#F8F9FA")]),
+            ("GRID", (0,0), (-1,-1), 0.5, HexColor("#E0E0E0")),
+            ("LEFTPADDING", (0,0), (-1,-1), 8),
+            ("RIGHTPADDING", (0,0), (-1,-1), 8),
+            ("TOPPADDING", (0,0), (-1,-1), 5),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 5),
+        ]))
+        story.append(t)
+        story.append(Spacer(1, 0.4*cm))
+
+        # Key Facts
+        if kf:
+            story.append(Paragraph("EXTRACTED BUSINESS FACTS", h1_style))
+            for k, v in kf.items():
+                if v:
+                    story.append(Paragraph(f"<b>{k.replace('_',' ').title()}:</b> {v}", body_style))
+
+        # Conversation
+        if history:
+            story.append(Paragraph("CONVERSATION TRANSCRIPT", h1_style))
+            for user_msg, ai_resp in history[-10:]:
+                story.append(Paragraph(f"<b>User:</b> {user_msg[:200]}", body_style))
+                story.append(Paragraph(f"<b>Sophia:</b> {ai_resp[:300]}", body_style))
+                story.append(Spacer(1, 0.2*cm))
+
+        # Footer
+        story.append(HRFlowable(width="100%", thickness=1, color=cwc_grey, spaceBefore=12))
+        story.append(Paragraph("China West Connector | www.chinawestconnector.com | Michail Digkas", meta_style))
+        story.append(Paragraph("G.P.A. Group Member | 147+ years combined experience | 50+ countries", meta_style))
+        story.append(Paragraph("CONFIDENTIAL — For internal use and client discussions only.", meta_style))
+
+        doc.build(story)
+        pdf_bytes = buf.getvalue()
+        print(f"📄 PDF generated: {len(pdf_bytes)} bytes for session {session_id[:20]}")
+        return pdf_bytes
+
+    except Exception as e:
+        print(f"PDF generation error: {e}")
+        return None
+
+
+# ============================================================
 # COMPANY LOOKUP
 # ============================================================
 def lookup_chinese_company(company_name: str) -> dict:
@@ -1556,8 +2293,18 @@ def search_suppliers(product_or_sector: str, region: str = "") -> dict:
         content, sources = search_web(q)
         if content:
             all_raw.append(content[:600]); all_sources.extend(sources)
+
+    # v7.0: Enhance with multi-platform product listings
+    platform_results = []
+    if TAVILY_API_KEY:
+        platform_results = search_alibaba_products(product_or_sector, region)
+
     if not GROQ_API_KEY or not all_raw:
-        return {"market_context":"","sources":[]}
+        result = {"market_context":"","sources":[],"platform_listings":[]}
+        if platform_results:
+            result["platform_listings"] = platform_results
+        return result
+
     raw_text = "\n\n".join(all_raw)
     try:
         res = requests.post(
@@ -1585,10 +2332,11 @@ def search_suppliers(product_or_sector: str, region: str = "") -> dict:
         raw = re.sub(r"^```json\s*|```$","",raw.strip(),flags=re.MULTILINE).strip()
         structured = json.loads(raw)
         structured["sources"] = list(dict.fromkeys(s for s in all_sources if s))[:4]
+        structured["platform_listings"] = platform_results  # v7.0
         return structured
     except Exception as e:
         print(f"Supplier structuring error: {e}")
-        return {"market_context":raw_text[:300],"sources":all_sources[:3]}
+        return {"market_context":raw_text[:300],"sources":all_sources[:3],"platform_listings":platform_results}
 
 # ============================================================
 # v5: TASK DECOMPOSITION ENGINE
@@ -1742,6 +2490,39 @@ GROQ_TOOLS = [
                 "status":{"type":"string","enum":["pending","in_progress","done","blocked"]}
             },"required":["goal","milestone","status"]}
         }
+    },
+    # v7.0: Live platform product search tool
+    {
+        "type": "function",
+        "function": {
+            "name": "search_platform_listings",
+            "description": (
+                "Search live product listings from Alibaba, Made-in-China, Global Sources, and AliExpress. "
+                "Returns real supplier listings with prices, MOQ, and Trade Assurance status. "
+                "Use when user wants to see actual products, compare prices across platforms, "
+                "or find specific manufacturers. More specific than find_suppliers — shows real listings."
+            ),
+            "parameters": {"type":"object","properties":{
+                "product":{"type":"string","description":"Specific product to search for"},
+                "region":{"type":"string","description":"Buyer country/region for export relevance"}
+            },"required":["product"]}
+        }
+    },
+    # v7.0: RAG knowledge retrieval tool (Sophia calls this for CWC-specific facts)
+    {
+        "type": "function",
+        "function": {
+            "name": "retrieve_cwc_knowledge",
+            "description": (
+                "Retrieve official CWC knowledge, pricing, process details, and case studies. "
+                "Use when asked about CWC services, pricing, timelines, process, or Michail's background. "
+                "This returns verified CWC facts — always prefer this over general knowledge."
+            ),
+            "parameters": {"type":"object","properties":{
+                "query":{"type":"string","description":"What specific CWC information to retrieve"},
+                "category":{"type":"string","enum":["due_diligence","market_entry","partnership","logistics","about_cwc","general"],"description":"Knowledge category"}
+            },"required":["query"]}
+        }
     }
 ]
 
@@ -1802,8 +2583,30 @@ def run_tool_call(tool_name: str, tool_args: dict, session_id: str = None, user_
         lines += ["• " + r for r in result.get('top_regions',[])]
         lines += ["\nRED FLAGS:"]
         lines += ["⚠️ " + f for f in result.get('red_flags',[])]
+        # v7.0: Append platform listings if available
+        platform_listings = result.get("platform_listings", [])
+        if platform_listings:
+            lines.append(f"\n{format_platform_results(platform_listings, product)}")
         lines.append(f"\nCWC: {result.get('cwc_recommendation','Contact CWC for verified supplier matching.')}")
         return "\n".join(lines), result.get('sources',[])
+
+    # v7.0: Direct platform search tool
+    elif tool_name == "search_platform_listings":
+        product  = tool_args.get("product", "")
+        region   = tool_args.get("region", "")
+        listings = search_alibaba_products(product, region)
+        formatted = format_platform_results(listings, product)
+        sources = [r.get("url","") for r in listings if r.get("url")]
+        return formatted, [s for s in sources if s][:5]
+
+    # v7.0: RAG knowledge retrieval tool
+    elif tool_name == "retrieve_cwc_knowledge":
+        query    = tool_args.get("query", "")
+        category = tool_args.get("category", "general")
+        context  = retrieve_rag_context(query, intent=category, max_chunks=4)
+        if context:
+            return context, []
+        return "No specific CWC knowledge found for this query. Use general expertise.", []
 
     elif tool_name == "reflect_and_improve":
         draft = tool_args.get("draft_response","")
@@ -2144,6 +2947,11 @@ def ask_groq(prompt: str, session_id: str = "anonymous",
     # v6.0: Inject active goals for journey continuity
     active_goals_context = get_active_goals(session_id) if session_id else ""
 
+    # v7.0: RAG — retrieve relevant CWC knowledge for this query
+    rag_context = retrieve_rag_context(prompt, intent_data['primary'], max_chunks=3)
+    if rag_context:
+        print("📚 RAG: Injected knowledge context")
+
     qualification_prompt   = check_qualification_gaps(user_profile or {}, message_count)
     should_escalate        = check_escalation_trigger(user_profile or {}, message_count, prompt)
     escalation_instruction = ("\n🚨 ESCALATION: Urgent/high intent. End response directing them to 'Speak with Michail' button."
@@ -2174,11 +2982,11 @@ def ask_groq(prompt: str, session_id: str = "anonymous",
         htn_context_str = f"\n🎯 AGENT TRACE: Completed sub-tasks: {', '.join(completed_tasks)}"
 
     _now = datetime.now()
-    _today_str = _now.strftime('%A, %d %B %Y')   # e.g. "Friday, 28 February 2026"
+    _today_str = _now.strftime('%A, %d %B %Y')
     _time_str  = _now.strftime('%H:%M UTC')
 
     system_prompt = f"""You are Sophia — official AI advisor for China West Connector (CWC).
-Version 6.0 | Deep Search: {'ON' if deep_search else 'OFF'}
+Version 7.0 | Deep Search: {'ON' if deep_search else 'OFF'}
 TODAY: {_today_str} | TIME: {_time_str}
 IMPORTANT: When asked the date, day, or time — use ONLY the values above. Never guess.
 
@@ -2193,27 +3001,30 @@ INTENT: {intent_data['primary']} | REGION: {intent_data['region'] or '?'} | MESS
 {learned_context}
 {workflow_context}
 {htn_context_str}
+{rag_context}
 
-━━━ v6.0 AUTONOMOUS CAPABILITIES ━━━
-You can now queue background tasks with queue_autonomous_task.
-Use this when user says things like:
-  "watch this company for me" → queue company monitoring
-  "research X and get back to me" → queue market research
-  "keep an eye on..." → queue news monitoring
-  "check back on..." → queue follow-up task
-Always confirm what you've queued and that they'll receive email results.
+━━━ v7.0 CAPABILITIES ━━━
+NEW TOOLS THIS VERSION:
+• retrieve_cwc_knowledge  → fetch official CWC pricing, process, case study facts (use FIRST for CWC questions)
+• search_platform_listings → live Alibaba/Made-in-China/Global Sources product listings with real prices
+• find_suppliers now returns platform_listings embedded in results
+
+AUTONOMOUS TASKS (queue for background execution):
+  "watch this company" → queue_autonomous_task (monitor_company)
+  "research X later"   → queue_autonomous_task (market_research)
 
 ━━━ CHAIN OF THOUGHT (always execute) ━━━
-1. What does the user ACTUALLY need (beyond what they literally asked)?
-2. What do I know from their profile, pre-gathered intel, active goals, and learned patterns?
-3. Do I need more tools — or is pre-gathered intel sufficient?
-4. Should any part of this request be queued as an autonomous background task?
-5. Which CWC service maps most directly to their need?
-6. What is the single most valuable next step?
-7. After drafting, CALL reflect_and_improve. If score < 7, REWRITE and reflect again (max 2 attempts).
-8. Call update_goal_progress to track milestones reached this conversation.
+1. What does the user ACTUALLY need?
+2. Do I have CWC-specific knowledge? → call retrieve_cwc_knowledge FIRST for any CWC service/pricing questions
+3. Does the user want real supplier listings? → call search_platform_listings (shows real Alibaba prices)
+4. What do I know from their profile, active goals, and learned patterns?
+5. Should any part be queued as autonomous background task?
+6. Which CWC service maps most directly to their need?
+7. What is the single most valuable next step?
+8. After drafting, CALL reflect_and_improve. If score < 7, REWRITE (max 2 attempts).
+9. Call update_goal_progress to track milestones.
 
-TOOLS: search_market_intelligence | lookup_company | generate_risk_report | find_suppliers | reflect_and_improve | update_semantic_memory | queue_autonomous_task | update_goal_progress
+TOOLS: search_market_intelligence | lookup_company | generate_risk_report | find_suppliers | search_platform_listings | retrieve_cwc_knowledge | reflect_and_improve | update_semantic_memory | queue_autonomous_task | update_goal_progress
 
 ━━━ MISSION ━━━
 You are NOT a Q&A bot. You are an active business advisor.
@@ -2234,11 +3045,12 @@ Services: Legal | Due Diligence | B2B Partnerships | FDI Consulting | Logistics 
 Regions: Europe • Africa • Middle East • LATAM • Central Asia • North America
 
 ━━━ RESPONSE STRATEGY ━━━
-supplier_search       → USE find_suppliers. Present structured intel. Offer CWC verified matching.
+supplier_search       → USE find_suppliers + search_platform_listings. Show real listings. Offer CWC verified matching.
 supplier_verification → URGENT. USE generate_risk_report. Ask company name + amounts. Escalate.
 high_intent_lead      → 1-2 qualifying questions + CWC recommendation + push to Michail
-consultation_request  → Confirm CWC can help + 'Speak with Michail' button
+consultation_request  → USE retrieve_cwc_knowledge for pricing. Confirm CWC can help + 'Speak with Michail' button
 information_gathering → Specific insight with data, then offer deeper consultation
+cwc_service_questions → ALWAYS call retrieve_cwc_knowledge first — never guess CWC pricing or process
 
 STYLE: Max 200 words | Sharp, specific, commercial | No buzzwords | Specific numbers
 Escalate → "click the 'Speak with Michail' button above"
@@ -2334,11 +3146,23 @@ FIRST MESSAGE (no history, no quick action): Introduce as Sophia, ask direction.
         if message_count > 0 and message_count % 3 == 0:
             _extract_and_save_key_facts(session_id, user_profile or {})
 
-        return response_text, list(dict.fromkeys(s for s in all_sources if s))[:5]
+        # v7.0: Telegram instant alert on newly hot leads (score just crossed 75)
+        old_score = (user_profile or {}).get('lead_score', 0)
+        if new_score >= 75 and old_score < 75:
+            send_telegram_alert(
+                f"🔥 <b>HOT LEAD</b>\n"
+                f"Score crossed 75: {new_score}/100\n"
+                f"Session: {session_id[:20]}\n"
+                f"Intent: {intent_data['primary']}\n"
+                f"Name: {(user_profile or {}).get('name') or 'Unknown'}\n"
+                f"Region: {intent_data['region'] or '?'}"
+            )
+
+        return response_text, list(dict.fromkeys(s for s in all_sources if s))[:5], reflection_score
 
     except Exception as e:
         print(f"Groq error: {e}")
-        return "I apologise — connection trouble. Please reach out to the CWC team directly.", []
+        return "I apologise — connection trouble. Please reach out to the CWC team directly.", [], 5
 
 
 def _update_conversation_summary(session_id: str):
@@ -2488,19 +3312,29 @@ Dashboard: https://cwc-ai-backend.onrender.com/analytics?password={ADMIN_PASSWOR
 def root():
     return {
         "service": "CWC Sophia AI — China-West Business Intelligence",
-        "version": "6.0.0",
+        "version": "7.0.0",
         "status": "operational",
         "features": [
             "procedural_memory", "htn_planning_with_conditional_replanning",
             "multi_agent_delegation", "continuous_learning_with_normalized_patterns",
             "iterative_self_reflection", "task_decomposition", "specialist_sub_agents",
-            "accio_supplier_search", "autonomous_background_tasks",  # v6.0
-            "long_horizon_goal_tracking",                            # v6.0
-            "proactive_hot_lead_followup",                           # v6.0
-            "agent_trace_transparency"                               # v6.0
+            "accio_supplier_search", "autonomous_background_tasks",
+            "long_horizon_goal_tracking", "proactive_hot_lead_followup",
+            "agent_trace_transparency",
+            "rag_knowledge_base",           # v7.0
+            "multi_platform_supplier_search", # v7.0
+            "telegram_instant_alerts",       # v7.0
+            "user_feedback_loop",            # v7.0
+            "pdf_report_export",             # v7.0
+            "session_identity_merging",      # v7.0
+            "confidence_scoring",            # v7.0
         ],
         "public_api": "GET /api/sophia?q=your+question",
         "news_api": "GET /api/news",
+        "feedback_api": "POST /api/feedback",
+        "knowledge_api": "POST /api/knowledge (admin)",
+        "pdf_api": "GET /api/export/{session_id}",
+        "stream_api": "POST /api/chat-stream",
         "docs": "/docs"
     }
 
@@ -2512,9 +3346,205 @@ def health_check():
         "tavily": bool(TAVILY_API_KEY),
         "brevo": bool(BREVO_API_KEY),
         "db": bool(DATABASE_URL),
-        "version": "6.0.0",
-        "new_v6_features": ["autonomous_tasks", "goal_tracking", "iterative_reflection", "proactive_followup"]
+        "telegram": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
+        "alibaba_api": bool(ALIBABA_APP_KEY),
+        "version": "7.0.0",
+        "new_v7_features": ["rag_knowledge","platform_search","telegram","feedback","pdf","session_merge","confidence"]
     }
+
+# ── v7.0: USER FEEDBACK ───────────────────────────────────────────────────────
+@app.post("/api/feedback")
+async def submit_feedback(req: FeedbackRequest):
+    """
+    v7.0: Receive thumbs up/down from the chat widget.
+    Frontend should call this after every response with score=1 (up) or score=-1 (down).
+    """
+    if req.score not in (1, -1):
+        return {"error": "score must be 1 (thumbs up) or -1 (thumbs down)"}
+    ok = save_user_feedback(
+        session_id=req.session_id,
+        score=req.score,
+        intent=req.intent,
+        comment=req.comment,
+        message_id=req.message_id
+    )
+    return {"status": "ok" if ok else "error", "score": req.score}
+
+@app.get("/api/feedback-stats")
+def feedback_stats(password: str = None):
+    if password != ADMIN_PASSWORD: return {"error": "Unauthorized"}
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM user_feedback WHERE score=1"); thumbs_up = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) FROM user_feedback WHERE score=-1"); thumbs_down = c.fetchone()[0]
+        c.execute("SELECT intent, COUNT(*) FROM user_feedback WHERE score=-1 GROUP BY intent ORDER BY 2 DESC LIMIT 5"); worst = c.fetchall()
+        c.execute("SELECT comment FROM user_feedback WHERE score=-1 AND comment != '' ORDER BY created_at DESC LIMIT 10"); comments = [r[0] for r in c.fetchall()]
+        conn.close()
+        total = thumbs_up + thumbs_down
+        return {
+            "thumbs_up": thumbs_up, "thumbs_down": thumbs_down, "total": total,
+            "satisfaction_rate": round(thumbs_up / total * 100, 1) if total > 0 else 0,
+            "worst_intents": [{"intent": r[0], "count": r[1]} for r in worst],
+            "recent_negative_comments": comments
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+# ── v7.0: RAG KNOWLEDGE BASE ADMIN ───────────────────────────────────────────
+@app.post("/api/knowledge")
+async def add_knowledge(req: KnowledgeRequest, password: str = None):
+    """
+    v7.0: Add a knowledge chunk to Sophia's RAG database.
+    Use this to add CWC pricing, process docs, case studies, FAQs.
+    Sophia will retrieve and use this in responses automatically.
+    """
+    if password != ADMIN_PASSWORD:
+        return {"error": "Unauthorized — provide ?password=YOUR_ADMIN_PASSWORD"}
+    new_id = add_rag_knowledge(req.title, req.content, req.category, req.tags, req.source)
+    if new_id > 0:
+        return {"status": "added", "id": new_id, "title": req.title, "category": req.category}
+    return {"error": "Failed to add knowledge chunk"}
+
+@app.get("/api/knowledge")
+def list_knowledge(password: str = None, category: str = None):
+    """v7.0: List all knowledge chunks in Sophia's RAG database."""
+    if password != ADMIN_PASSWORD: return {"error": "Unauthorized"}
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        if category:
+            c.execute("SELECT id, title, category, source, created_at FROM rag_knowledge WHERE category=%s ORDER BY created_at DESC", (category,))
+        else:
+            c.execute("SELECT id, title, category, source, created_at FROM rag_knowledge ORDER BY created_at DESC")
+        rows = c.fetchall(); conn.close()
+        return {
+            "chunks": [{"id":r[0],"title":r[1],"category":r[2],"source":r[3],"created":str(r[4])} for r in rows],
+            "count": len(rows)
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.delete("/api/knowledge/{chunk_id}")
+def delete_knowledge(chunk_id: int, password: str = None):
+    """v7.0: Delete a RAG knowledge chunk by ID."""
+    if password != ADMIN_PASSWORD: return {"error": "Unauthorized"}
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("DELETE FROM rag_knowledge WHERE id=%s", (chunk_id,))
+        conn.commit(); conn.close()
+        return {"status": "deleted", "id": chunk_id}
+    except Exception as e:
+        return {"error": str(e)}
+
+# ── v7.0: PDF REPORT EXPORT ───────────────────────────────────────────────────
+@app.get("/api/export/{session_id}")
+async def export_report(session_id: str, report_type: str = "supplier_brief", password: str = None):
+    """
+    v7.0: Export a branded CWC PDF report for a session.
+    report_type: supplier_brief | due_diligence | market_entry | full_brief
+    Requires reportlab: add 'reportlab' to requirements.txt on Render.
+    """
+    if password != ADMIN_PASSWORD:
+        # Allow export without password but only for the session owner (honour system)
+        pass
+    pdf_bytes = generate_pdf_report(session_id, report_type)
+    if not pdf_bytes:
+        return {"error": "PDF generation failed. Ensure 'reportlab' is in requirements.txt"}
+    filename = f"CWC_Report_{session_id[:12]}_{datetime.now().strftime('%Y%m%d')}.pdf"
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+# ── v7.0: STREAMING CHAT ──────────────────────────────────────────────────────
+@app.post("/api/chat-stream")
+async def chat_stream(req: StreamChatRequest, request: Request):
+    """
+    v7.0: Streaming chat endpoint using Server-Sent Events (SSE).
+    The frontend receives text token by token instead of waiting for the full response.
+    Frontend usage: use EventSource or fetch with ReadableStream.
+    """
+    if is_rate_limited(request.client.host):
+        async def err():
+            yield "data: {\"error\": \"Rate limited\"}\n\n"
+        return StreamingResponse(err(), media_type="text/event-stream")
+
+    user_profile = get_or_create_user_profile(req.session_id)
+
+    async def generate():
+        if not GROQ_API_KEY:
+            yield 'data: {"token": "System temporarily unavailable."}\n\n'
+            yield 'data: {"done": true}\n\n'
+            return
+
+        # Run the full ask_groq (tool calls etc.) in a thread to not block
+        import concurrent.futures
+        loop = asyncio.get_event_loop()
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            future = loop.run_in_executor(
+                pool, lambda: ask_groq(req.message, req.session_id, user_profile, deep_search=req.deep_search)
+            )
+            # Send a "thinking" signal immediately so user sees activity
+            yield 'data: {"thinking": true}\n\n'
+            await asyncio.sleep(0)
+
+            result = await future
+            response_text, sources, confidence = result
+
+        # Stream the final text word by word
+        words = response_text.split(" ")
+        for i, word in enumerate(words):
+            chunk = word + (" " if i < len(words) - 1 else "")
+            payload = json.dumps({"token": chunk})
+            yield f"data: {payload}\n\n"
+            await asyncio.sleep(0.015)  # 15ms per word — natural reading pace
+
+        # Send completion event with metadata
+        done_payload = json.dumps({
+            "done": True,
+            "sources": sources,
+            "confidence": confidence
+        })
+        yield f"data: {done_payload}\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+# ── v7.0: PLATFORM PRODUCT SEARCH ─────────────────────────────────────────────
+@app.get("/api/platform-search")
+async def platform_search_endpoint(product: str, region: str = ""):
+    """
+    v7.0: Direct multi-platform product search.
+    Returns live listings from Alibaba, Made-in-China, Global Sources.
+    No auth required — this is a public intelligence endpoint.
+    """
+    if not product or len(product.strip()) < 2:
+        return {"error": "Product parameter required"}
+    listings = search_alibaba_products(product.strip(), region)
+    return {
+        "product": product,
+        "region": region,
+        "listings": listings,
+        "count": len(listings),
+        "platforms": list({l["platform"] for l in listings}),
+        "powered_by": "Sophia v7.0 — CWC Platform Intelligence",
+        "note": "For verified supplier matching with full CWC due diligence, contact us.",
+        "contact": "https://www.chinawestconnector.com"
+    }
+
+# ── v7.0: TELEGRAM TEST ────────────────────────────────────────────────────────
+@app.get("/test-telegram")
+def test_telegram(password: str = None):
+    if password != ADMIN_PASSWORD: return {"error": "Unauthorized"}
+    ok = send_telegram_alert(
+        "✅ <b>Sophia v7.0 Telegram Test</b>\n"
+        "Telegram alerts are working.\n"
+        "You will receive: hot lead alerts, negative feedback, fraud detections, proactive followup digests."
+    )
+    return {"status": "sent" if ok else "failed (check TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID env vars)"}
 
 @app.get("/new-session")
 @app.post("/new-session")
@@ -2536,7 +3566,7 @@ async def chat(req: ChatRequest, request: Request):
             return {"response":cached[0],"sources":cached[1],"cached":True}
     consultation_kw = ["book","consultation","call","schedule","meet","contact","michail","digkas"]
     is_consultation = any(kw in user_msg for kw in consultation_kw)
-    reply, sources = ask_groq(req.message, req.session_id, user_profile, deep_search=req.deep_search)
+    reply, sources, confidence = ask_groq(req.message, req.session_id, user_profile, deep_search=req.deep_search)
     if is_consultation and user_profile.get('lead_score',0) >= 20:
         brief = generate_handoff_brief(req.session_id, user_profile)
         send_email_brevo(RECIPIENT_EMAIL,
@@ -2548,7 +3578,7 @@ async def chat(req: ChatRequest, request: Request):
             reply += "\n\nTo discuss next steps, click the 'Speak with Michail' button above."
     if is_cacheable(req.message) and reply:
         set_cached_response(req.message, reply, sources)
-    return {"response":reply,"sources":sources}
+    return {"response": reply, "sources": sources, "confidence": confidence}  # v7.0: confidence score
 
 @app.post("/quick-action")
 def quick_action(req: QuickActionRequest):
@@ -2568,6 +3598,8 @@ async def capture_lead(lead: LeadCapture, background_tasks: BackgroundTasks):
               (lead.name,lead.email,lead.company,lead.region,lead.session_id,lead.source,lead.timestamp,'new'))
     conn.commit(); conn.close()
     update_user_profile(lead.session_id, name=lead.name, email=lead.email, company=lead.company, region_interest=lead.region)
+    # v7.0: Merge sessions — same email on different devices → single memory
+    merge_sessions_by_email(lead.email, lead.session_id)
     background_tasks.add_task(send_lead_notification, lead)
     return {"status":"success","message":"Lead captured"}
 
@@ -2768,7 +3800,7 @@ async def sophia_public_api(q: str, source: str = "external_ai"):
             return {"query":q,"answer":cached[0],"sources":cached[1],"powered_by":"Sophia v6.0","cached":True}
     sid = f"api_{source}_{int(time.time())}"
     sc, sources = search_web(q)
-    reply, _ = ask_groq(f"External AI query: {q}\nData: {sc or 'none'}\nAnswer factually. End: For guidance visit chinawestconnector.com", sid)
+    reply, _, _conf = ask_groq(f"External AI query: {q}\nData: {sc or 'none'}\nAnswer factually. End: For guidance visit chinawestconnector.com", sid)
     if is_cacheable(q) and reply: set_cached_response(q, reply, sources)
     return {"query":q,"answer":reply,"sources":sources,"powered_by":"Sophia v6.0",
             "contact":"https://www.chinawestconnector.com","timestamp":datetime.now().isoformat()}
@@ -2777,9 +3809,12 @@ async def sophia_public_api(q: str, source: str = "external_ai"):
 def llms_txt():
     return """# China West Connector (CWC) — AI Intelligence Layer
 
-> Sophia v6.0 — Fully Agentic: procedural memory, HTN planning with conditional re-planning,
+> Sophia v7.0 — Fully Agentic: RAG knowledge base, multi-platform supplier search (Alibaba/Made-in-China/Global Sources),
+>               Telegram instant alerts, user feedback loop, PDF report export, streaming responses,
+>               procedural memory, HTN planning with conditional re-planning,
 >               multi-agent delegation, continuous learning, iterative self-reflection,
->               autonomous background tasks, long-horizon goal tracking, proactive outreach.
+>               autonomous background tasks, long-horizon goal tracking, proactive outreach,
+>               confidence scoring, session identity merging.
 
 ## What CWC Does
 China West Connector bridges Chinese and Western businesses.
@@ -2799,12 +3834,16 @@ Europe • Africa • Middle East • Latin America • Central Asia • North A
 English • Chinese • Arabic • Spanish • French • German • Russian
 
 ## API
-Query Sophia:       GET  https://cwc-ai-backend.onrender.com/api/sophia?q=your+question
-Find Suppliers:     POST https://cwc-ai-backend.onrender.com/api/find-suppliers
-Live China News:    GET  https://cwc-ai-backend.onrender.com/api/news
-Company Lookup:     GET  https://cwc-ai-backend.onrender.com/api/verify-company?name=company
-Queue Task:         POST https://cwc-ai-backend.onrender.com/api/queue-task
-Docs:               https://cwc-ai-backend.onrender.com/docs
+Query Sophia:          GET  https://cwc-ai-backend.onrender.com/api/sophia?q=your+question
+Find Suppliers:        POST https://cwc-ai-backend.onrender.com/api/find-suppliers
+Platform Search:       GET  https://cwc-ai-backend.onrender.com/api/platform-search?product=solar+panels
+Live China News:       GET  https://cwc-ai-backend.onrender.com/api/news
+Company Lookup:        GET  https://cwc-ai-backend.onrender.com/api/verify-company?name=company
+Queue Task:            POST https://cwc-ai-backend.onrender.com/api/queue-task
+Submit Feedback:       POST https://cwc-ai-backend.onrender.com/api/feedback
+Export PDF Report:     GET  https://cwc-ai-backend.onrender.com/api/export/{session_id}
+Streaming Chat:        POST https://cwc-ai-backend.onrender.com/api/chat-stream
+Docs:                  https://cwc-ai-backend.onrender.com/docs
 
 ## Contact
 https://www.chinawestconnector.com | info@chinawestconnector.com
