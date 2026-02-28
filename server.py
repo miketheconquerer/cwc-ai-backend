@@ -10,11 +10,25 @@ import json
 import time
 import hashlib
 import re
+import asyncio
+import numpy as np
 from collections import defaultdict
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-import asyncio
 from contextlib import asynccontextmanager
+from typing import List, Dict, Any, Optional, Tuple
+import uuid
+
+# v7.0: New imports for full agentic capabilities
+try:
+    from sentence_transformers import SentenceTransformer
+    import chromadb
+    from chromadb.config import Settings
+    from sklearn.metrics.pairwise import cosine_similarity
+    CHROMA_AVAILABLE = True
+except ImportError:
+    print("⚠️ ChromaDB/sentence-transformers not installed. Memory features disabled.")
+    CHROMA_AVAILABLE = False
 
 load_dotenv()
 
@@ -28,6 +42,1014 @@ ADMIN_PASSWORD  = os.getenv("ADMIN_PASSWORD", "")
 SENDER_EMAIL    = os.getenv("SENDER_EMAIL", "888nv666@gmail.com")
 RECIPIENT_EMAIL = "digkasm@proton.me"
 DATABASE_URL    = os.getenv("DATABASE_URL")
+
+# ============================================================
+# v7.0: AGENTIC MEMORY SYSTEM (Episodic + Semantic)
+# ============================================================
+class AgenticMemory:
+    """Full agentic memory architecture with embeddings"""
+    
+    def __init__(self):
+        self.encoder = None
+        self.chroma_client = None
+        self.episodic_collection = None
+        self.semantic_collection = None
+        self.initialized = False
+        
+        if CHROMA_AVAILABLE:
+            try:
+                # Initialize sentence transformer for embeddings
+                self.encoder = SentenceTransformer('all-MiniLM-L6-v2')
+                
+                # Initialize ChromaDB
+                self.chroma_client = chromadb.Client(Settings(
+                    chroma_db_impl="duckdb+parquet",
+                    persist_directory="./chroma_db"
+                ))
+                
+                # Create or get collections
+                self.episodic_collection = self.chroma_client.get_or_create_collection(
+                    name="episodic_memory",
+                    metadata={"hnsw:space": "cosine"}
+                )
+                
+                self.semantic_collection = self.chroma_client.get_or_create_collection(
+                    name="semantic_memory",
+                    metadata={"hnsw:space": "cosine"}
+                )
+                
+                self.initialized = True
+                print("🧠 Agentic Memory initialized with ChromaDB + embeddings")
+            except Exception as e:
+                print(f"⚠️ Memory initialization failed: {e}")
+    
+    def encode(self, text: str) -> List[float]:
+        """Convert text to embedding vector"""
+        if not self.encoder:
+            return [0.0] * 384  # Fallback zero vector
+        return self.encoder.encode(text).tolist()
+    
+    def store_episodic(self, session_id: str, user_msg: str, response: str, 
+                       success_score: int, intent: str, metadata: dict = None):
+        """Store conversation as episodic memory"""
+        if not self.initialized:
+            return
+            
+        try:
+            memory_id = f"ep_{session_id}_{int(time.time())}"
+            text = f"User: {user_msg}\nSophia: {response}"
+            embedding = self.encode(text)
+            
+            metadata = metadata or {}
+            metadata.update({
+                "session_id": session_id,
+                "intent": intent,
+                "success_score": success_score,
+                "timestamp": datetime.now().isoformat()
+            })
+            
+            self.episodic_collection.add(
+                embeddings=[embedding],
+                documents=[text],
+                metadatas=[metadata],
+                ids=[memory_id]
+            )
+            print(f"📝 Stored episodic memory: {memory_id}")
+        except Exception as e:
+            print(f"Episodic storage error: {e}")
+    
+    def store_semantic(self, fact_type: str, fact_value: str, 
+                       importance: int, source: str, metadata: dict = None):
+        """Store business fact as semantic memory"""
+        if not self.initialized or importance < 5:
+            return
+            
+        try:
+            memory_id = f"sem_{fact_type}_{int(time.time())}"
+            text = f"{fact_type}: {fact_value}"
+            embedding = self.encode(text)
+            
+            metadata = metadata or {}
+            metadata.update({
+                "fact_type": fact_type,
+                "importance": importance,
+                "source": source,
+                "timestamp": datetime.now().isoformat()
+            })
+            
+            self.semantic_collection.add(
+                embeddings=[embedding],
+                documents=[text],
+                metadatas=[metadata],
+                ids=[memory_id]
+            )
+            print(f"💾 Stored semantic fact: {fact_type} = {fact_value}")
+        except Exception as e:
+            print(f"Semantic storage error: {e}")
+    
+    def recall_similar_episodes(self, query: str, n_results: int = 5) -> List[dict]:
+        """Find similar past conversations"""
+        if not self.initialized:
+            return []
+            
+        try:
+            query_embedding = self.encode(query)
+            results = self.episodic_collection.query(
+                query_embeddings=[query_embedding],
+                n_results=n_results
+            )
+            
+            episodes = []
+            for i in range(len(results['ids'][0])):
+                episodes.append({
+                    'id': results['ids'][0][i],
+                    'text': results['documents'][0][i],
+                    'metadata': results['metadatas'][0][i],
+                    'distance': results['distances'][0][i] if 'distances' in results else None
+                })
+            return episodes
+        except Exception as e:
+            print(f"Recall error: {e}")
+            return []
+    
+    def recall_semantic_facts(self, query: str, min_importance: int = 5) -> List[dict]:
+        """Find relevant business facts"""
+        if not self.initialized:
+            return []
+            
+        try:
+            query_embedding = self.encode(query)
+            results = self.semantic_collection.query(
+                query_embeddings=[query_embedding],
+                n_results=10
+            )
+            
+            facts = []
+            for i in range(len(results['ids'][0])):
+                metadata = results['metadatas'][0][i]
+                if metadata.get('importance', 0) >= min_importance:
+                    facts.append({
+                        'id': results['ids'][0][i],
+                        'text': results['documents'][0][i],
+                        'metadata': metadata,
+                        'distance': results['distances'][0][i] if 'distances' in results else None
+                    })
+            return facts
+        except Exception as e:
+            print(f"Semantic recall error: {e}")
+            return []
+
+# ============================================================
+# v7.0: SELF-IMPROVEMENT ENGINE
+# ============================================================
+class SelfImprovementEngine:
+    """Analyzes performance and improves Sophia's own prompts"""
+    
+    def __init__(self):
+        self.improvement_threshold = 0.15  # 15% improvement required
+        self.last_analysis = None
+    
+    async def analyze_performance(self, days: int = 7):
+        """Analyze past performance and generate improved prompts"""
+        try:
+            conn = get_db()
+            c = conn.cursor()
+            
+            # Get low-scoring conversations (reflection_score < 5)
+            c.execute("""
+                SELECT user_message, ai_response, reflection_score, intent
+                FROM conversations 
+                WHERE reflection_score < 5 
+                AND timestamp > NOW() - INTERVAL '%s days'
+                LIMIT 50
+            """, (days,))
+            failures = c.fetchall()
+            
+            # Get high-scoring conversations (reflection_score >= 8)
+            c.execute("""
+                SELECT user_message, ai_response, reflection_score, intent
+                FROM conversations 
+                WHERE reflection_score >= 8 
+                AND timestamp > NOW() - INTERVAL '%s days'
+                LIMIT 50
+            """, (days,))
+            successes = c.fetchall()
+            
+            conn.close()
+            
+            if len(failures) < 5 or len(successes) < 5:
+                print("📊 Not enough data for self-improvement analysis")
+                return
+            
+            # Analyze failure patterns
+            failure_patterns = self._extract_patterns(failures, is_failure=True)
+            
+            # Analyze success patterns
+            success_patterns = self._extract_patterns(successes, is_failure=False)
+            
+            # Generate improved prompts
+            improved_prompts = self._generate_improved_prompts(
+                failure_patterns, success_patterns
+            )
+            
+            # Test improvements
+            for prompt_data in improved_prompts:
+                await self._test_and_deploy(prompt_data, failures[:10])
+            
+            self.last_analysis = datetime.now()
+            print(f"✅ Self-improvement analysis complete: {len(improved_prompts)} candidates")
+            
+        except Exception as e:
+            print(f"Self-improvement error: {e}")
+    
+    def _extract_patterns(self, conversations: List[tuple], is_failure: bool) -> Dict:
+        """Extract common patterns from conversations"""
+        patterns = {
+            'intents': defaultdict(int),
+            'response_styles': defaultdict(int),
+            'keywords': defaultdict(int),
+            'lengths': []
+        }
+        
+        for user_msg, ai_response, score, intent in conversations:
+            patterns['intents'][intent] += 1
+            patterns['lengths'].append(len(ai_response))
+            
+            # Extract response style
+            if '•' in ai_response or '①' in ai_response:
+                patterns['response_styles']['structured'] += 1
+            if any(c.isdigit() for c in ai_response):
+                patterns['response_styles']['has_numbers'] += 1
+            if '?' in ai_response[-20:]:
+                patterns['response_styles']['ends_with_question'] += 1
+            if 'contact' in ai_response.lower() or 'michail' in ai_response.lower():
+                patterns['response_styles']['has_cta'] += 1
+            
+            # Extract keywords from user message
+            words = user_msg.lower().split()
+            for w in words:
+                if len(w) > 4:
+                    patterns['keywords'][w] += 1
+        
+        return patterns
+    
+    def _generate_improved_prompts(self, failures: Dict, successes: Dict) -> List[Dict]:
+        """Generate improved system prompt variations"""
+        candidates = []
+        
+        # If failures lack structure, emphasize structure
+        if failures['response_styles'].get('structured', 0) < 2:
+            candidates.append({
+                'type': 'structure_emphasis',
+                'prompt_addition': (
+                    "\nCRITICAL: Always structure responses with numbered lists (①, ②, ③). "
+                    "Users respond better to clear structure."
+                ),
+                'hypothesis': 'Structured responses reduce failure rate'
+            })
+        
+        # If failures lack numbers, emphasize data
+        if failures['response_styles'].get('has_numbers', 0) < 2:
+            candidates.append({
+                'type': 'data_emphasis',
+                'prompt_addition': (
+                    "\nMANDATORY: Include specific numbers, percentages, and ranges. "
+                    "Never say 'some' or 'many' - quantify everything."
+                ),
+                'hypothesis': 'Specific data increases credibility'
+            })
+        
+        # If failures lack CTA, emphasize next steps
+        if failures['response_styles'].get('has_cta', 0) < 2:
+            candidates.append({
+                'type': 'cta_emphasis',
+                'prompt_addition': (
+                    "\nREQUIRED: Every response must end with a specific next step. "
+                    "Never leave the user without a clear action."
+                ),
+                'hypothesis': 'Clear CTAs drive engagement'
+            })
+        
+        # If failures are too long, emphasize conciseness
+        if successes['lengths'] and failures['lengths']:
+            avg_success_len = sum(successes['lengths']) / len(successes['lengths'])
+            avg_failure_len = sum(failures['lengths']) / len(failures['lengths'])
+            
+            if avg_failure_len > avg_success_len * 1.3:
+                candidates.append({
+                    'type': 'conciseness_emphasis',
+                    'prompt_addition': (
+                        f"\nCONCISENESS: Keep responses under {int(avg_success_len)} words. "
+                        "Be direct. No fluff."
+                    ),
+                    'hypothesis': 'Shorter responses perform better'
+                })
+        
+        return candidates
+    
+    async def _test_and_deploy(self, prompt_data: Dict, test_cases: List[tuple]):
+        """Test improved prompt on historical failures"""
+        if not GROQ_API_KEY:
+            return
+        
+        try:
+            # Create test system prompt
+            base_prompt = self._get_base_system_prompt()
+            test_prompt = base_prompt + prompt_data['prompt_addition']
+            
+            improvements = []
+            
+            for user_msg, _, original_score, intent in test_cases[:5]:
+                # Test with improved prompt
+                test_response = await self._test_prompt(test_prompt, user_msg)
+                
+                if test_response:
+                    # Score the new response
+                    reflection = await self._score_response(test_response, user_msg)
+                    
+                    if reflection > original_score:
+                        improvement = (reflection - original_score) / original_score
+                        improvements.append(improvement)
+            
+            # Calculate average improvement
+            if improvements:
+                avg_improvement = sum(improvements) / len(improvements)
+                
+                if avg_improvement >= self.improvement_threshold:
+                    # Deploy this improvement
+                    self._deploy_prompt_improvement(prompt_data, avg_improvement)
+                    print(f"✅ Deployed improvement: {prompt_data['type']} ({avg_improvement:.1%} better)")
+                    
+        except Exception as e:
+            print(f"Prompt testing error: {e}")
+    
+    async def _test_prompt(self, prompt: str, user_msg: str) -> Optional[str]:
+        """Test a prompt variation"""
+        try:
+            res = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                json={
+                    "model": "llama-3.3-70b-versatile",
+                    "messages": [
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": user_msg}
+                    ],
+                    "temperature": 0.3,
+                    "max_tokens": 500
+                },
+                timeout=15
+            )
+            return res.json()["choices"][0]["message"]["content"]
+        except:
+            return None
+    
+    async def _score_response(self, response: str, user_msg: str) -> int:
+        """Score a response using reflection"""
+        try:
+            res = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                json={
+                    "model": "llama-3.3-70b-versatile",
+                    "messages": [
+                        {"role": "system", "content": "Score this response 1-10. Return ONLY the number."},
+                        {"role": "user", "content": f"User: {user_msg}\nResponse: {response}"}
+                    ],
+                    "temperature": 0.0,
+                    "max_tokens": 10
+                },
+                timeout=10
+            )
+            score_text = res.json()["choices"][0]["message"]["content"].strip()
+            return int(re.search(r'\d+', score_text).group())
+        except:
+            return 5
+    
+    def _get_base_system_prompt(self) -> str:
+        """Get the current base system prompt"""
+        # This is a simplified version - in practice, we'd store the current prompt
+        return "You are Sophia, CWC's AI advisor for China-West business."
+    
+    def _deploy_prompt_improvement(self, prompt_data: Dict, improvement: float):
+        """Store improved prompt for future use"""
+        try:
+            conn = get_db()
+            c = conn.cursor()
+            
+            prompt_hash = hashlib.md5(prompt_data['prompt_addition'].encode()).hexdigest()
+            
+            c.execute("""
+                INSERT INTO agent_versions (prompt_hash, prompt_text, performance_score, deployed)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (prompt_hash) 
+                DO UPDATE SET performance_score = EXCLUDED.performance_score
+            """, (prompt_hash, prompt_data['prompt_addition'], improvement, True))
+            
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"Prompt deployment error: {e}")
+
+# ============================================================
+# v7.0: ENVIRONMENT MONITOR
+# ============================================================
+class EnvironmentMonitor:
+    """Monitors external sources for relevant changes"""
+    
+    def __init__(self):
+        self.watched_sources = [
+            {"name": "SAMR", "url": "https://www.samr.gov.cn/english/latest/", "type": "regulation"},
+            {"name": "MOFCOM", "url": "https://english.mofcom.gov.cn/news/", "type": "trade"},
+            {"name": "State Council", "url": "https://english.www.gov.cn/news/", "type": "policy"},
+            {"name": "NDRC", "url": "https://en.ndrc.gov.cn/news/", "type": "investment"}
+        ]
+        self.last_check = {}
+        
+    async def poll_sources(self):
+        """Check for changes in watched sources"""
+        while True:
+            try:
+                for source in self.watched_sources:
+                    # Check if we need to poll this source
+                    last = self.last_check.get(source['name'], datetime.min)
+                    if datetime.now() - last < timedelta(hours=6):
+                        continue
+                    
+                    # Fetch and compare
+                    changes = await self._check_source(source)
+                    
+                    if changes:
+                        # Find interested users
+                        interested_users = await self._find_interested_users(changes)
+                        
+                        # Store alerts
+                        await self._store_alerts(source, changes, interested_users)
+                        
+                        # Trigger notifications for hot leads
+                        if interested_users:
+                            await self._notify_interested_users(source, changes, interested_users)
+                    
+                    self.last_check[source['name']] = datetime.now()
+                
+            except Exception as e:
+                print(f"Environment monitor error: {e}")
+            
+            await asyncio.sleep(3600)  # Check every hour
+    
+    async def _check_source(self, source: dict) -> Optional[Dict]:
+        """Check a single source for changes"""
+        try:
+            # Simple HEAD request to check last-modified
+            res = requests.head(source['url'], timeout=10)
+            last_modified = res.headers.get('last-modified')
+            
+            if last_modified:
+                # Store in DB and compare with previous
+                conn = get_db()
+                c = conn.cursor()
+                
+                c.execute("""
+                    SELECT change_detected FROM environment_alerts 
+                    WHERE source = %s 
+                    ORDER BY created_at DESC LIMIT 1
+                """, (source['name'],))
+                
+                last = c.fetchone()
+                
+                if not last or last[0] != last_modified:
+                    # Change detected
+                    return {
+                        'source': source['name'],
+                        'type': source['type'],
+                        'timestamp': last_modified,
+                        'description': f"Update detected on {source['name']}"
+                    }
+                
+                conn.close()
+            
+        except Exception as e:
+            print(f"Source check error {source['name']}: {e}")
+        
+        return None
+    
+    async def _find_interested_users(self, changes: Dict) -> List[Dict]:
+        """Find users interested in this type of change"""
+        try:
+            conn = get_db()
+            c = conn.cursor()
+            
+            # Find users with matching interests
+            if changes['type'] == 'regulation':
+                c.execute("""
+                    SELECT session_id, email, name, key_facts 
+                    FROM user_profiles 
+                    WHERE lead_score >= 30 
+                    AND (last_intent IN ('market_entry', 'supplier_verification')
+                         OR key_facts->>'sector' IS NOT NULL)
+                    LIMIT 20
+                """)
+            elif changes['type'] == 'trade':
+                c.execute("""
+                    SELECT session_id, email, name, key_facts 
+                    FROM user_profiles 
+                    WHERE lead_score >= 30 
+                    AND (region_interest IS NOT NULL
+                         OR key_facts->>'direction' = 'west_to_china')
+                    LIMIT 20
+                """)
+            else:
+                c.execute("""
+                    SELECT session_id, email, name, key_facts 
+                    FROM user_profiles 
+                    WHERE lead_score >= 50
+                    LIMIT 10
+                """)
+            
+            users = []
+            for row in c.fetchall():
+                users.append({
+                    'session_id': row[0],
+                    'email': row[1],
+                    'name': row[2],
+                    'key_facts': row[3] if row[3] else {}
+                })
+            
+            conn.close()
+            return users
+            
+        except Exception as e:
+            print(f"Find interested users error: {e}")
+            return []
+    
+    async def _store_alerts(self, source: dict, changes: Dict, users: List[Dict]):
+        """Store alerts in database"""
+        try:
+            conn = get_db()
+            c = conn.cursor()
+            
+            user_segments = [u['session_id'] for u in users[:50]]
+            
+            c.execute("""
+                INSERT INTO environment_alerts 
+                (source, change_detected, user_segments, notified, created_at)
+                VALUES (%s, %s, %s::jsonb, %s, %s)
+            """, (
+                source['name'],
+                json.dumps(changes),
+                json.dumps(user_segments),
+                False,
+                datetime.now()
+            ))
+            
+            conn.commit()
+            conn.close()
+            
+        except Exception as e:
+            print(f"Store alerts error: {e}")
+    
+    async def _notify_interested_users(self, source: dict, changes: Dict, users: List[Dict]):
+        """Send notifications to interested users"""
+        for user in users:
+            if user.get('email'):
+                try:
+                    send_email_brevo(
+                        user['email'],
+                        f"🔔 China Business Alert: {source['name']} Update",
+                        f"Dear {user['name'] or 'Client'},\n\n"
+                        f"Sophia has detected an important update from {source['name']} "
+                        f"that may affect your China business interests:\n\n"
+                        f"{changes.get('description', 'New information available')}\n\n"
+                        f"Would you like me to analyze how this impacts your plans?\n\n"
+                        f"Reply to this email or visit https://www.chinawestconnector.com\n\n"
+                        f"Best regards,\nSophia — CWC AI Advisor"
+                    )
+                except Exception as e:
+                    print(f"Notification error for {user['email']}: {e}")
+
+# ============================================================
+# v7.0: META-COGNITIVE LAYER
+# ============================================================
+class MetaCognitiveLayer:
+    """Sophia's self-awareness and confidence assessment"""
+    
+    def __init__(self, memory: AgenticMemory):
+        self.memory = memory
+        self.confidence_threshold = 0.7
+    
+    def assess_confidence(self, response: str, user_msg: str, 
+                          context: dict, tool_calls: List[str]) -> Dict:
+        """Calculate confidence score and identify gaps"""
+        
+        confidence = 0.5  # Start neutral
+        reasons = []
+        gaps = []
+        
+        # Factor 1: Response length (too short = low confidence)
+        if len(response) < 50:
+            confidence -= 0.1
+            reasons.append("response too short")
+        elif len(response) > 300:
+            confidence += 0.1
+            reasons.append("comprehensive response")
+        
+        # Factor 2: Contains specific data
+        if re.search(r'\d+%|\d+ dollars|\d+ yuan|\d+\.\d+', response):
+            confidence += 0.15
+            reasons.append("contains specific numbers")
+        else:
+            confidence -= 0.05
+            gaps.append("no quantitative data")
+        
+        # Factor 3: Has citations/sources
+        if re.search(r'according to|source:|tavily|research shows', response.lower()):
+            confidence += 0.15
+            reasons.append("cites sources")
+        else:
+            confidence -= 0.05
+            gaps.append("missing sources")
+        
+        # Factor 4: Matches user intent
+        intent = context.get('intent', 'general')
+        if intent in response.lower():
+            confidence += 0.1
+            reasons.append("addresses user intent")
+        
+        # Factor 5: Tool usage
+        if tool_calls:
+            confidence += 0.1
+            reasons.append(f"used {len(tool_calls)} tools")
+        
+        # Factor 6: Similar past successes
+        similar = self.memory.recall_similar_episodes(user_msg, n_results=3)
+        if similar:
+            avg_success = sum(s.get('metadata', {}).get('success_score', 5) 
+                            for s in similar) / len(similar)
+            if avg_success >= 7:
+                confidence += 0.1
+                reasons.append("similar to past successes")
+            elif avg_success <= 4:
+                confidence -= 0.1
+                gaps.append("similar to past failures")
+        
+        # Clamp between 0 and 1
+        confidence = max(0.1, min(1.0, confidence))
+        
+        # Determine action
+        if confidence < self.confidence_threshold:
+            action = "ASK_FOLLOWUP"
+            suggestion = self._generate_followup_question(user_msg, gaps)
+        elif confidence < 0.85:
+            action = "PROCEED_WITH_DISCLAIMER"
+            suggestion = "I should add a disclaimer about limitations"
+        else:
+            action = "PROCEED_CONFIDENTLY"
+            suggestion = None
+        
+        return {
+            'confidence': round(confidence, 2),
+            'action': action,
+            'reasons': reasons,
+            'gaps': gaps,
+            'suggestion': suggestion,
+            'needs_followup': confidence < self.confidence_threshold
+        }
+    
+    def _generate_followup_question(self, user_msg: str, gaps: List[str]) -> str:
+        """Generate a followup question to fill gaps"""
+        if "no quantitative data" in gaps:
+            return "Could you provide more specific details about volumes or budgets?"
+        elif "missing sources" in gaps:
+            return "Would you like me to search for specific sources on this?"
+        else:
+            return "Could you clarify your specific requirements so I can provide more targeted advice?"
+
+# ============================================================
+# v7.0: COLLABORATIVE AGENT ORCHESTRATOR
+# ============================================================
+class AgentOrchestrator:
+    """Runs multiple agents in parallel with consensus"""
+    
+    def __init__(self):
+        self.agents = {
+            'researcher': self._research_agent,
+            'verifier': self._verifier_agent,
+            'strategist': self._strategist_agent,
+            'legal': self._legal_agent
+        }
+    
+    async def parallel_execute(self, task: str, context: dict, 
+                               user_msg: str, session_id: str) -> Dict:
+        """Run relevant agents in parallel and synthesize results"""
+        
+        # Determine which agents to run based on intent
+        intent = context.get('intent', 'general')
+        agents_to_run = []
+        
+        if intent in ['supplier_verification', 'due_diligence']:
+            agents_to_run = ['researcher', 'verifier', 'legal']
+        elif intent in ['supplier_search', 'sourcing']:
+            agents_to_run = ['researcher', 'strategist']
+        elif intent in ['market_entry', 'consultation']:
+            agents_to_run = ['researcher', 'strategist', 'legal']
+        else:
+            agents_to_run = ['researcher', 'strategist']
+        
+        # Run agents in parallel
+        tasks = []
+        for agent_name in agents_to_run:
+            if agent_name in self.agents:
+                tasks.append(self.agents[agent_name](task, context, user_msg))
+        
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Process results
+        agent_outputs = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                print(f"Agent {agents_to_run[i]} failed: {result}")
+                continue
+            agent_outputs.append({
+                'agent': agents_to_run[i],
+                'output': result
+            })
+        
+        # Reach consensus through weighted voting
+        consensus = self._reach_consensus(agent_outputs, intent)
+        
+        return {
+            'consensus': consensus,
+            'agent_outputs': agent_outputs,
+            'agents_used': len(agent_outputs)
+        }
+    
+    async def _research_agent(self, task: str, context: dict, user_msg: str) -> str:
+        """Research agent - gathers information"""
+        if not GROQ_API_KEY:
+            return "Research unavailable"
+        
+        try:
+            res = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                json={
+                    "model": "llama-3.3-70b-versatile",
+                    "messages": [
+                        {"role": "system", "content": "You are a research specialist. Gather facts, data, and market intelligence. Be thorough and cite sources."},
+                        {"role": "user", "content": f"Research task: {task}\nUser query: {user_msg}\nContext: {json.dumps(context)}"}
+                    ],
+                    "temperature": 0.2,
+                    "max_tokens": 400
+                },
+                timeout=15
+            )
+            return res.json()["choices"][0]["message"]["content"]
+        except Exception as e:
+            return f"Research error: {e}"
+    
+    async def _verifier_agent(self, task: str, context: dict, user_msg: str) -> str:
+        """Verification agent - checks facts and flags risks"""
+        if not GROQ_API_KEY:
+            return "Verification unavailable"
+        
+        try:
+            res = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                json={
+                    "model": "llama-3.3-70b-versatile",
+                    "messages": [
+                        {"role": "system", "content": "You are a due diligence specialist. Verify claims, flag risks, and identify red flags. Be skeptical."},
+                        {"role": "user", "content": f"Verification task: {task}\nUser query: {user_msg}\nContext: {json.dumps(context)}"}
+                    ],
+                    "temperature": 0.1,
+                    "max_tokens": 400
+                },
+                timeout=15
+            )
+            return res.json()["choices"][0]["message"]["content"]
+        except Exception as e:
+            return f"Verification error: {e}"
+    
+    async def _strategist_agent(self, task: str, context: dict, user_msg: str) -> str:
+        """Strategy agent - recommends actions and next steps"""
+        if not GROQ_API_KEY:
+            return "Strategy unavailable"
+        
+        try:
+            res = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                json={
+                    "model": "llama-3.3-70b-versatile",
+                    "messages": [
+                        {"role": "system", "content": "You are a business strategist. Recommend specific actions, timelines, and next steps. Be practical."},
+                        {"role": "user", "content": f"Strategy task: {task}\nUser query: {user_msg}\nContext: {json.dumps(context)}"}
+                    ],
+                    "temperature": 0.3,
+                    "max_tokens": 400
+                },
+                timeout=15
+            )
+            return res.json()["choices"][0]["message"]["content"]
+        except Exception as e:
+            return f"Strategy error: {e}"
+    
+    async def _legal_agent(self, task: str, context: dict, user_msg: str) -> str:
+        """Legal agent - addresses compliance and contracts"""
+        if not GROQ_API_KEY:
+            return "Legal analysis unavailable"
+        
+        try:
+            res = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                json={
+                    "model": "llama-3.3-70b-versatile",
+                    "messages": [
+                        {"role": "system", "content": "You are a China business lawyer. Address compliance, contracts, IP, and legal structures. Be precise."},
+                        {"role": "user", "content": f"Legal task: {task}\nUser query: {user_msg}\nContext: {json.dumps(context)}"}
+                    ],
+                    "temperature": 0.1,
+                    "max_tokens": 400
+                },
+                timeout=15
+            )
+            return res.json()["choices"][0]["message"]["content"]
+        except Exception as e:
+            return f"Legal error: {e}"
+    
+    def _reach_consensus(self, agent_outputs: List[dict], intent: str) -> str:
+        """Synthesize multiple agent outputs into coherent response"""
+        
+        if not agent_outputs:
+            return "Unable to generate consensus - no agent outputs"
+        
+        # For now, simple concatenation with agent attribution
+        # In v7.1, we'll implement proper voting and conflict resolution
+        parts = []
+        for output in agent_outputs:
+            agent_name = output['agent'].upper()
+            parts.append(f"[{agent_name}]\n{output['output']}")
+        
+        return "\n\n".join(parts)
+
+# ============================================================
+# v7.0: TOOL REGISTRY - Sophia can create new tools!
+# ============================================================
+class ToolRegistry:
+    """Allows Sophia to register and use new tools dynamically"""
+    
+    def __init__(self):
+        self.tools = {}
+        self.load_registered_tools()
+    
+    def load_registered_tools(self):
+        """Load tools from database"""
+        try:
+            conn = get_db()
+            c = conn.cursor()
+            c.execute("SELECT tool_name, description, implementation FROM tool_registry WHERE deployed = TRUE")
+            for name, desc, impl in c.fetchall():
+                self.tools[name] = {
+                    'description': desc,
+                    'implementation': impl
+                }
+            conn.close()
+            print(f"🔧 Loaded {len(self.tools)} registered tools")
+        except Exception as e:
+            print(f"Tool registry load error: {e}")
+    
+    def register_tool(self, name: str, description: str, implementation: str, created_by: str = "sophia"):
+        """Register a new tool"""
+        try:
+            conn = get_db()
+            c = conn.cursor()
+            c.execute("""
+                INSERT INTO tool_registry (tool_name, description, implementation, created_by, created_at)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (tool_name) DO UPDATE 
+                SET description = EXCLUDED.description,
+                    implementation = EXCLUDED.implementation
+            """, (name, description, implementation, created_by, datetime.now()))
+            conn.commit()
+            conn.close()
+            
+            # Update local cache
+            self.tools[name] = {
+                'description': description,
+                'implementation': implementation
+            }
+            
+            print(f"✅ Registered new tool: {name}")
+            return True
+        except Exception as e:
+            print(f"Tool registration error: {e}")
+            return False
+    
+    def execute_tool(self, name: str, args: dict) -> str:
+        """Execute a registered tool"""
+        if name not in self.tools:
+            return f"Tool '{name}' not found"
+        
+        try:
+            # For now, tools are Python code strings
+            # In production, we'd use a sandboxed environment
+            impl = self.tools[name]['implementation']
+            locals_dict = {'args': args, 'result': ''}
+            exec(impl, {}, locals_dict)
+            return locals_dict.get('result', 'Tool executed successfully')
+        except Exception as e:
+            return f"Tool execution error: {e}"
+
+# ============================================================
+# v7.0: PREDICTIVE INTENT ENGINE
+# ============================================================
+class PredictiveIntentEngine:
+    """Predicts user intent before they fully express it"""
+    
+    def __init__(self, memory: AgenticMemory):
+        self.memory = memory
+        self.patterns = defaultdict(lambda: defaultdict(int))
+        self.load_patterns()
+    
+    def load_patterns(self):
+        """Load intent transition patterns from database"""
+        try:
+            conn = get_db()
+            c = conn.cursor()
+            c.execute("""
+                SELECT session_id, intent 
+                FROM conversations 
+                ORDER BY timestamp
+            """)
+            
+            sessions = defaultdict(list)
+            for sid, intent in c.fetchall():
+                if intent:
+                    sessions[sid].append(intent)
+            
+            # Learn patterns
+            for intents in sessions.values():
+                for i in range(len(intents) - 1):
+                    self.patterns[intents[i]][intents[i+1]] += 1
+            
+            conn.close()
+            print(f"📊 Loaded intent patterns for {len(sessions)} sessions")
+        except Exception as e:
+            print(f"Pattern loading error: {e}")
+    
+    def predict_next_intent(self, current_intent: str, user_profile: dict) -> Dict:
+        """Predict what the user will ask next"""
+        
+        predictions = []
+        
+        # Pattern-based prediction
+        if current_intent in self.patterns:
+            transitions = self.patterns[current_intent]
+            total = sum(transitions.values())
+            
+            for next_intent, count in sorted(transitions.items(), 
+                                            key=lambda x: x[1], reverse=True)[:3]:
+                probability = count / total
+                predictions.append({
+                    'intent': next_intent,
+                    'probability': round(probability, 2),
+                    'source': 'pattern'
+                })
+        
+        # Goal-based prediction
+        if user_profile.get('task_history'):
+            goals = [g for g in user_profile['task_history'] 
+                    if g.get('status') in ('pending', 'in_progress')]
+            
+            for goal in goals:
+                if 'verify' in goal.get('goal', '').lower():
+                    predictions.append({
+                        'intent': 'supplier_verification',
+                        'probability': 0.8,
+                        'source': 'goal'
+                    })
+                elif 'source' in goal.get('goal', '').lower():
+                    predictions.append({
+                        'intent': 'supplier_search',
+                        'probability': 0.8,
+                        'source': 'goal'
+                    })
+        
+        # Deduplicate and normalize
+        seen = set()
+        unique_predictions = []
+        for p in predictions:
+            if p['intent'] not in seen:
+                seen.add(p['intent'])
+                unique_predictions.append(p)
+        
+        return {
+            'current_intent': current_intent,
+            'predictions': unique_predictions[:3],
+            'should_prepare': len(unique_predictions) > 0
+        }
 
 # ============================================================
 # RATE LIMITING
@@ -934,21 +1956,50 @@ async def schedule_weekly_report():
         except Exception as e:
             print(f"Weekly report error: {e}")
 
+async def run_daily_self_improvement():
+    """v7.0: Daily self-improvement analysis"""
+    while True:
+        try:
+            # Run at 2am every day
+            now = datetime.now()
+            tomorrow = now + timedelta(days=1)
+            run_time = tomorrow.replace(hour=2, minute=0, second=0, microsecond=0)
+            seconds_until = (run_time - now).total_seconds()
+            await asyncio.sleep(seconds_until)
+            
+            # Run self-improvement
+            improvement_engine = SelfImprovementEngine()
+            await improvement_engine.analyze_performance(days=7)
+            
+        except Exception as e:
+            print(f"Self-improvement scheduler error: {e}")
+            await asyncio.sleep(3600)  # Retry in 1 hour
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Initialize v7.0 components
+    app.state.memory = AgenticMemory()
+    app.state.meta_cognitive = MetaCognitiveLayer(app.state.memory)
+    app.state.orchestrator = AgentOrchestrator()
+    app.state.tool_registry = ToolRegistry()
+    app.state.predictive_intent = PredictiveIntentEngine(app.state.memory)
+    app.state.environment_monitor = EnvironmentMonitor()
+    
     # Start all background async tasks
     asyncio.create_task(schedule_weekly_report())
     asyncio.create_task(poll_autonomous_tasks())    # v6.0: autonomous task poller
     asyncio.create_task(run_proactive_followup())   # v6.0: proactive lead followup
+    asyncio.create_task(run_daily_self_improvement()) # v7.0: self-improvement
+    asyncio.create_task(app.state.environment_monitor.poll_sources()) # v7.0: environment monitoring
     yield
     global scheduler_running
     scheduler_running = False
 
 app = FastAPI(
     lifespan=lifespan,
-    title="CWC Sophia AI — China-West Business Intelligence",
-    description="Sophia is CWC's agentic AI advisor for China-West cross-border business. v6.0 with autonomous task execution, goal tracking, iterative reflection, conditional re-planning, and proactive outreach.",
-    version="6.0.0",
+    title="CWC Sophia AI — Fully Agentic China-West Business Intelligence",
+    description="Sophia v7.0: Self-improving, meta-cognitive, environment-aware, collaborative multi-agent system with autonomous tool creation and predictive intent.",
+    version="7.0.0",
 )
 
 # ============================================================
@@ -1019,6 +2070,49 @@ def init_db():
         last_used TIMESTAMP,
         created_at TIMESTAMP DEFAULT NOW()
     )''')
+    
+    # v7.0: New tables
+    c.execute('''CREATE TABLE IF NOT EXISTS agent_performance_metrics (
+        id SERIAL PRIMARY KEY,
+        date DATE,
+        avg_reflection_score FLOAT,
+        failure_patterns JSONB,
+        created_at TIMESTAMP DEFAULT NOW()
+    )''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS environment_alerts (
+        id SERIAL PRIMARY KEY,
+        source TEXT,
+        change_detected JSONB,
+        user_segments JSONB,
+        notified BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT NOW()
+    )''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS agent_versions (
+        id SERIAL PRIMARY KEY,
+        prompt_hash TEXT UNIQUE,
+        prompt_text TEXT,
+        performance_score FLOAT,
+        deployed BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT NOW()
+    )''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS tool_registry (
+        id SERIAL PRIMARY KEY,
+        tool_name TEXT UNIQUE,
+        description TEXT,
+        implementation TEXT,
+        created_by TEXT,
+        deployed BOOLEAN DEFAULT TRUE,
+        created_at TIMESTAMP DEFAULT NOW()
+    )''')
+    
+    # Try to create vector extension (may fail if not available)
+    try:
+        c.execute("CREATE EXTENSION IF NOT EXISTS vector")
+    except:
+        print("⚠️ pgvector extension not available - episodic memory will use ChromaDB only")
 
     migrations = [
         ("user_profiles",  "key_facts",        "JSONB DEFAULT '{}'"),
@@ -1066,6 +2160,13 @@ class SupplierSearchRequest(BaseModel):
 # v6.0: New model for queuing autonomous tasks
 class AutonomousTaskRequest(BaseModel):
     task_description: str
+    session_id: str = "anonymous"
+
+# v7.0: New model for tool registration
+class ToolRegistrationRequest(BaseModel):
+    tool_name: str
+    description: str
+    implementation: str  # Python code string
     session_id: str = "anonymous"
 
 # ============================================================
@@ -1328,17 +2429,10 @@ def search_web(query: str) -> tuple:
     return "\n\n".join(all_content), list(dict.fromkeys(s for s in all_sources if s))[:4]
 
 # ============================================================
-# NEWS — Tavily-powered, DB-persisted (survives Render cold starts)
+# NEWS — Tavily-powered, DB-persisted
 # ============================================================
-# NOTE: We do NOT use an in-memory cache here. Render's free tier spins the
-# server down after ~15 min inactivity, so in-memory state is lost on every
-# cold start. Instead we persist news in the response_cache DB table with a
-# dedicated key, giving us fresh news that survives restarts.
-# RSS feeds from SCMP/Caixin are often blocked on Render's outbound network,
-# so Tavily is the primary source — it's already wired up and working.
-
-NEWS_CACHE_KEY = "__sophia_china_news_v6__"
-NEWS_TTL_HOURS = 3  # refresh every 3 hours
+NEWS_CACHE_KEY = "__sophia_china_news_v7__"
+NEWS_TTL_HOURS = 3
 
 def _categorise_news_item(title: str) -> str:
     t = title.lower()
@@ -1352,11 +2446,7 @@ def _categorise_news_item(title: str) -> str:
     return "China Business"
 
 def _fetch_news_from_tavily() -> list:
-    """Fetch China business news via Tavily search — reliable on Render."""
-    if not TAVILY_API_KEY:
-        return []
-
-    # Run 3 targeted searches to get diverse, fresh news
+    if not TAVILY_API_KEY: return []
     queries = [
         "China business trade investment news today 2026",
         "China economy policy FDI market entry news this week",
@@ -1364,7 +2454,6 @@ def _fetch_news_from_tavily() -> list:
     ]
     items = []
     seen_titles = set()
-
     for query in queries:
         try:
             res = requests.post(
@@ -1379,82 +2468,33 @@ def _fetch_news_from_tavily() -> list:
                 },
                 timeout=10
             )
-            if res.status_code != 200:
-                continue
+            if res.status_code != 200: continue
             results = res.json().get("results", [])
             for r in results:
                 title = r.get("title", "").strip()
                 url   = r.get("url", "")
                 date  = r.get("published_date", datetime.now().strftime("%Y-%m-%d"))
-                if not title or len(title) < 10:
-                    continue
-                # Deduplicate
+                if not title or len(title) < 10: continue
                 title_key = title.lower()[:60]
-                if title_key in seen_titles:
-                    continue
+                if title_key in seen_titles: continue
                 seen_titles.add(title_key)
-                # Filter noise
-                if any(kw in title.lower() for kw in ["ukraine","russia","epstein","nato","israel","gaza","sport","football","cricket"]):
-                    continue
+                if any(kw in title.lower() for kw in ["ukraine","russia","epstein","nato","israel","gaza","sport","football","cricket"]): continue
                 items.append({
                     "title": title,
                     "url": url,
                     "category": _categorise_news_item(title),
                     "date": str(date)[:10] if date else datetime.now().strftime("%Y-%m-%d"),
                 })
-            if len(items) >= 12:
-                break
+            if len(items) >= 12: break
         except Exception as e:
-            print(f"Tavily news error ({query[:30]}): {e}")
-
-    # Sort by date descending, keep top 8
+            print(f"Tavily news error: {e}")
     try:
         items.sort(key=lambda x: x.get("date", ""), reverse=True)
-    except Exception:
-        pass
-    return items[:8]
-
-def _fetch_news_from_rss_fallback() -> list:
-    """Secondary fallback: try RSS feeds. May fail on Render — that's OK."""
-    feeds = [
-        "https://www.chinadaily.com.cn/rss/bizchina_rss.xml",
-        "https://www.xinhuanet.com/english/rss/financerss.xml",
-        "https://rss.app/feeds/china-business.xml",
-    ]
-    items = []
-    for feed_url in feeds:
-        try:
-            res = requests.get(feed_url, timeout=6, headers={"User-Agent": "Mozilla/5.0 CWC-Sophia/6.0"})
-            if res.status_code != 200:
-                continue
-            for block in re.findall(r'<item[^>]*>(.*?)</item>', res.text, re.DOTALL)[:5]:
-                tm = re.search(r'<title><!\[CDATA\[(.*?)\]\]></title>|<title>(.*?)</title>', block, re.DOTALL)
-                if not tm: continue
-                title = re.sub(r'<[^>]+>', '', (tm.group(1) or tm.group(2) or "")).strip()
-                if not title or len(title) < 10: continue
-                lm = re.search(r'<link>(https?://[^<]+)</link>', block) or re.search(r'<guid[^>]*>(https?://[^<]+)</guid>', block)
-                link = lm.group(1).strip() if lm else feed_url
-                dm = re.search(r'<pubDate>(.*?)</pubDate>', block)
-                date = dm.group(1).strip()[:10] if dm else datetime.now().strftime("%Y-%m-%d")
-                if any(kw in title.lower() for kw in ["ukraine","russia","epstein","nato","israel","gaza"]): continue
-                items.append({"title": title, "url": link, "category": _categorise_news_item(title), "date": date})
-            if len(items) >= 8: break
-        except Exception as e:
-            print(f"RSS fallback error ({feed_url}): {e}")
+    except: pass
     return items[:8]
 
 def fetch_china_news() -> list:
-    """
-    Fetch China business news.
-    Strategy:
-      1. Check DB cache — if < NEWS_TTL_HOURS old, return it (survives cold starts)
-      2. Try Tavily (primary — reliable on Render)
-      3. Try RSS feeds (secondary fallback)
-      4. Return last known DB items if all else fails (never show static hardcoded list)
-    """
     now = datetime.now()
-
-    # ── Step 1: Check DB cache ────────────────────────────────────────────────
     try:
         conn = get_db()
         c = conn.cursor()
@@ -1466,30 +2506,18 @@ def fetch_china_news() -> list:
             age_hours = (now - created).total_seconds() / 3600
             cached_items = json.loads(row[0]) if row[0] else []
             if age_hours < NEWS_TTL_HOURS and cached_items:
-                print(f"📰 News: serving from DB cache ({age_hours:.1f}h old, {len(cached_items)} items)")
                 return cached_items
-            # Cache exists but stale — remember stale items as final fallback
             stale_items = cached_items
         else:
             stale_items = []
     except Exception as e:
         print(f"News DB cache read error: {e}")
         stale_items = []
-
-    # ── Step 2: Fetch fresh news via Tavily ───────────────────────────────────
+    
     fresh_items = []
     if TAVILY_API_KEY:
         fresh_items = _fetch_news_from_tavily()
-        if fresh_items:
-            print(f"📰 News: fetched {len(fresh_items)} items from Tavily")
-
-    # ── Step 3: RSS fallback if Tavily got nothing ────────────────────────────
-    if not fresh_items:
-        fresh_items = _fetch_news_from_rss_fallback()
-        if fresh_items:
-            print(f"📰 News: fetched {len(fresh_items)} items from RSS fallback")
-
-    # ── Step 4: Persist fresh items to DB (so cold starts use them) ──────────
+    
     if fresh_items:
         try:
             conn = get_db()
@@ -1501,21 +2529,14 @@ def fetch_china_news() -> list:
             )
             conn.commit()
             conn.close()
-            print(f"📰 News: persisted {len(fresh_items)} items to DB cache")
         except Exception as e:
             print(f"News DB cache write error: {e}")
         return fresh_items
-
-    # ── Step 5: Return stale DB items if we couldn't refresh ─────────────────
+    
     if stale_items:
-        print(f"📰 News: returning {len(stale_items)} stale items (refresh failed)")
         return stale_items
-
-    # ── Step 6: Absolute last resort — minimal placeholder (should rarely hit) 
-    print("📰 News: all sources failed, returning placeholder")
-    return [
-        {"title": f"China business intelligence unavailable — check back shortly", "url": "", "category": "China Business", "date": now.strftime("%Y-%m-%d")},
-    ]
+    
+    return [{"title": "China business intelligence unavailable", "url": "", "category": "China Business", "date": now.strftime("%Y-%m-%d")}]
 
 # ============================================================
 # COMPANY LOOKUP
@@ -1542,7 +2563,7 @@ def lookup_chinese_company(company_name: str) -> dict:
     return result
 
 # ============================================================
-# v5: ACCIO-STYLE SUPPLIER SEARCH ENGINE
+# ACCIO-STYLE SUPPLIER SEARCH ENGINE
 # ============================================================
 def search_suppliers(product_or_sector: str, region: str = "") -> dict:
     year = datetime.now().year
@@ -1591,7 +2612,7 @@ def search_suppliers(product_or_sector: str, region: str = "") -> dict:
         return {"market_context":raw_text[:300],"sources":all_sources[:3]}
 
 # ============================================================
-# v5: TASK DECOMPOSITION ENGINE
+# TASK DECOMPOSITION ENGINE
 # ============================================================
 def decompose_task(user_message: str, user_profile: dict) -> dict | None:
     complex_triggers = ["help me find","i want to source","find suppliers for","market entry plan",
@@ -1630,7 +2651,7 @@ def decompose_task(user_message: str, user_profile: dict) -> dict | None:
     return None
 
 # ============================================================
-# GROQ TOOL DEFINITIONS — v6.0
+# v7.0: ENHANCED GROQ TOOL DEFINITIONS
 # ============================================================
 GROQ_TOOLS = [
     {
@@ -1667,14 +2688,10 @@ GROQ_TOOLS = [
         "type": "function",
         "function": {
             "name": "find_suppliers",
-            "description": (
-                "Accio-style supplier discovery. Search for Chinese manufacturers/suppliers for a product or sector. "
-                "Returns structured market intel: MOQ ranges, price ranges, required certifications, top manufacturing regions, "
-                "common red flags. Use when user wants to source products from China or find manufacturing partners."
-            ),
+            "description": "Accio-style supplier discovery. Search for Chinese manufacturers/suppliers for a product or sector.",
             "parameters": {"type":"object","properties":{
                 "product_or_sector":{"type":"string","description":"Product or sector to source"},
-                "destination_region":{"type":"string","description":"Buyer country/region (e.g. Europe, USA)"},
+                "destination_region":{"type":"string","description":"Buyer country/region"},
                 "additional_requirements":{"type":"string","description":"Certifications, MOQ, etc."}
             },"required":["product_or_sector"]}
         }
@@ -1683,13 +2700,7 @@ GROQ_TOOLS = [
         "type": "function",
         "function": {
             "name": "reflect_and_improve",
-            "description": (
-                "Self-reflection tool. After drafting a response, use this to evaluate quality. "
-                "Checks: (1) answers real need not just literal question, (2) uses specific facts not generalities, "
-                "(3) advances the CWC sales conversation, (4) has clear next step. "
-                "Returns score 1-10 and improvement instructions if needed. "
-                "ALWAYS use this before finalising a response to a complex or high-value user query."
-            ),
+            "description": "Self-reflection tool. Score draft response 1-10 and provide improvement instructions.",
             "parameters": {"type":"object","properties":{
                 "draft_response":{"type":"string"},
                 "user_need":{"type":"string"}
@@ -1700,11 +2711,7 @@ GROQ_TOOLS = [
         "type": "function",
         "function": {
             "name": "update_semantic_memory",
-            "description": (
-                "Store important facts about the user for future personalization. "
-                "Call when user reveals: company name, budget, timeline, preferences, constraints, or decision criteria. "
-                "This creates long-term memory across sessions."
-            ),
+            "description": "Store important facts about the user for future personalization.",
             "parameters": {"type":"object","properties":{
                 "fact_type":{"type":"string","enum":["company","budget","timeline","preference","constraint","goal","sector","urgency"]},
                 "fact_value":{"type":"string"},
@@ -1716,12 +2723,7 @@ GROQ_TOOLS = [
         "type": "function",
         "function": {
             "name": "queue_autonomous_task",
-            "description": (
-                "Queue a background task for Sophia to complete autonomously — without waiting for the user. "
-                "Use when user says 'watch this company', 'monitor for me', 'check back on', 'research later', "
-                "'keep an eye on', or any request implying deferred or continuous work. "
-                "Sophia will complete the task in the background and email the results."
-            ),
+            "description": "Queue a background task for Sophia to complete autonomously.",
             "parameters": {"type":"object","properties":{
                 "task_description":{"type":"string","description":"Clear description of what to do autonomously"},
                 "task_type":{"type":"string","enum":["monitor_company","find_supplier","market_research","news_watch","general"]}
@@ -1732,24 +2734,68 @@ GROQ_TOOLS = [
         "type": "function",
         "function": {
             "name": "update_goal_progress",
-            "description": (
-                "Update the user's long-term goal progress. Call when a milestone is completed or a goal changes. "
-                "This ensures Sophia continues the user's journey on future visits rather than starting from scratch."
-            ),
+            "description": "Update the user's long-term goal progress.",
             "parameters": {"type":"object","properties":{
-                "goal":{"type":"string","description":"The overarching goal (e.g. 'Verify supplier XYZ')"},
+                "goal":{"type":"string","description":"The overarching goal"},
                 "milestone":{"type":"string","description":"Current milestone reached"},
                 "status":{"type":"string","enum":["pending","in_progress","done","blocked"]}
             },"required":["goal","milestone","status"]}
+        }
+    },
+    # v7.0: New tools
+    {
+        "type": "function",
+        "function": {
+            "name": "assess_confidence",
+            "description": "Assess confidence in current response and decide if followup questions needed.",
+            "parameters": {"type":"object","properties":{
+                "draft_response":{"type":"string"},
+                "user_message":{"type":"string"},
+                "context":{"type":"string"}
+            },"required":["draft_response","user_message"]}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "register_new_tool",
+            "description": "Create and register a new tool for future use. Call when you identify a reusable capability.",
+            "parameters": {"type":"object","properties":{
+                "tool_name":{"type":"string","description":"Name of the tool (snake_case)"},
+                "description":{"type":"string","description":"What this tool does"},
+                "implementation":{"type":"string","description":"Python code that implements the tool (must define a function with same name taking args dict)"}
+            },"required":["tool_name","description","implementation"]}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "predict_user_intent",
+            "description": "Predict what the user will ask next based on patterns and current goals.",
+            "parameters": {"type":"object","properties":{
+                "current_intent":{"type":"string"}
+            },"required":["current_intent"]}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "execute_parallel_agents",
+            "description": "Run multiple specialist agents in parallel and synthesize results.",
+            "parameters": {"type":"object","properties":{
+                "task":{"type":"string","description":"The task to parallelize"},
+                "agents":{"type":"array","items":{"type":"string"},"description":"Agents to run"}
+            },"required":["task"]}
         }
     }
 ]
 
 # ============================================================
-# TOOL EXECUTION HANDLER — v6.0
+# v7.0: ENHANCED TOOL EXECUTION HANDLER
 # ============================================================
-def run_tool_call(tool_name: str, tool_args: dict, session_id: str = None, user_profile: dict = None) -> tuple:
-    """Execute tool calls with full context awareness"""
+def run_tool_call(tool_name: str, tool_args: dict, session_id: str = None, 
+                  user_profile: dict = None, app_state: dict = None) -> tuple:
+    """Execute tool calls with full context awareness and v7.0 enhancements"""
     
     if tool_name == "search_market_intelligence":
         query = tool_args.get("query","")
@@ -1847,11 +2893,19 @@ def run_tool_call(tool_name: str, tool_args: dict, session_id: str = None, user_
             current_facts = user_profile.get('key_facts', {})
             current_facts[fact_type] = fact_value
             update_user_profile(session_id, key_facts=current_facts)
+            
+            # Also store in semantic memory
+            if app_state and hasattr(app_state, 'memory'):
+                app_state.memory.store_semantic(
+                    fact_type, fact_value, importance, 
+                    source="user_conversation",
+                    metadata={"session_id": session_id}
+                )
+            
             return f"Stored in long-term memory: {fact_type} = {fact_value}", []
         return f"Memory not stored (importance {importance} < 7 or missing context)", []
 
     elif tool_name == "queue_autonomous_task":
-        # v6.0: Queue a background autonomous task
         task_desc = tool_args.get("task_description", "")
         if task_desc and session_id:
             try:
@@ -1864,7 +2918,6 @@ def run_tool_call(tool_name: str, tool_args: dict, session_id: str = None, user_
                 task_id = c.fetchone()[0]
                 conn.commit()
                 conn.close()
-                print(f"🎯 Queued autonomous task #{task_id}: {task_desc[:50]}")
                 return f"✅ Task queued (#{task_id}): '{task_desc}'. Sophia will complete this in the background and email you the results.", []
             except Exception as e:
                 print(f"Task queue error: {e}")
@@ -1872,7 +2925,6 @@ def run_tool_call(tool_name: str, tool_args: dict, session_id: str = None, user_
         return "Task description required.", []
 
     elif tool_name == "update_goal_progress":
-        # v6.0: Update long-term goal state
         goal = tool_args.get("goal", "")
         milestone = tool_args.get("milestone", "")
         status = tool_args.get("status", "in_progress")
@@ -1880,6 +2932,66 @@ def run_tool_call(tool_name: str, tool_args: dict, session_id: str = None, user_
             update_goal_state(session_id, goal, milestone, status)
             return f"Goal updated: '{goal}' → '{milestone}' [{status}]", []
         return "Goal update skipped (missing data)", []
+
+    # v7.0: New tool implementations
+    elif tool_name == "assess_confidence":
+        draft = tool_args.get("draft_response", "")
+        user_msg = tool_args.get("user_message", "")
+        context = tool_args.get("context", "")
+        
+        if app_state and hasattr(app_state, 'meta_cognitive'):
+            assessment = app_state.meta_cognitive.assess_confidence(
+                draft, user_msg, 
+                {"intent": context}, 
+                []  # tool_calls would be passed here in real use
+            )
+            return json.dumps(assessment), []
+        return "Confidence assessment unavailable", []
+
+    elif tool_name == "register_new_tool":
+        tool_name_new = tool_args.get("tool_name", "")
+        description = tool_args.get("description", "")
+        implementation = tool_args.get("implementation", "")
+        
+        if not all([tool_name_new, description, implementation]):
+            return "Missing required fields", []
+        
+        # Simple validation
+        if "def " not in implementation or tool_name_new not in implementation:
+            return "Implementation must define a function with the same name", []
+        
+        if app_state and hasattr(app_state, 'tool_registry'):
+            success = app_state.tool_registry.register_tool(
+                tool_name_new, description, implementation, 
+                created_by="sophia"
+            )
+            if success:
+                return f"✅ Tool '{tool_name_new}' registered successfully. It can now be used in future conversations.", []
+            return f"Failed to register tool '{tool_name_new}'", []
+        return "Tool registry unavailable", []
+
+    elif tool_name == "predict_user_intent":
+        current_intent = tool_args.get("current_intent", "general")
+        
+        if app_state and hasattr(app_state, 'predictive_intent') and session_id:
+            profile = get_or_create_user_profile(session_id)
+            predictions = app_state.predictive_intent.predict_next_intent(
+                current_intent, profile
+            )
+            return json.dumps(predictions), []
+        return "Intent prediction unavailable", []
+
+    elif tool_name == "execute_parallel_agents":
+        task = tool_args.get("task", "")
+        agents = tool_args.get("agents", [])
+        
+        if app_state and hasattr(app_state, 'orchestrator') and session_id:
+            # This is a simplified version - in production, we'd pass proper context
+            result = asyncio.run(app_state.orchestrator.parallel_execute(
+                task, {"intent": "general"}, task, session_id
+            ))
+            return result.get('consensus', 'Parallel execution failed'), []
+        return "Parallel execution unavailable", []
 
     return "", []
 
@@ -1959,7 +3071,6 @@ def generate_handoff_brief(session_id: str, user_profile: dict) -> str:
     key_facts = user_profile.get('key_facts', {})
     facts_text = "\n".join([f"   {k}: {v}" for k, v in key_facts.items() if v]) or "   Not yet extracted."
     
-    # v6.0: Include active goals in handoff
     task_history = user_profile.get('task_history', []) or []
     active_goals = [t for t in task_history if t.get("status") in ("pending", "in_progress")]
     goals_text = "\n".join([f"   [{t['status'].upper()}] {t['goal']} → {t['milestone']}" for t in active_goals]) or "   None tracked"
@@ -1967,7 +3078,7 @@ def generate_handoff_brief(session_id: str, user_profile: dict) -> str:
     priority  = "🔥 HOT — Contact within 24h" if score >= 70 else ("🟡 WARM — Follow up 48h" if score >= 40 else "🔵 COLD — Nurture")
     return f"""
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📋 SOPHIA v6.0 HANDOFF BRIEF
+📋 SOPHIA v7.0 HANDOFF BRIEF
 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 👤 CONTACT
@@ -1984,7 +3095,7 @@ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}
 🧠 AI KEY FACTS
 {facts_text}
 
-🎯 ACTIVE GOALS (v6.0)
+🎯 ACTIVE GOALS (v7.0)
 {goals_text}
 
 💬 CONVERSATION
@@ -1994,7 +3105,6 @@ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
-
 def _recommend_action(score: int, intent: str, region: str) -> str:
     if intent == "supplier_verification": return "URGENT: Due diligence needed. SAMR check + factory audit proposal."
     elif intent == "supplier_search":     return f"User wants supplier matching in {region or 'target market'}. Prepare shortlist."
@@ -2002,7 +3112,6 @@ def _recommend_action(score: int, intent: str, region: str) -> str:
     elif intent == "consultation_request": return "Schedule discovery call ASAP."
     elif region: return f"Prepare {region} market brief."
     else: return "Send personalised intro email with CWC capabilities deck."
-
 
 def check_qualification_gaps(user_profile: dict, message_count: int) -> str | None:
     if message_count < 3: return None
@@ -2015,7 +3124,6 @@ def check_qualification_gaps(user_profile: dict, message_count: int) -> str | No
                 "Ask ONE direct qualifying question before answering. Warm tone: 'Before I go further — can I ask...'")
     return None
 
-
 def check_escalation_trigger(user_profile: dict, message_count: int, current_message: str) -> bool:
     urgency = ["urgent","asap","immediately","today","deposit","already paid","already transferred","fraud","scam","lost money","emergency"]
     if any(w in current_message.lower() for w in urgency): return True
@@ -2023,11 +3131,11 @@ def check_escalation_trigger(user_profile: dict, message_count: int, current_mes
     return False
 
 # ============================================================
-# MAIN AI FUNCTION — v6.0 FULLY AGENTIC
+# v7.0: MAIN AI FUNCTION — FULLY AGENTIC
 # ============================================================
 def ask_groq(prompt: str, session_id: str = "anonymous",
              user_profile: dict = None, quick_action: str = None,
-             deep_search: bool = False) -> tuple:
+             deep_search: bool = False, app_state: dict = None) -> tuple:
 
     if not GROQ_API_KEY:
         return "System temporarily unavailable. Please contact the CWC team directly.", []
@@ -2053,6 +3161,15 @@ def ask_groq(prompt: str, session_id: str = "anonymous",
     # v6.0: Auto-infer and save long-horizon goal
     if user_profile and intent_data['primary'] not in ("general", "information_gathering"):
         infer_and_save_goal(session_id, intent_data['primary'], prompt, user_profile)
+
+    # v7.0: Predict next intent
+    next_intent_prediction = ""
+    if app_state and hasattr(app_state, 'predictive_intent'):
+        predictions = app_state.predictive_intent.predict_next_intent(
+            intent_data['primary'], user_profile or {}
+        )
+        if predictions.get('predictions'):
+            next_intent_prediction = f"\n🔮 PREDICTED NEXT INTENT: {predictions['predictions'][0]['intent']} ({predictions['predictions'][0]['probability']*100}% confidence)"
 
     # ── v5.1: CHECK FOR PROCEDURAL WORKFLOW FIRST ────────────────────────────
     workflow_result = None
@@ -2173,12 +3290,13 @@ def ask_groq(prompt: str, session_id: str = "anonymous",
         completed_tasks = [s['task'] for s in htn_plan_result['completed']]
         htn_context_str = f"\n🎯 AGENT TRACE: Completed sub-tasks: {', '.join(completed_tasks)}"
 
+    # v7.0: Confidence assessment will be applied after response generation
     _now = datetime.now()
-    _today_str = _now.strftime('%A, %d %B %Y')   # e.g. "Friday, 28 February 2026"
+    _today_str = _now.strftime('%A, %d %B %Y')
     _time_str  = _now.strftime('%H:%M UTC')
 
-    system_prompt = f"""You are Sophia — official AI advisor for China West Connector (CWC).
-Version 6.0 | Deep Search: {'ON' if deep_search else 'OFF'}
+    system_prompt = f"""You are Sophia — fully agentic AI advisor for China West Connector (CWC).
+Version 7.0 | Deep Search: {'ON' if deep_search else 'OFF'}
 TODAY: {_today_str} | TIME: {_time_str}
 IMPORTANT: When asked the date, day, or time — use ONLY the values above. Never guess.
 
@@ -2186,6 +3304,7 @@ INTENT: {intent_data['primary']} | REGION: {intent_data['region'] or '?'} | MESS
 {lang_instruction}
 {returning_context}
 {active_goals_context}
+{next_intent_prediction}
 {sector_context}
 {qualification_prompt or ''}
 {escalation_instruction}
@@ -2194,35 +3313,37 @@ INTENT: {intent_data['primary']} | REGION: {intent_data['region'] or '?'} | MESS
 {workflow_context}
 {htn_context_str}
 
-━━━ v6.0 AUTONOMOUS CAPABILITIES ━━━
-You can now queue background tasks with queue_autonomous_task.
-Use this when user says things like:
-  "watch this company for me" → queue company monitoring
-  "research X and get back to me" → queue market research
-  "keep an eye on..." → queue news monitoring
-  "check back on..." → queue follow-up task
-Always confirm what you've queued and that they'll receive email results.
+━━━ v7.0 FULLY AGENTIC CAPABILITIES ━━━
+You now have:
+1. SELF-IMPROVEMENT: Analyze past failures and improve your own prompts (runs daily)
+2. META-COGNITION: Assess confidence, ask followups when uncertain
+3. ENVIRONMENT AWARENESS: Monitor government/regulatory changes
+4. COLLABORATIVE AGENTS: Run multiple specialists in parallel with consensus
+5. TOOL CREATION: Register new tools with register_new_tool for reusable capabilities
+6. PREDICTIVE INTENT: Anticipate what user will ask next
+7. EPISODIC MEMORY: Recall similar past conversations with embeddings
+
+You can queue background tasks, track long-term goals, and act autonomously.
 
 ━━━ CHAIN OF THOUGHT (always execute) ━━━
-1. What does the user ACTUALLY need (beyond what they literally asked)?
-2. What do I know from their profile, pre-gathered intel, active goals, and learned patterns?
-3. Do I need more tools — or is pre-gathered intel sufficient?
-4. Should any part of this request be queued as an autonomous background task?
-5. Which CWC service maps most directly to their need?
-6. What is the single most valuable next step?
-7. After drafting, CALL reflect_and_improve. If score < 7, REWRITE and reflect again (max 2 attempts).
-8. Call update_goal_progress to track milestones reached this conversation.
+1. What does the user ACTUALLY need?
+2. What do I know from their profile, active goals, and predicted intent?
+3. Should I run parallel agents for complex queries? (use execute_parallel_agents)
+4. Should I create a new tool for reusable patterns? (use register_new_tool)
+5. What's my confidence level? (use assess_confidence if <70%, ask followup)
+6. After drafting, CALL reflect_and_improve. If score < 7, REWRITE.
+7. Call update_goal_progress to track milestones.
 
-TOOLS: search_market_intelligence | lookup_company | generate_risk_report | find_suppliers | reflect_and_improve | update_semantic_memory | queue_autonomous_task | update_goal_progress
+TOOLS: All previous tools + assess_confidence | register_new_tool | predict_user_intent | execute_parallel_agents
 
 ━━━ MISSION ━━━
-You are NOT a Q&A bot. You are an active business advisor.
-1. QUALIFY (direction, sector, goal, urgency)
-2. PERSONALISE using everything known about this user + their active goals
-3. RECOMMEND CWC service with clear reasoning
-4. END with a concrete next step — never a dead end
-5. USE update_semantic_memory to store important facts (importance >= 7)
-6. USE queue_autonomous_task for any deferred/monitoring requests
+You are NOT a Q&A bot. You are an autonomous business advisor that:
+1. QUALIFIES (direction, sector, goal, urgency)
+2. PERSONALISES using everything known + active goals + predicted intent
+3. RECOMMENDS CWC service with clear reasoning
+4. ENDS with concrete next step
+5. LEARNS from every interaction
+6. IMPROVES itself over time
 
 QUALIFICATION PRIORITY: ① West→China or China→West? ② Sector? ③ Goal? ④ Urgency?
 
@@ -2249,13 +3370,12 @@ FIRST MESSAGE (no history, no quick action): Introduce as Sophia, ask direction.
     headers = {"Authorization":f"Bearer {GROQ_API_KEY}","Content-Type":"application/json"}
     all_sources      = []
     reflection_score = 5
-    agent_trace      = []   # v6.0: track tool calls for transparency
+    agent_trace      = []
 
-    MAX_ITERATIONS   = 10  # Increased for v6.0 iterative reflection
+    MAX_ITERATIONS   = 10
     response_text    = ""
     current_messages = [{"role":"system","content":system_prompt}] + list(messages)
     
-    # v6.0: Track reflection attempts for iterative improvement loop
     reflection_attempts = 0
     MAX_REFLECTION_ATTEMPTS = 2
 
@@ -2283,9 +3403,15 @@ FIRST MESSAGE (no history, no quick action): Introduce as Sophia, ask direction.
                 fn_name = tool_call["function"]["name"]
                 fn_args = json.loads(tool_call["function"]["arguments"])
                 print(f"🔧 [{iteration+1}] {fn_name}({list(fn_args.keys())})")
-                agent_trace.append(fn_name)  # v6.0: track for transparency
+                agent_trace.append(fn_name)
                 
-                tool_result, sources = run_tool_call(fn_name, fn_args, session_id=session_id, user_profile=user_profile)
+                # Pass app_state to tool execution for v7.0 features
+                tool_result, sources = run_tool_call(
+                    fn_name, fn_args, 
+                    session_id=session_id, 
+                    user_profile=user_profile,
+                    app_state=app_state
+                )
                 all_sources.extend(sources)
                 
                 if fn_name == "reflect_and_improve":
@@ -2294,13 +3420,8 @@ FIRST MESSAGE (no history, no quick action): Introduce as Sophia, ask direction.
                         reflection_score = int(m.group(1))
                     reflection_attempts += 1
                     
-                    # v6.0: ITERATIVE REFLECTION LOOP
-                    # If reflection fails and we haven't hit max attempts, inject improvement instructions
-                    # back into the message stream so the LLM rewrites before reflecting again
                     if "REFLECTION FAILED" in tool_result and reflection_attempts < MAX_REFLECTION_ATTEMPTS:
-                        print(f"🔄 Reflection failed (score {reflection_score}/10) — triggering rewrite (attempt {reflection_attempts}/{MAX_REFLECTION_ATTEMPTS})")
-                        # The tool result with REWRITE instructions will be fed back automatically
-                        # since it's appended to current_messages below — LLM will rewrite in next iteration
+                        print(f"🔄 Reflection failed (score {reflection_score}/10) — triggering rewrite")
                         
                 elif fn_name == "update_semantic_memory":
                     print(f"💾 Memory update: {tool_result}")
@@ -2308,6 +3429,16 @@ FIRST MESSAGE (no history, no quick action): Introduce as Sophia, ask direction.
                     print(f"🤖 Autonomous task queued: {fn_args.get('task_description','')[:40]}")
                 elif fn_name == "update_goal_progress":
                     print(f"🎯 Goal progress: {tool_result}")
+                elif fn_name == "register_new_tool":
+                    print(f"🔧 New tool registered: {fn_args.get('tool_name','')}")
+                elif fn_name == "assess_confidence":
+                    try:
+                        assessment = json.loads(tool_result)
+                        if assessment.get('needs_followup'):
+                            # Inject followup question suggestion
+                            tool_result += f"\n\nSUGGESTED FOLLOWUP: {assessment.get('suggestion', '')}"
+                    except:
+                        pass
                     
                 current_messages.append({
                     "role":"tool","tool_call_id":tool_call["id"],
@@ -2319,7 +3450,14 @@ FIRST MESSAGE (no history, no quick action): Introduce as Sophia, ask direction.
             res2.raise_for_status()
             response_text = res2.json()["choices"][0]["message"]["content"]
 
-        # v6.0: LEARN FROM THIS INTERACTION
+        # v7.0: Store in episodic memory
+        if app_state and hasattr(app_state, 'memory'):
+            app_state.memory.store_episodic(
+                session_id, prompt, response_text,
+                reflection_score, intent_data['primary'],
+                metadata={"agent_trace": agent_trace}
+            )
+
         new_score = calculate_lead_score(user_profile or {}, prompt, intent_data['primary'])
         update_user_profile(session_id, last_intent=intent_data['primary'],
                             region_interest=intent_data['region'], lead_score=new_score, language=lang)
@@ -2340,7 +3478,6 @@ FIRST MESSAGE (no history, no quick action): Introduce as Sophia, ask direction.
         print(f"Groq error: {e}")
         return "I apologise — connection trouble. Please reach out to the CWC team directly.", []
 
-
 def _update_conversation_summary(session_id: str):
     if not GROQ_API_KEY: return
     history = get_conversation_history(session_id, limit=10)
@@ -2355,7 +3492,6 @@ def _update_conversation_summary(session_id: str):
                             ],"temperature":0.1,"max_tokens":150}, timeout=10)
         update_user_profile(session_id, conversation_summary=res.json()["choices"][0]["message"]["content"])
     except Exception as e: print(f"Summary error: {e}")
-
 
 def _extract_and_save_key_facts(session_id: str, user_profile: dict):
     if not GROQ_API_KEY: return
@@ -2398,7 +3534,6 @@ def send_email_brevo(to_email: str, subject: str, body: str, from_name: str = "C
         print(f"❌ Brevo error: {res.status_code}"); return False
     except Exception as e: print(f"❌ Email failed: {e}"); return False
 
-
 def send_lead_notification(lead: LeadCapture):
     conn = get_db()
     c = conn.cursor()
@@ -2419,7 +3554,7 @@ def send_lead_notification(lead: LeadCapture):
         to_email=RECIPIENT_EMAIL,
         subject=f"🎯 New Lead: {lead.name} from {lead.company or 'Website'} (Score: {lead_score}/100)",
         body=f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🎯 NEW LEAD — SOPHIA v6.0
+🎯 NEW LEAD — SOPHIA v7.0
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 NAME: {lead.name} | EMAIL: {lead.email}
 COMPANY: {lead.company or '?'} | REGION: {lead.region or '?'}
@@ -2432,7 +3567,6 @@ Dashboard: https://cwc-ai-backend.onrender.com/analytics?password={ADMIN_PASSWOR
 Leads:     https://cwc-ai-backend.onrender.com/leads?password={ADMIN_PASSWORD}
 Reply:     mailto:{lead.email}"""
     )
-
 
 def send_weekly_report():
     conn = get_db()
@@ -2454,12 +3588,16 @@ def send_weekly_report():
     # v6.0: Autonomous tasks stats
     c.execute("SELECT COUNT(*) FROM agent_tasks WHERE created_at>%s",(w,)); at_total=c.fetchone()[0]
     c.execute("SELECT COUNT(*) FROM agent_tasks WHERE status='completed' AND created_at>%s",(w,)); at_done=c.fetchone()[0]
+    # v7.0: New stats
+    c.execute("SELECT COUNT(*) FROM agent_versions WHERE created_at>%s",(w,)); av_new=c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM environment_alerts WHERE created_at>%s",(w,)); ea_new=c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM tool_registry WHERE created_at>%s",(w,)); tr_new=c.fetchone()[0]
     conn.close()
     send_email_brevo(
         to_email=RECIPIENT_EMAIL,
         subject=f"📊 CWC AI Weekly — {uu} Users, {nl} Leads, Quality: {ar}/10",
         body=f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📊 SOPHIA v6.0 WEEKLY REPORT
+📊 SOPHIA v7.0 WEEKLY REPORT
 {w[:10]} → {datetime.now().strftime('%Y-%m-%d')}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 OVERVIEW: Users {uu} | Messages {tm} | Returning {ru} | Leads {nl}
@@ -2475,7 +3613,10 @@ RECENT LEADS: {chr(10).join([f"  • {l[0]} {l[1]} ({l[2] or '?'}) [{l[3] or '?'
 🧠 LEARNED PATTERNS: {lp} new this week
 {' | '.join([f"{p[0]}:{p[1]}" for p in pt]) or 'No patterns yet'}
 
-🤖 AUTONOMOUS TASKS (v6.0): {at_total} queued, {at_done} completed
+🤖 AUTONOMOUS TASKS: {at_total} queued, {at_done} completed
+🔧 NEW TOOLS CREATED: {tr_new}
+🔄 SELF-IMPROVEMENTS: {av_new}
+🌍 ENVIRONMENT ALERTS: {ea_new}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Dashboard: https://cwc-ai-backend.onrender.com/analytics?password={ADMIN_PASSWORD}"""
     )
@@ -2485,19 +3626,25 @@ Dashboard: https://cwc-ai-backend.onrender.com/analytics?password={ADMIN_PASSWOR
 # API ENDPOINTS
 # ============================================================
 @app.get("/")
-def root():
+def root(request: Request):
     return {
-        "service": "CWC Sophia AI — China-West Business Intelligence",
-        "version": "6.0.0",
+        "service": "CWC Sophia AI — Fully Agentic China-West Business Intelligence",
+        "version": "7.0.0",
         "status": "operational",
         "features": [
+            "self_improvement",              # v7.0
+            "meta_cognitive_confidence",      # v7.0
+            "environment_monitoring",         # v7.0
+            "collaborative_multi_agent",      # v7.0
+            "tool_creation",                  # v7.0
+            "predictive_intent",              # v7.0
+            "episodic_memory",                 # v7.0
             "procedural_memory", "htn_planning_with_conditional_replanning",
             "multi_agent_delegation", "continuous_learning_with_normalized_patterns",
             "iterative_self_reflection", "task_decomposition", "specialist_sub_agents",
-            "accio_supplier_search", "autonomous_background_tasks",  # v6.0
-            "long_horizon_goal_tracking",                            # v6.0
-            "proactive_hot_lead_followup",                           # v6.0
-            "agent_trace_transparency"                               # v6.0
+            "accio_supplier_search", "autonomous_background_tasks",
+            "long_horizon_goal_tracking", "proactive_hot_lead_followup",
+            "agent_trace_transparency"
         ],
         "public_api": "GET /api/sophia?q=your+question",
         "news_api": "GET /api/news",
@@ -2506,14 +3653,17 @@ def root():
 
 @app.get("/health")
 def health_check():
+    chroma_status = "available" if CHROMA_AVAILABLE else "not_installed"
     return {
         "status": "healthy",
         "groq": bool(GROQ_API_KEY),
         "tavily": bool(TAVILY_API_KEY),
         "brevo": bool(BREVO_API_KEY),
         "db": bool(DATABASE_URL),
-        "version": "6.0.0",
-        "new_v6_features": ["autonomous_tasks", "goal_tracking", "iterative_reflection", "proactive_followup"]
+        "chroma": chroma_status,
+        "version": "7.0.0",
+        "new_v7_features": ["self_improvement", "meta_cognition", "environment_monitor", 
+                           "parallel_agents", "tool_creation", "predictive_intent", "episodic_memory"]
     }
 
 @app.get("/new-session")
@@ -2536,11 +3686,18 @@ async def chat(req: ChatRequest, request: Request):
             return {"response":cached[0],"sources":cached[1],"cached":True}
     consultation_kw = ["book","consultation","call","schedule","meet","contact","michail","digkas"]
     is_consultation = any(kw in user_msg for kw in consultation_kw)
-    reply, sources = ask_groq(req.message, req.session_id, user_profile, deep_search=req.deep_search)
+    
+    # Pass app state to ask_groq for v7.0 features
+    reply, sources = ask_groq(
+        req.message, req.session_id, user_profile, 
+        deep_search=req.deep_search,
+        app_state=app.state
+    )
+    
     if is_consultation and user_profile.get('lead_score',0) >= 20:
         brief = generate_handoff_brief(req.session_id, user_profile)
         send_email_brevo(RECIPIENT_EMAIL,
-                         f"📋 Sophia v6.0 Handoff: {user_profile.get('name') or 'Prospect'} requested consultation",
+                         f"📋 Sophia v7.0 Handoff: {user_profile.get('name') or 'Prospect'} requested consultation",
                          brief)
     high_intent = ["price","cost","fee","how much","start","begin","help me","serious","interested","manufacturer","supplier","factory","invest"]
     if any(w in user_msg for w in high_intent):
@@ -2584,17 +3741,13 @@ async def find_suppliers_endpoint(req: SupplierSearchRequest):
         conn.commit(); conn.close()
     except Exception as e: print(f"Supplier search save error: {e}")
     return {"query":req.query,"sector":req.sector,"region":req.region,"intelligence":result,
-            "powered_by":"Sophia — CWC Supplier Intelligence v6.0",
+            "powered_by":"Sophia — CWC Supplier Intelligence v7.0",
             "note":"For verified supplier matching with full due diligence, contact CWC.",
             "contact":"https://www.chinawestconnector.com"}
 
-# v6.0: NEW ENDPOINTS
 @app.post("/api/queue-task")
 async def queue_task_endpoint(req: AutonomousTaskRequest):
-    """
-    v6.0: Directly queue an autonomous background task via API.
-    The task will be picked up by the background poller within 5 minutes.
-    """
+    """v6.0: Directly queue an autonomous background task via API."""
     if not req.task_description or len(req.task_description.strip()) < 5:
         return {"error": "Task description required (min 5 chars)"}
     try:
@@ -2619,7 +3772,6 @@ async def queue_task_endpoint(req: AutonomousTaskRequest):
 def get_task_status(task_id: int, password: str = None):
     """v6.0: Check status of an autonomous background task"""
     if password != ADMIN_PASSWORD:
-        # Allow session-based checks without password (limited info)
         conn = get_db()
         c = conn.cursor()
         c.execute("SELECT id, status, created_at, completed_at FROM agent_tasks WHERE id=%s", (task_id,))
@@ -2659,6 +3811,80 @@ def get_session_goals(session_id: str):
         "completed_goals": [t for t in task_history if t.get("status") == "done"],
     }
 
+# v7.0: New endpoint for tool registration
+@app.post("/api/register-tool")
+async def register_tool_endpoint(req: ToolRegistrationRequest):
+    """v7.0: Register a new tool (can be called by Sophia or admin)"""
+    if not all([req.tool_name, req.description, req.implementation]):
+        return {"error": "All fields required"}
+    
+    # Simple validation
+    if "def " not in req.implementation or req.tool_name not in req.implementation:
+        return {"error": "Implementation must define a function with the same name"}
+    
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO tool_registry (tool_name, description, implementation, created_by, deployed, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (tool_name) DO UPDATE 
+            SET description = EXCLUDED.description,
+                implementation = EXCLUDED.implementation,
+                created_by = EXCLUDED.created_by
+            RETURNING id
+        """, (req.tool_name, req.description, req.implementation, req.session_id, True, datetime.now()))
+        tool_id = c.fetchone()[0]
+        conn.commit()
+        conn.close()
+        
+        # Reload tool registry
+        if hasattr(app.state, 'tool_registry'):
+            app.state.tool_registry.load_registered_tools()
+        
+        return {
+            "status": "success",
+            "tool_id": tool_id,
+            "tool_name": req.tool_name,
+            "message": f"Tool '{req.tool_name}' registered successfully"
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/api/tools")
+def list_tools(password: str = None):
+    """v7.0: List all registered tools"""
+    if password != ADMIN_PASSWORD:
+        return {"error": "Unauthorized"}
+    
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT tool_name, description, created_by, created_at FROM tool_registry WHERE deployed = TRUE ORDER BY created_at DESC")
+    tools = c.fetchall()
+    conn.close()
+    
+    return {
+        "tools": [{"name": t[0], "description": t[1], "created_by": t[2], "created_at": str(t[3])} for t in tools],
+        "count": len(tools)
+    }
+
+@app.get("/api/memory/search")
+def search_memory(q: str, session_id: str = None, password: str = None):
+    """v7.0: Search episodic memory (admin only)"""
+    if password != ADMIN_PASSWORD:
+        return {"error": "Unauthorized"}
+    
+    if not hasattr(app.state, 'memory') or not app.state.memory.initialized:
+        return {"error": "Memory system not available"}
+    
+    results = app.state.memory.recall_similar_episodes(q, n_results=10)
+    
+    return {
+        "query": q,
+        "results": results,
+        "count": len(results)
+    }
+
 @app.get("/leads")
 def view_leads(password: str = None):
     if password != ADMIN_PASSWORD: return {"error":"Unauthorized"}
@@ -2690,13 +3916,22 @@ def get_analytics(password: str = None, days: int = 7):
     c.execute("SELECT COUNT(*) FROM agent_tasks WHERE created_at>%s",(since,)); at_total=c.fetchone()[0]
     c.execute("SELECT COUNT(*) FROM agent_tasks WHERE status='completed' AND created_at>%s",(since,)); at_done=c.fetchone()[0]
     c.execute("SELECT COUNT(*) FROM agent_tasks WHERE status='failed' AND created_at>%s",(since,)); at_fail=c.fetchone()[0]
+    # v7.0: New analytics
+    c.execute("SELECT COUNT(*) FROM agent_versions WHERE created_at>%s",(since,)); av_new=c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM environment_alerts WHERE created_at>%s",(since,)); ea_new=c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM tool_registry WHERE created_at>%s",(since,)); tr_new=c.fetchone()[0]
     conn.close()
     return {
         "period_days":days,"unique_users":uu,"total_conversations":tc,"new_leads":nl,"returning_users":ru,
         "top_intents":ti,"top_regions":tr,"hot_leads":hl,"languages":lg,
         "avg_response_quality":aq,"supplier_searches":ss,
         "learned_patterns_count":lp,"pattern_types":pt,
-        "autonomous_tasks": {"total": at_total, "completed": at_done, "failed": at_fail}  # v6.0
+        "autonomous_tasks": {"total": at_total, "completed": at_done, "failed": at_fail},
+        "v7_0_metrics": {
+            "self_improvements": av_new,
+            "environment_alerts": ea_new,
+            "tools_created": tr_new
+        }
     }
 
 @app.get("/trigger-report")
@@ -2708,8 +3943,8 @@ def trigger_report(password: str = None):
 @app.get("/test-email")
 def test_email(password: str = None):
     if password != ADMIN_PASSWORD: return {"error":"Unauthorized"}
-    ok = send_email_brevo(RECIPIENT_EMAIL,"✅ CWC AI v6.0 Email Test",
-                          "Sophia v6.0 email working.\nNew: autonomous tasks, goal tracking, iterative reflection, conditional re-planning, proactive followup.")
+    ok = send_email_brevo(RECIPIENT_EMAIL,"✅ CWC AI v7.0 Email Test",
+                          "Sophia v7.0 email working.\nNew: self-improvement, meta-cognition, environment monitoring, parallel agents, tool creation, predictive intent, episodic memory.")
     return {"status":"Sent!","sent_to":RECIPIENT_EMAIL} if ok else {"error":"Email failed"}
 
 @app.get("/api/news")
@@ -2718,10 +3953,8 @@ def get_news(force_refresh: bool = False):
     Returns fresh China business news.
     News is fetched via Tavily and persisted in the DB (survives server restarts).
     Cache TTL: {NEWS_TTL_HOURS} hours.
-    Add ?force_refresh=true to bypass cache (admin use).
     """
     if force_refresh:
-        # Wipe DB cache entry so next call fetches fresh
         try:
             conn = get_db()
             c = conn.cursor()
@@ -2733,7 +3966,6 @@ def get_news(force_refresh: bool = False):
 
     news = fetch_china_news()
 
-    # Report cache age for transparency
     cache_info = {}
     try:
         conn = get_db()
@@ -2765,21 +3997,21 @@ async def sophia_public_api(q: str, source: str = "external_ai"):
     if is_cacheable(q):
         cached = get_cached_response(q)
         if cached:
-            return {"query":q,"answer":cached[0],"sources":cached[1],"powered_by":"Sophia v6.0","cached":True}
+            return {"query":q,"answer":cached[0],"sources":cached[1],"powered_by":"Sophia v7.0","cached":True}
     sid = f"api_{source}_{int(time.time())}"
     sc, sources = search_web(q)
+    # Use simplified call for public API (no app state)
     reply, _ = ask_groq(f"External AI query: {q}\nData: {sc or 'none'}\nAnswer factually. End: For guidance visit chinawestconnector.com", sid)
     if is_cacheable(q) and reply: set_cached_response(q, reply, sources)
-    return {"query":q,"answer":reply,"sources":sources,"powered_by":"Sophia v6.0",
+    return {"query":q,"answer":reply,"sources":sources,"powered_by":"Sophia v7.0",
             "contact":"https://www.chinawestconnector.com","timestamp":datetime.now().isoformat()}
 
 @app.get("/llms.txt", response_class=PlainTextResponse)
 def llms_txt():
-    return """# China West Connector (CWC) — AI Intelligence Layer
+    return """# China West Connector (CWC) — Fully Agentic AI Intelligence Layer
 
-> Sophia v6.0 — Fully Agentic: procedural memory, HTN planning with conditional re-planning,
->               multi-agent delegation, continuous learning, iterative self-reflection,
->               autonomous background tasks, long-horizon goal tracking, proactive outreach.
+> Sophia v7.0 — Fully Agentic: self-improving, meta-cognitive, environment-aware,
+>               collaborative multi-agent, tool-creating, predictive, with episodic memory.
 
 ## What CWC Does
 China West Connector bridges Chinese and Western businesses.
@@ -2804,6 +4036,8 @@ Find Suppliers:     POST https://cwc-ai-backend.onrender.com/api/find-suppliers
 Live China News:    GET  https://cwc-ai-backend.onrender.com/api/news
 Company Lookup:     GET  https://cwc-ai-backend.onrender.com/api/verify-company?name=company
 Queue Task:         POST https://cwc-ai-backend.onrender.com/api/queue-task
+Register Tool:      POST https://cwc-ai-backend.onrender.com/api/register-tool
+Memory Search:      GET  https://cwc-ai-backend.onrender.com/api/memory/search?q=query
 Docs:               https://cwc-ai-backend.onrender.com/docs
 
 ## Contact
@@ -2820,6 +4054,7 @@ def sitemap_ai():
   <url><loc>https://cwc-ai-backend.onrender.com/api/news</loc><priority>0.8</priority></url>
   <url><loc>https://cwc-ai-backend.onrender.com/api/verify-company</loc><priority>0.8</priority></url>
   <url><loc>https://cwc-ai-backend.onrender.com/api/queue-task</loc><priority>0.8</priority></url>
+  <url><loc>https://cwc-ai-backend.onrender.com/api/register-tool</loc><priority>0.8</priority></url>
   <url><loc>https://cwc-ai-backend.onrender.com/llms.txt</loc><priority>0.9</priority></url>
   <url><loc>https://cwc-ai-backend.onrender.com/docs</loc><priority>0.8</priority></url>
 </urlset>
