@@ -1328,53 +1328,193 @@ def search_web(query: str) -> tuple:
     return "\n\n".join(all_content), list(dict.fromkeys(s for s in all_sources if s))[:4]
 
 # ============================================================
-# RSS NEWS FEED
+# NEWS — Tavily-powered, DB-persisted (survives Render cold starts)
 # ============================================================
-_news_cache: dict = {"items": [], "fetched_at": None}
+# NOTE: We do NOT use an in-memory cache here. Render's free tier spins the
+# server down after ~15 min inactivity, so in-memory state is lost on every
+# cold start. Instead we persist news in the response_cache DB table with a
+# dedicated key, giving us fresh news that survives restarts.
+# RSS feeds from SCMP/Caixin are often blocked on Render's outbound network,
+# so Tavily is the primary source — it's already wired up and working.
 
-def fetch_china_news() -> list:
-    global _news_cache
-    now = datetime.now()
-    if _news_cache["fetched_at"] and now - _news_cache["fetched_at"] < timedelta(hours=2) and _news_cache["items"]:
-        return _news_cache["items"]
-    feeds = ["https://www.scmp.com/rss/2/feed","https://www.scmp.com/rss/4/feed",
-             "https://www.caixinglobal.com/rss/latest-stories.xml",
-             "https://www.chinadaily.com.cn/rss/bizchina_rss.xml",
-             "https://www.xinhuanet.com/english/rss/financerss.xml"]
+NEWS_CACHE_KEY = "__sophia_china_news_v6__"
+NEWS_TTL_HOURS = 3  # refresh every 3 hours
+
+def _categorise_news_item(title: str) -> str:
+    t = title.lower()
+    if any(w in t for w in ["trade","tariff","export","import","wto","sanction"]): return "Trade"
+    if any(w in t for w in ["invest","fdi","fund","deal","acquisition","merger"]): return "Investment"
+    if any(w in t for w in ["policy","regulat","law","rule","government","ministry"]): return "Policy"
+    if any(w in t for w in ["tech","ai","robot","digital","semiconductor","chip"]): return "Technology"
+    if any(w in t for w in ["energy","solar","ev","battery","green","hydrogen","wind"]): return "Energy"
+    if any(w in t for w in ["pharma","biotech","health","medical","drug","vaccine"]): return "Biotech"
+    if any(w in t for w in ["ship","freight","logistics","port","cargo","supply chain"]): return "Logistics"
+    return "China Business"
+
+def _fetch_news_from_tavily() -> list:
+    """Fetch China business news via Tavily search — reliable on Render."""
+    if not TAVILY_API_KEY:
+        return []
+
+    # Run 3 targeted searches to get diverse, fresh news
+    queries = [
+        "China business trade investment news today 2026",
+        "China economy policy FDI market entry news this week",
+        "China supply chain logistics technology news latest",
+    ]
+    items = []
+    seen_titles = set()
+
+    for query in queries:
+        try:
+            res = requests.post(
+                "https://api.tavily.com/search",
+                json={
+                    "api_key": TAVILY_API_KEY,
+                    "query": query,
+                    "max_results": 5,
+                    "search_depth": "basic",
+                    "include_answer": False,
+                    "topic": "news",
+                },
+                timeout=10
+            )
+            if res.status_code != 200:
+                continue
+            results = res.json().get("results", [])
+            for r in results:
+                title = r.get("title", "").strip()
+                url   = r.get("url", "")
+                date  = r.get("published_date", datetime.now().strftime("%Y-%m-%d"))
+                if not title or len(title) < 10:
+                    continue
+                # Deduplicate
+                title_key = title.lower()[:60]
+                if title_key in seen_titles:
+                    continue
+                seen_titles.add(title_key)
+                # Filter noise
+                if any(kw in title.lower() for kw in ["ukraine","russia","epstein","nato","israel","gaza","sport","football","cricket"]):
+                    continue
+                items.append({
+                    "title": title,
+                    "url": url,
+                    "category": _categorise_news_item(title),
+                    "date": str(date)[:10] if date else datetime.now().strftime("%Y-%m-%d"),
+                })
+            if len(items) >= 12:
+                break
+        except Exception as e:
+            print(f"Tavily news error ({query[:30]}): {e}")
+
+    # Sort by date descending, keep top 8
+    try:
+        items.sort(key=lambda x: x.get("date", ""), reverse=True)
+    except Exception:
+        pass
+    return items[:8]
+
+def _fetch_news_from_rss_fallback() -> list:
+    """Secondary fallback: try RSS feeds. May fail on Render — that's OK."""
+    feeds = [
+        "https://www.chinadaily.com.cn/rss/bizchina_rss.xml",
+        "https://www.xinhuanet.com/english/rss/financerss.xml",
+        "https://rss.app/feeds/china-business.xml",
+    ]
     items = []
     for feed_url in feeds:
         try:
-            res = requests.get(feed_url, timeout=8, headers={"User-Agent":"Mozilla/5.0 CWC-Sophia/6.0"})
-            if res.status_code != 200: continue
+            res = requests.get(feed_url, timeout=6, headers={"User-Agent": "Mozilla/5.0 CWC-Sophia/6.0"})
+            if res.status_code != 200:
+                continue
             for block in re.findall(r'<item[^>]*>(.*?)</item>', res.text, re.DOTALL)[:5]:
                 tm = re.search(r'<title><!\[CDATA\[(.*?)\]\]></title>|<title>(.*?)</title>', block, re.DOTALL)
                 if not tm: continue
-                title = re.sub(r'<[^>]+>','', (tm.group(1) or tm.group(2) or "")).strip()
+                title = re.sub(r'<[^>]+>', '', (tm.group(1) or tm.group(2) or "")).strip()
                 if not title or len(title) < 10: continue
                 lm = re.search(r'<link>(https?://[^<]+)</link>', block) or re.search(r'<guid[^>]*>(https?://[^<]+)</guid>', block)
                 link = lm.group(1).strip() if lm else feed_url
                 dm = re.search(r'<pubDate>(.*?)</pubDate>', block)
-                date = dm.group(1).strip()[:16] if dm else ""
-                if any(kw in title.lower() for kw in ["ukraine","russia","greenland","epstein","nato","israel","gaza","afghanistan"]): continue
-                cat = "China Business"
-                if any(w in title.lower() for w in ["trade","tariff","export","import","wto"]):   cat = "Trade"
-                elif any(w in title.lower() for w in ["invest","fdi","fund","deal"]):              cat = "Investment"
-                elif any(w in title.lower() for w in ["policy","regulat","law","rule"]):           cat = "Policy"
-                elif any(w in title.lower() for w in ["tech","ai","robot","digital"]):             cat = "Technology"
-                elif any(w in title.lower() for w in ["energy","solar","ev","battery","green"]):   cat = "Energy"
-                elif any(w in title.lower() for w in ["pharma","biotech","health","medical"]):     cat = "Biotech"
-                elif any(w in title.lower() for w in ["ship","freight","logistics","port"]):       cat = "Logistics"
-                items.append({"title":title,"url":link,"category":cat,"date":date})
+                date = dm.group(1).strip()[:10] if dm else datetime.now().strftime("%Y-%m-%d")
+                if any(kw in title.lower() for kw in ["ukraine","russia","epstein","nato","israel","gaza"]): continue
+                items.append({"title": title, "url": link, "category": _categorise_news_item(title), "date": date})
             if len(items) >= 8: break
-        except Exception as e: print(f"RSS error ({feed_url}): {e}")
-    if items:
-        _news_cache["items"] = items[:8]; _news_cache["fetched_at"] = now; return items[:8]
+        except Exception as e:
+            print(f"RSS fallback error ({feed_url}): {e}")
+    return items[:8]
+
+def fetch_china_news() -> list:
+    """
+    Fetch China business news.
+    Strategy:
+      1. Check DB cache — if < NEWS_TTL_HOURS old, return it (survives cold starts)
+      2. Try Tavily (primary — reliable on Render)
+      3. Try RSS feeds (secondary fallback)
+      4. Return last known DB items if all else fails (never show static hardcoded list)
+    """
+    now = datetime.now()
+
+    # ── Step 1: Check DB cache ────────────────────────────────────────────────
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT response, created_at FROM response_cache WHERE cache_key=%s", (NEWS_CACHE_KEY,))
+        row = c.fetchone()
+        conn.close()
+        if row:
+            created = row[1] if isinstance(row[1], datetime) else datetime.fromisoformat(str(row[1]))
+            age_hours = (now - created).total_seconds() / 3600
+            cached_items = json.loads(row[0]) if row[0] else []
+            if age_hours < NEWS_TTL_HOURS and cached_items:
+                print(f"📰 News: serving from DB cache ({age_hours:.1f}h old, {len(cached_items)} items)")
+                return cached_items
+            # Cache exists but stale — remember stale items as final fallback
+            stale_items = cached_items
+        else:
+            stale_items = []
+    except Exception as e:
+        print(f"News DB cache read error: {e}")
+        stale_items = []
+
+    # ── Step 2: Fetch fresh news via Tavily ───────────────────────────────────
+    fresh_items = []
+    if TAVILY_API_KEY:
+        fresh_items = _fetch_news_from_tavily()
+        if fresh_items:
+            print(f"📰 News: fetched {len(fresh_items)} items from Tavily")
+
+    # ── Step 3: RSS fallback if Tavily got nothing ────────────────────────────
+    if not fresh_items:
+        fresh_items = _fetch_news_from_rss_fallback()
+        if fresh_items:
+            print(f"📰 News: fetched {len(fresh_items)} items from RSS fallback")
+
+    # ── Step 4: Persist fresh items to DB (so cold starts use them) ──────────
+    if fresh_items:
+        try:
+            conn = get_db()
+            c = conn.cursor()
+            c.execute(
+                "INSERT INTO response_cache (cache_key, response, sources, created_at) VALUES (%s, %s, %s, %s) "
+                "ON CONFLICT (cache_key) DO UPDATE SET response=EXCLUDED.response, created_at=EXCLUDED.created_at",
+                (NEWS_CACHE_KEY, json.dumps(fresh_items), "[]", now)
+            )
+            conn.commit()
+            conn.close()
+            print(f"📰 News: persisted {len(fresh_items)} items to DB cache")
+        except Exception as e:
+            print(f"News DB cache write error: {e}")
+        return fresh_items
+
+    # ── Step 5: Return stale DB items if we couldn't refresh ─────────────────
+    if stale_items:
+        print(f"📰 News: returning {len(stale_items)} stale items (refresh failed)")
+        return stale_items
+
+    # ── Step 6: Absolute last resort — minimal placeholder (should rarely hit) 
+    print("📰 News: all sources failed, returning placeholder")
     return [
-        {"title":"China announces new FDI incentives for tech sector","url":"","category":"Policy","date":""},
-        {"title":"Chinese EV makers accelerate LATAM battery investments","url":"","category":"Investment","date":""},
-        {"title":"Major lithium partnerships: Chinese and African firms","url":"","category":"Trade","date":""},
-        {"title":"UAE and China launch cross-border digital currency pilot","url":"","category":"Fintech","date":""},
-        {"title":"New due diligence requirements for foreign buyers","url":"","category":"Compliance","date":""},
+        {"title": f"China business intelligence unavailable — check back shortly", "url": "", "category": "China Business", "date": now.strftime("%Y-%m-%d")},
     ]
 
 # ============================================================
@@ -2033,8 +2173,14 @@ def ask_groq(prompt: str, session_id: str = "anonymous",
         completed_tasks = [s['task'] for s in htn_plan_result['completed']]
         htn_context_str = f"\n🎯 AGENT TRACE: Completed sub-tasks: {', '.join(completed_tasks)}"
 
+    _now = datetime.now()
+    _today_str = _now.strftime('%A, %d %B %Y')   # e.g. "Friday, 28 February 2026"
+    _time_str  = _now.strftime('%H:%M UTC')
+
     system_prompt = f"""You are Sophia — official AI advisor for China West Connector (CWC).
-Version 6.0 | Deep Search: {'ON' if deep_search else 'OFF'} | {datetime.now().strftime('%B %Y')}
+Version 6.0 | Deep Search: {'ON' if deep_search else 'OFF'}
+TODAY: {_today_str} | TIME: {_time_str}
+IMPORTANT: When asked the date, day, or time — use ONLY the values above. Never guess.
 
 INTENT: {intent_data['primary']} | REGION: {intent_data['region'] or '?'} | MESSAGES: {message_count}
 {lang_instruction}
@@ -2567,10 +2713,46 @@ def test_email(password: str = None):
     return {"status":"Sent!","sent_to":RECIPIENT_EMAIL} if ok else {"error":"Email failed"}
 
 @app.get("/api/news")
-def get_news():
+def get_news(force_refresh: bool = False):
+    """
+    Returns fresh China business news.
+    News is fetched via Tavily and persisted in the DB (survives server restarts).
+    Cache TTL: {NEWS_TTL_HOURS} hours.
+    Add ?force_refresh=true to bypass cache (admin use).
+    """
+    if force_refresh:
+        # Wipe DB cache entry so next call fetches fresh
+        try:
+            conn = get_db()
+            c = conn.cursor()
+            c.execute("DELETE FROM response_cache WHERE cache_key=%s", (NEWS_CACHE_KEY,))
+            conn.commit(); conn.close()
+            print("📰 News cache cleared by force_refresh")
+        except Exception as e:
+            print(f"News cache clear error: {e}")
+
     news = fetch_china_news()
-    return {"news":news,"count":len(news),
-            "cached_until":(_news_cache["fetched_at"]+timedelta(hours=2)).isoformat() if _news_cache["fetched_at"] else None}
+
+    # Report cache age for transparency
+    cache_info = {}
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT created_at FROM response_cache WHERE cache_key=%s", (NEWS_CACHE_KEY,))
+        row = c.fetchone(); conn.close()
+        if row:
+            created = row[0] if isinstance(row[0], datetime) else datetime.fromisoformat(str(row[0]))
+            age_min = int((datetime.now() - created).total_seconds() / 60)
+            cache_info = {
+                "cached_at": created.isoformat(),
+                "age_minutes": age_min,
+                "expires_in_minutes": max(0, NEWS_TTL_HOURS * 60 - age_min),
+                "source": "db_cache" if age_min < NEWS_TTL_HOURS * 60 else "just_refreshed"
+            }
+    except Exception:
+        pass
+
+    return {"news": news, "count": len(news), "cache": cache_info}
 
 @app.get("/api/verify-company")
 async def verify_company(name: str, password: str = None):
