@@ -2900,7 +2900,9 @@ def health_check():
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest, background_tasks: BackgroundTasks, req: Request):
-    client_ip = req.client.host
+    # Use real visitor IP even behind Render/Cloudflare reverse proxy
+    forwarded_for = req.headers.get("X-Forwarded-For")
+    client_ip = forwarded_for.split(",")[0].strip() if forwarded_for else req.client.host
     if is_rate_limited(client_ip):
         return ChatResponse(response="Rate limit exceeded. Please try again later.", sources=[])
     user_profile = get_or_create_user_profile(request.session_id)
@@ -2964,6 +2966,29 @@ async def admin_conversations(password: str = "", limit: int = 50):
 @app.get("/")
 def root():
     return {"message": "Sophia AI v7.1 - Fully Agentic China-West Business Advisor", "docs": "/docs"}
+
+# ------------------------------------------------------------------
+# Compatibility stub: old widget versions POST to /new-session on load.
+# This endpoint doesn't need to do anything — just return 200 so the
+# browser doesn't log a CORS/404 error on every page view.
+# ------------------------------------------------------------------
+@app.post("/new-session")
+async def new_session(req: Request):
+    return {"status": "ok"}
+
+# Explicit OPTIONS handler ensures preflight succeeds even if a CDN
+# or WordPress security plugin intercepts the automatic CORS response.
+@app.options("/chat")
+async def options_chat():
+    from fastapi.responses import Response as FastResponse
+    return FastResponse(
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Accept",
+        }
+    )
 
 if __name__ == "__main__":
     import uvicorn
