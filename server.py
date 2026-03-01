@@ -237,8 +237,60 @@ def init_db():
         conn.commit()
         conn.close()
         print("✅ Database tables initialized")
+        
+        # Run schema migrations
+        run_migrations()
     except Exception as e:
         print(f"⚠️ Database initialization error: {e}")
+
+def run_migrations():
+    """Add missing columns to existing tables (backward compatibility)"""
+    migrations = [
+        # Add confidence_score to conversations
+        ("conversations", "confidence_score", "FLOAT"),
+        # Add parameters to tool_registry
+        ("tool_registry", "parameters", "JSONB"),
+        # Add goals_extracted to conversations
+        ("conversations", "goals_extracted", "JSONB"),
+        # Add tools_used to conversations
+        ("conversations", "tools_used", "JSONB"),
+    ]
+    
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        
+        for table, column, dtype in migrations:
+            try:
+                c.execute(f"""
+                    SELECT column_name FROM information_schema.columns 
+                    WHERE table_name = %s AND column_name = %s
+                """, (table, column))
+                if not c.fetchone():
+                    c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {dtype}")
+                    print(f"✅ Migration: Added {column} to {table}")
+            except Exception as e:
+                if "already exists" not in str(e):
+                    print(f"⚠️ Migration warning ({table}.{column}): {e}")
+        
+        # Fix environment_alerts.change_detected if it's JSONB type
+        try:
+            c.execute("""
+                SELECT data_type FROM information_schema.columns 
+                WHERE table_name = 'environment_alerts' AND column_name = 'change_detected'
+            """)
+            result = c.fetchone()
+            if result and result[0] == 'jsonb':
+                # Alter column type from JSONB to TEXT
+                c.execute("ALTER TABLE environment_alerts ALTER COLUMN change_detected TYPE TEXT USING change_detected::TEXT")
+                print("✅ Migration: Changed change_detected from JSONB to TEXT")
+        except Exception as e:
+            print(f"⚠️ Migration warning (environment_alerts.change_detected): {e}")
+        
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"⚠️ Migration error: {e}")
 
 def get_or_create_user_profile(session_id: str) -> dict:
     """Get or create user profile"""
@@ -629,13 +681,27 @@ class ToolRegistry:
         try:
             conn = get_db()
             c = conn.cursor()
-            c.execute("SELECT tool_name, description, parameters, implementation FROM tool_registry WHERE deployed = TRUE")
-            for name, desc, params, impl in c.fetchall():
-                self.tools[name] = {
-                    'description': desc,
-                    'parameters': params or {},
-                    'implementation': impl
-                }
+            # Try with parameters column first, fall back to basic query
+            try:
+                c.execute("SELECT tool_name, description, parameters, implementation FROM tool_registry WHERE deployed = TRUE")
+                for name, desc, params, impl in c.fetchall():
+                    self.tools[name] = {
+                        'description': desc,
+                        'parameters': params or {},
+                        'implementation': impl
+                    }
+            except Exception as e:
+                if "does not exist" in str(e):
+                    # Fall back to query without parameters column
+                    c.execute("SELECT tool_name, description, implementation FROM tool_registry WHERE deployed = TRUE")
+                    for name, desc, impl in c.fetchall():
+                        self.tools[name] = {
+                            'description': desc,
+                            'parameters': {},
+                            'implementation': impl
+                        }
+                else:
+                    raise
             conn.close()
             print(f"🔧 Loaded {len(self.tools)} tools")
         except Exception as e:
@@ -1260,25 +1326,52 @@ class SelfImprovementEngine:
             conn = get_db()
             c = conn.cursor()
             
-            # Get recent failures
-            c.execute("""
-                SELECT user_message, ai_response, intent, confidence_score
-                FROM conversations 
-                WHERE (reflection_score < 5 OR confidence_score < 0.5)
-                AND timestamp > NOW() - INTERVAL '7 days'
-                LIMIT 50
-            """)
-            failures = c.fetchall()
+            # Get recent failures - use COALESCE for backward compatibility
+            try:
+                c.execute("""
+                    SELECT user_message, ai_response, intent, COALESCE(confidence_score, 0.5)
+                    FROM conversations 
+                    WHERE (reflection_score < 5 OR COALESCE(confidence_score, 0.5) < 0.5)
+                    AND timestamp > NOW() - INTERVAL '7 days'
+                    LIMIT 50
+                """)
+                failures = c.fetchall()
+            except Exception as e:
+                if "does not exist" in str(e):
+                    # Fall back to query without confidence_score
+                    c.execute("""
+                        SELECT user_message, ai_response, intent, 0.5
+                        FROM conversations 
+                        WHERE reflection_score < 5
+                        AND timestamp > NOW() - INTERVAL '7 days'
+                        LIMIT 50
+                    """)
+                    failures = c.fetchall()
+                else:
+                    raise
             
             # Get recent successes
-            c.execute("""
-                SELECT user_message, ai_response, intent, confidence_score
-                FROM conversations 
-                WHERE reflection_score >= 7 AND confidence_score >= 0.7
-                AND timestamp > NOW() - INTERVAL '7 days'
-                LIMIT 50
-            """)
-            successes = c.fetchall()
+            try:
+                c.execute("""
+                    SELECT user_message, ai_response, intent, COALESCE(confidence_score, 0.8)
+                    FROM conversations 
+                    WHERE reflection_score >= 7 AND COALESCE(confidence_score, 0.7) >= 0.7
+                    AND timestamp > NOW() - INTERVAL '7 days'
+                    LIMIT 50
+                """)
+                successes = c.fetchall()
+            except Exception as e:
+                if "does not exist" in str(e):
+                    c.execute("""
+                        SELECT user_message, ai_response, intent, 0.8
+                        FROM conversations 
+                        WHERE reflection_score >= 7
+                        AND timestamp > NOW() - INTERVAL '7 days'
+                        LIMIT 50
+                    """)
+                    successes = c.fetchall()
+                else:
+                    raise
             conn.close()
             
             if len(failures) < 3:
@@ -1926,10 +2019,19 @@ async def admin_conversations(password: str = "", limit: int = 50):
     try:
         conn = get_db()
         c = conn.cursor()
-        c.execute("""
-            SELECT session_id, user_message, ai_response, intent, confidence_score, timestamp 
-            FROM conversations ORDER BY timestamp DESC LIMIT %s
-        """, (limit,))
+        try:
+            c.execute("""
+                SELECT session_id, user_message, ai_response, intent, COALESCE(confidence_score, 0.5), timestamp 
+                FROM conversations ORDER BY timestamp DESC LIMIT %s
+            """, (limit,))
+        except Exception as e:
+            if "does not exist" in str(e):
+                c.execute("""
+                    SELECT session_id, user_message, ai_response, intent, 0.5, timestamp 
+                    FROM conversations ORDER BY timestamp DESC LIMIT %s
+                """, (limit,))
+            else:
+                raise
         rows = c.fetchall()
         conn.close()
         
