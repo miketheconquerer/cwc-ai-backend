@@ -36,7 +36,8 @@ load_dotenv()
 # CONFIGURATION
 # ============================================================
 BREVO_API_KEY   = os.getenv("BREVO_API_KEY", "")
-GROQ_API_KEY    = os.getenv("GROQ_API_KEY")
+GROQ_API_KEY    = os.getenv("GROQ_API_KEY")  # kept for backward compat
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 TAVILY_API_KEY  = os.getenv("TAVILY_API_KEY")
 ADMIN_PASSWORD  = os.getenv("ADMIN_PASSWORD", "")
 SENDER_EMAIL    = os.getenv("SENDER_EMAIL", "888nv666@gmail.com")
@@ -273,7 +274,7 @@ class SelfImprovementEngine:
         return candidates
     
     async def _test_and_deploy(self, prompt_data: Dict, test_cases: List[tuple]):
-        if not GROQ_API_KEY:
+        if not DEEPSEEK_API_KEY:
             return
         try:
             base_prompt = self._get_base_system_prompt()
@@ -297,10 +298,10 @@ class SelfImprovementEngine:
     async def _test_prompt(self, prompt: str, user_msg: str) -> Optional[str]:
         try:
             res = requests.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                "https://api.deepseek.com/chat/completions",
+                headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"},
                 json={
-                    "model": "llama-3.3-70b-versatile",
+                    "model": "deepseek-chat",
                     "messages": [
                         {"role": "system", "content": prompt},
                         {"role": "user", "content": user_msg}
@@ -317,10 +318,10 @@ class SelfImprovementEngine:
     async def _score_response(self, response: str, user_msg: str) -> int:
         try:
             res = requests.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                "https://api.deepseek.com/chat/completions",
+                headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"},
                 json={
-                    "model": "llama-3.3-70b-versatile",
+                    "model": "deepseek-chat",
                     "messages": [
                         {"role": "system", "content": "Score this response 1-10. Return ONLY the number."},
                         {"role": "user", "content": f"User: {user_msg}\nResponse: {response}"}
@@ -720,13 +721,13 @@ Instructions:
 4. Provide a clear, actionable answer
 5. Keep under 300 words
 """
-        if GROQ_API_KEY:
+        if DEEPSEEK_API_KEY:
             try:
                 res = requests.post(
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                    "https://api.deepseek.com/chat/completions",
+                    headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"},
                     json={
-                        "model": "llama-3.3-70b-versatile",
+                        "model": "deepseek-chat",
                         "messages": [
                             {"role": "system", "content": "You are a synthesis expert. Combine multiple expert opinions into one clear, actionable response."},
                             {"role": "user", "content": synthesis_input}
@@ -751,14 +752,14 @@ Contributing Agents: {agent_list}
         return "\n\n".join(parts)
     
     async def _research_agent(self, task: str, context: dict, user_msg: str) -> str:
-        if not GROQ_API_KEY:
+        if not DEEPSEEK_API_KEY:
             return "Research unavailable"
         try:
             res = requests.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                "https://api.deepseek.com/chat/completions",
+                headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"},
                 json={
-                    "model": "llama-3.3-70b-versatile",
+                    "model": "deepseek-chat",
                     "messages": [
                         {"role": "system", "content": "You are a research specialist. Gather facts, data, and market intelligence. Be thorough and cite sources. Always include specific numbers and data points when available."},
                         {"role": "user", "content": f"Research task: {task}\nUser query: {user_msg}\nContext: {json.dumps(context)}"}
@@ -773,14 +774,14 @@ Contributing Agents: {agent_list}
             return f"Research error: {e}"
     
     async def _verifier_agent(self, task: str, context: dict, user_msg: str) -> str:
-        if not GROQ_API_KEY:
+        if not DEEPSEEK_API_KEY:
             return "Verification unavailable"
         try:
             res = requests.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                "https://api.deepseek.com/chat/completions",
+                headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"},
                 json={
-                    "model": "llama-3.3-70b-versatile",
+                    "model": "deepseek-chat",
                     "messages": [
                         {"role": "system", "content": "You are a due diligence specialist. Verify claims, flag risks, and identify red flags. Be skeptical. Always quantify risk levels (low/medium/high) and explain why."},
                         {"role": "user", "content": f"Verification task: {task}\nUser query: {user_msg}\nContext: {json.dumps(context)}"}
@@ -795,14 +796,14 @@ Contributing Agents: {agent_list}
             return f"Verification error: {e}"
     
     async def _strategist_agent(self, task: str, context: dict, user_msg: str) -> str:
-        if not GROQ_API_KEY:
+        if not DEEPSEEK_API_KEY:
             return "Strategy unavailable"
         try:
             res = requests.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                "https://api.deepseek.com/chat/completions",
+                headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"},
                 json={
-                    "model": "llama-3.3-70b-versatile",
+                    "model": "deepseek-chat",
                     "messages": [
                         {"role": "system", "content": "You are a business strategist. Recommend specific actions, timelines, and next steps. Be practical. Always include concrete next steps with timeframes."},
                         {"role": "user", "content": f"Strategy task: {task}\nUser query: {user_msg}\nContext: {json.dumps(context)}"}
@@ -817,14 +818,14 @@ Contributing Agents: {agent_list}
             return f"Strategy error: {e}"
     
     async def _legal_agent(self, task: str, context: dict, user_msg: str) -> str:
-        if not GROQ_API_KEY:
+        if not DEEPSEEK_API_KEY:
             return "Legal analysis unavailable"
         try:
             res = requests.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                "https://api.deepseek.com/chat/completions",
+                headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"},
                 json={
-                    "model": "llama-3.3-70b-versatile",
+                    "model": "deepseek-chat",
                     "messages": [
                         {"role": "system", "content": "You are a China business lawyer. Address compliance, contracts, IP, and legal structures. Be precise. Always flag common Western mistakes in China contracts."},
                         {"role": "user", "content": f"Legal task: {task}\nUser query: {user_msg}\nContext: {json.dumps(context)}"}
@@ -1393,7 +1394,7 @@ def agent_delegate(current_agent: str, task: str, context: str, depth: int = 0) 
     return f"[⚠️ No specialist available for '{task}' in {current_agent}'s network. Escalating to human.]"
 
 def run_specialist_agent(agent_type: str, context: str) -> str:
-    if not GROQ_API_KEY:
+    if not DEEPSEEK_API_KEY:
         return "[Agent offline]"
     personas = {
         "due_diligence": (
@@ -1445,10 +1446,10 @@ def run_specialist_agent(agent_type: str, context: str) -> str:
                     return agent_delegate(agent_type, "shipping_optimization", context, depth=0)
     try:
         res = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+            "https://api.deepseek.com/chat/completions",
+            headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"},
             json={
-                "model": "llama-3.3-70b-versatile",
+                "model": "deepseek-chat",
                 "messages": [
                     {"role": "system", "content": persona},
                     {"role": "user", "content": f"Specialist analysis needed:\n{context}"}
@@ -1627,7 +1628,7 @@ def infer_and_save_goal(session_id: str, intent: str, message: str, user_profile
 # v7.1: ENHANCED AUTONOMOUS TASK EXECUTION (Self-Triggered Tasks)
 # ============================================================
 async def run_autonomous_task(task_id: int, session_id: str, task_description: str):
-    if not GROQ_API_KEY:
+    if not DEEPSEEK_API_KEY:
         return
     print(f"🤖 Autonomous task #{task_id}: {task_description[:60]}")
     try:
@@ -1711,13 +1712,13 @@ async def run_autonomous_task(task_id: int, session_id: str, task_description: s
                 content, sources = search_web(f"{competitor} China business strategy market position")
                 result = f"🤖 COMPETITIVE INTELLIGENCE\nCompetitor: {competitor}\n\nMARKET POSITION:\n{content[:500] if content else 'Limited public information available'}\n\nSources: {', '.join(sources[:3])}\nCompleted: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
         else:
-            if GROQ_API_KEY:
+            if DEEPSEEK_API_KEY:
                 try:
                     res = requests.post(
-                        "https://api.groq.com/openai/v1/chat/completions",
-                        headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                        "https://api.deepseek.com/chat/completions",
+                        headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"},
                         json={
-                            "model": "llama-3.3-70b-versatile",
+                            "model": "deepseek-chat",
                             "messages": [
                                 {"role": "system", "content": "You are Sophia, CWC's AI agent. Complete this autonomous research task and return a clear, factual report. Be concise and actionable."},
                                 {"role": "user", "content": f"Task: {task_description}\nContext: {json.dumps(context)}\nComplete this task and provide a structured report."}
@@ -1807,7 +1808,7 @@ async def proactive_followup_tasks():
 def ask_groq(prompt: str, session_id: str = "anonymous",
              user_profile: dict = None, quick_action: str = None,
              deep_search: bool = False, app_state: dict = None) -> tuple:
-    if not GROQ_API_KEY:
+    if not DEEPSEEK_API_KEY:
         return "System temporarily unavailable. Please contact the CWC team directly.", []
     detected_lang = detect_language(prompt)
     if detected_lang != "en" and user_profile:
@@ -2004,8 +2005,8 @@ STYLE: Max 200 words | Sharp, specific, commercial | No buzzwords | Specific num
 Escalate → "click the 'Speak with Michail' button above"
 FIRST MESSAGE (no history, no quick action): Introduce as Sophia, ask direction.
 """
-    url     = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {"Authorization":f"Bearer {GROQ_API_KEY}","Content-Type":"application/json"}
+    url     = "https://api.deepseek.com/chat/completions"
+    headers = {"Authorization":f"Bearer {DEEPSEEK_API_KEY}","Content-Type":"application/json"}
     all_sources      = []
     reflection_score = 5
     agent_trace      = []
@@ -2377,14 +2378,14 @@ CWC can provide verified supplier matching with factory audits.
     return content, []
 
 def decompose_task(user_message: str, user_profile: dict) -> dict:
-    if not GROQ_API_KEY:
+    if not DEEPSEEK_API_KEY:
         return None
     try:
         res = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+            "https://api.deepseek.com/chat/completions",
+            headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"},
             json={
-                "model": "llama-3.3-70b-versatile",
+                "model": "deepseek-chat",
                 "messages": [
                     {"role": "system", "content": "You are a task planner. Break down the user's request into 2-4 specific sub-tasks. Return ONLY valid JSON with format: {task_summary: string, sub_tasks: [{action: string, query: string, expected_output: string}], expected_output: string}"},
                     {"role": "user", "content": f"Break down this request into sub-tasks: {user_message}"}
@@ -2403,14 +2404,14 @@ def decompose_task(user_message: str, user_profile: dict) -> dict:
     return None
 
 def reflect_and_improve(response: str, user_message: str, context: dict) -> tuple:
-    if not GROQ_API_KEY:
+    if not DEEPSEEK_API_KEY:
         return 5, response
     try:
         res = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+            "https://api.deepseek.com/chat/completions",
+            headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"},
             json={
-                "model": "llama-3.3-70b-versatile",
+                "model": "deepseek-chat",
                 "messages": [
                     {"role": "system", "content": "You are a quality reviewer. Score this response 1-10 and suggest improvements. Return format: SCORE: X/10\nIMPROVED: [better response]"},
                     {"role": "user", "content": f"User: {user_message}\nResponse: {response}"}
@@ -2606,10 +2607,10 @@ def _update_conversation_summary(session_id: str):
         if len(recent) >= 5 and GROQ_API_KEY:
             conversation_text = "\n".join([f"User: {r['user_message']}\nSophia: {r['ai_response']}" for r in recent])
             res = requests.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                "https://api.deepseek.com/chat/completions",
+                headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"},
                 json={
-                    "model": "llama-3.3-70b-versatile",
+                    "model": "deepseek-chat",
                     "messages": [
                         {"role": "system", "content": "Summarize this conversation in 2-3 sentences. Focus on user's goals, interests, and next steps."},
                         {"role": "user", "content": conversation_text}
@@ -2635,10 +2636,10 @@ def _extract_and_save_key_facts(session_id: str, profile: dict):
         if messages and GROQ_API_KEY:
             combined = "\n".join(messages)
             res = requests.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                "https://api.deepseek.com/chat/completions",
+                headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"},
                 json={
-                    "model": "llama-3.3-70b-versatile",
+                    "model": "deepseek-chat",
                     "messages": [
                         {"role": "system", "content": "Extract key facts from these messages. Return JSON with fields: company_name, sector, region_interest, timeline, budget_range. Use null if not found."},
                         {"role": "user", "content": combined}
