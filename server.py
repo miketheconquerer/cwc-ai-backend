@@ -59,10 +59,7 @@ class AgenticMemory:
         if CHROMA_AVAILABLE:
             try:
                 self.encoder = SentenceTransformer('all-MiniLM-L6-v2')
-                self.chroma_client = chromadb.Client(Settings(
-                    chroma_db_impl="duckdb+parquet",
-                    persist_directory="./chroma_db"
-                ))
+                self.chroma_client = chromadb.PersistentClient(path="./chroma_db")
                 self.episodic_collection = self.chroma_client.get_or_create_collection(
                     name="episodic_memory",
                     metadata={"hnsw:space": "cosine"}
@@ -2146,7 +2143,10 @@ Synthesize all the information above into a clear, actionable response.
                 response_text = res2.json()["choices"][0]["message"].get("content", "")
             final_response_text = response_text
         except Exception as e:
-            print(f"Groq error: {e}")
+            import traceback
+            print(f"🔴 GROQ ERROR TYPE: {type(e).__name__}")
+            print(f"🔴 GROQ ERROR DETAIL: {e}")
+            print(f"🔴 GROQ FULL TRACEBACK:\n{traceback.format_exc()}")
             return "I apologise — connection trouble. Please reach out to the CWC team directly.", []
     response_text = final_response_text
     # v7.1: Check for and append pending notifications
@@ -2963,7 +2963,7 @@ async def admin_conversations(password: str = "", limit: int = 50):
     except Exception as e:
         return {"error": str(e)}
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def root():
     return {"message": "Sophia AI v7.1 - Fully Agentic China-West Business Advisor", "docs": "/docs"}
 
