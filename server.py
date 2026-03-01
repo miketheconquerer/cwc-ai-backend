@@ -2035,7 +2035,7 @@ Do NOT answer yet - just identify the first tool to call and why.
         while react_iteration < MAX_REACT_ITERATIONS:
             react_iteration += 1
             print(f"🔄 ReAct iteration {react_iteration}/{MAX_REACT_ITERATIONS}")
-            think_data = {"model":"llama-3.3-70b-versatile","messages":current_messages,"tools":GROQ_TOOLS,"tool_choice":"auto","temperature":0.3,"max_tokens":500}
+            think_data = {"model":"deepseek-chat","messages":current_messages,"tools":GROQ_TOOLS,"tool_choice":"auto","temperature":0.3,"max_tokens":500}
             try:
                 think_res = requests.post(url, headers=headers, json=think_data, timeout=30)
                 think_res.raise_for_status()
@@ -2084,7 +2084,7 @@ Synthesize all the information above into a clear, actionable response.
 """
             current_messages = [{"role":"system","content":final_prompt}] + list(messages)
             try:
-                final_res = requests.post(url, headers=headers, json={"model":"llama-3.3-70b-versatile","messages":current_messages,"temperature":0.3,"max_tokens":1000}, timeout=30)
+                final_res = requests.post(url, headers=headers, json={"model":"deepseek-chat","messages":current_messages,"temperature":0.3,"max_tokens":1000}, timeout=30)
                 final_res.raise_for_status()
                 final_response_text = final_res.json()["choices"][0]["message"].get("content", "")
             except Exception as e:
@@ -2100,7 +2100,7 @@ Synthesize all the information above into a clear, actionable response.
         MAX_REFLECTION_ATTEMPTS = 2
         try:
             for iteration in range(MAX_ITERATIONS):
-                data = {"model":"llama-3.3-70b-versatile","messages":current_messages,"tools":GROQ_TOOLS,"tool_choice":"auto","temperature":0.3,"max_tokens":1000}
+                data = {"model":"deepseek-chat","messages":current_messages,"tools":GROQ_TOOLS,"tool_choice":"auto","temperature":0.3,"max_tokens":1000}
                 # Retry up to 3 times on 429 rate limit with backoff
                 for _retry in range(3):
                     res = requests.post(url, headers=headers, json=data, timeout=30)
