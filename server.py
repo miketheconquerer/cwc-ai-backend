@@ -47,15 +47,24 @@ from typing import List, Dict, Any, Optional, Tuple, Callable
 import uuid
 import traceback
 
-# Optional: ChromaDB for Memory
+# Optional: Sentence Transformers for Embeddings (needed for Supabase pgvector)
+SENTENCE_TRANSFORMERS_AVAILABLE = False
 try:
     from sentence_transformers import SentenceTransformer
+    SENTENCE_TRANSFORMERS_AVAILABLE = True
+    print("✅ Sentence Transformers available")
+except ImportError:
+    print("⚠️ sentence-transformers not installed. Embeddings disabled.")
+
+# Optional: ChromaDB (only needed for ChromaDB modes, not Supabase)
+CHROMA_AVAILABLE = False
+try:
     import chromadb
     from chromadb.config import Settings
     CHROMA_AVAILABLE = True
+    print("✅ ChromaDB available")
 except ImportError:
-    print("⚠️ ChromaDB/sentence-transformers not installed. Using fallback memory.")
-    CHROMA_AVAILABLE = False
+    print("⚠️ chromadb not installed. Using Supabase or memory fallback.")
 
 load_dotenv()
 
@@ -77,7 +86,7 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
 # ============================================================
 # VECTOR DATABASE CONFIGURATION - v9.7
 # ============================================================
-# Option 1: Chroma Cloud (RECOMMENDED - Managed, FREE tier!)
+# Option 1: Chroma Cloud (Managed)
 # Sign up at: https://www.trychroma.com
 CHROMA_CLOUD_API_KEY = os.getenv("CHROMA_CLOUD_API_KEY", "")  # Your Chroma Cloud API key
 CHROMA_TENANT = os.getenv("CHROMA_TENANT", "default")         # Optional: Tenant name
@@ -87,8 +96,8 @@ CHROMA_DATABASE = os.getenv("CHROMA_DATABASE", "default")     # Optional: Databa
 CHROMA_SERVER_URL = os.getenv("CHROMA_SERVER_URL", "")  # e.g., "http://your-chroma:8000"
 CHROMA_SERVER_AUTH = os.getenv("CHROMA_SERVER_AUTH", "")  # Optional: Basic auth token
 
-# Option 3: Supabase pgvector (FREE 500MB!)
-SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL", "")  # PostgreSQL connection string
+# Option 3: Supabase pgvector (FREE 500MB!) - or reuse existing DATABASE_URL
+SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL", "") or DATABASE_URL  # Falls back to DATABASE_URL
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")  # For REST API (optional)
 
 # Option 4: Local/In-memory ChromaDB (default, ephemeral on Render)
@@ -423,6 +432,7 @@ def run_migrations():
         ("tool_registry", "parameters", "JSONB"),
         ("conversations", "goals_extracted", "JSONB"),
         ("conversations", "tools_used", "JSONB"),
+        ("user_profiles", "updated_at", "TIMESTAMP DEFAULT NOW()"),
     ]
     
     try:
@@ -563,9 +573,9 @@ class FreeAIProvider:
                 'key': OPENROUTER_API_KEY,
                 'endpoint': 'https://openrouter.ai/api/v1/chat/completions',
                 'models': {
-                    'default': 'meta-llama/llama-3.1-8b-instruct:free',
-                    'smart': 'meta-llama/llama-3.1-8b-instruct:free',
-                    'fast': 'meta-llama/llama-3.1-8b-instruct:free'
+                    'default': 'meta-llama/llama-3.2-3b-instruct:free',
+                    'smart': 'meta-llama/llama-3.2-3b-instruct:free',
+                    'fast': 'meta-llama/llama-3.2-3b-instruct:free'
                 },
                 'headers': {
                     'Authorization': f'Bearer {OPENROUTER_API_KEY}',
@@ -715,10 +725,15 @@ class HybridVectorMemory:
     
     def _init_encoder(self):
         """Initialize the sentence encoder"""
+        if not SENTENCE_TRANSFORMERS_AVAILABLE:
+            print("⚠️ Sentence Transformers not available, embeddings disabled")
+            self.encoder = None
+            return
+            
         try:
             from sentence_transformers import SentenceTransformer
             self.encoder = SentenceTransformer('all-MiniLM-L6-v2')
-            print("✅ Sentence encoder initialized")
+            print("✅ Sentence encoder initialized (all-MiniLM-L6-v2)")
         except Exception as e:
             print(f"⚠️ Encoder init failed: {e}")
             self.encoder = None
@@ -2369,8 +2384,8 @@ def goal_executor():
                 SELECT id, goal_type, goal_description FROM autonomous_goals 
                 WHERE status = 'pending' AND priority >= 5
                 ORDER BY priority DESC, created_at ASC
-                LIMIT MAX_CONCURRENT_GOALS
-            """)
+                LIMIT %s
+            """, (MAX_CONCURRENT_GOALS,))
             goals = c.fetchall()
             
             for goal_id, goal_type, description in goals:
