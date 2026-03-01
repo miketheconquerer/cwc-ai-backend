@@ -397,9 +397,10 @@ class FreeAIProvider:
                 'key': OPENROUTER_API_KEY,
                 'endpoint': 'https://openrouter.ai/api/v1/chat/completions',
                 'models': {
-                    'default': 'mistralai/mistral-7b-instruct:free',
-                    'smart': 'deepseek/deepseek-r1:free',
-                    'fast': 'google/gemma-2-9b-it:free'
+                    # Updated 2025: Current working free models
+                    'default': 'meta-llama/llama-3.1-8b-instruct:free',
+                    'smart': 'meta-llama/llama-3.1-8b-instruct:free',
+                    'fast': 'meta-llama/llama-3.1-8b-instruct:free'
                 },
                 'headers': {
                     'Authorization': f'Bearer {OPENROUTER_API_KEY}',
@@ -465,7 +466,8 @@ class FreeAIProvider:
             except Exception as e:
                 last_error = str(e)
                 print(f"⚠️ {provider['name']} failed: {e}")
-                if '429' in str(e) or 'rate limit' in str(e).lower():
+                # Switch provider on rate limit, 404, or 401
+                if any(code in str(e) for code in ['429', '404', '401', 'rate limit', 'not found', 'invalid']):
                     self.switch_provider()
                     await asyncio.sleep(1)
         
@@ -487,6 +489,13 @@ class FreeAIProvider:
         
         if response.status_code == 429:
             raise Exception("Rate limit (429)")
+        elif response.status_code == 404:
+            # Model not found - log and raise
+            error_detail = response.text[:200] if response.text else "Model not found"
+            print(f"❌ OpenRouter 404: {error_detail}")
+            raise Exception(f"Model not found (404): {provider['models'][model_type]}")
+        elif response.status_code == 401:
+            raise Exception("Invalid API key (401)")
         response.raise_for_status()
         return response.json()
     
