@@ -53,8 +53,8 @@ try:
     from sentence_transformers import SentenceTransformer
     SENTENCE_TRANSFORMERS_AVAILABLE = True
     print("✅ Sentence Transformers available")
-except ImportError:
-    print("⚠️ sentence-transformers not installed. Embeddings disabled.")
+except Exception as e:
+    print(f"⚠️ sentence-transformers not installed: {e}")
 
 # Optional: ChromaDB (only needed for ChromaDB modes, not Supabase)
 CHROMA_AVAILABLE = False
@@ -63,8 +63,9 @@ try:
     from chromadb.config import Settings
     CHROMA_AVAILABLE = True
     print("✅ ChromaDB available")
-except ImportError:
-    print("⚠️ chromadb not installed. Using Supabase or memory fallback.")
+except Exception as e:
+    print(f"⚠️ chromadb not available: {e}")
+    print("   Using Supabase or memory fallback.")
 
 load_dotenv()
 
