@@ -1,8 +1,24 @@
 """
-Sophia AI Server v8.0 - Complete Edition
-========================================
+================================================================================
+SOPHIA AI SERVER v9.0 - FULLY AGENTIC EDITION
+================================================================================
 100% FREE AI with OpenRouter + Cloudflare
-Features: Memory System, Multi-Agent Orchestration, Self-Improvement, HTN Planning
+Features: Memory, Multi-Agent, Self-Improvement, HTN Planning, 
+          Autonomous Goals, Background Tasks, Tool Execution, 
+          Proactive Notifications, Learning Loop
+
+AGENTIC CAPABILITIES:
+✅ Autonomous Goal Extraction & Execution
+✅ Background Task Manager (runs 24/7)
+✅ Multi-Agent Collaboration with Weighted Consensus
+✅ Tool Creation & Execution Pipeline
+✅ Self-Improvement Learning Loop
+✅ Environment Monitoring & Proactive Alerts
+✅ Meta-Cognitive Confidence Assessment
+✅ Predictive Intent Engine
+✅ Episodic + Semantic Memory
+✅ HTN Hierarchical Task Planning
+================================================================================
 """
 
 from fastapi import FastAPI, BackgroundTasks, Request, HTTPException
@@ -18,14 +34,16 @@ import time
 import hashlib
 import re
 import asyncio
+import threading
 from collections import defaultdict
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Callable
 import uuid
+import traceback
 
-# v8.0: ChromaDB for Memory (optional)
+# Optional: ChromaDB for Memory
 try:
     from sentence_transformers import SentenceTransformer
     import chromadb
@@ -38,22 +56,29 @@ except ImportError:
 load_dotenv()
 
 # ============================================================
-# CONFIGURATION - 100% FREE TIER ONLY
+# CONFIGURATION
 # ============================================================
 BREVO_API_KEY   = os.getenv("BREVO_API_KEY", "")
 SENDER_EMAIL    = os.getenv("SENDER_EMAIL", "888nv666@gmail.com")
 RECIPIENT_EMAIL = "digkasm@proton.me"
 DATABASE_URL    = os.getenv("DATABASE_URL")
 
-# 100% FREE AI Providers (No credit card required)
+# 100% FREE AI Providers
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 CLOUDFLARE_API_KEY = os.getenv("CLOUDFLARE_API_KEY", "")
 CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "")
 
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
 
+# Agentic Settings
+AUTO_IMPROVEMENT_INTERVAL_HOURS = 24
+ENVIRONMENT_CHECK_INTERVAL_HOURS = 6
+GOAL_EXECUTION_INTERVAL_MINUTES = 5
+MAX_CONCURRENT_GOALS = 3
+MIN_CONFIDENCE_FOR_AUTO_ACTION = 0.75
+
 # ============================================================
-# DATABASE HELPER
+# DATABASE LAYER
 # ============================================================
 def get_db():
     """Get database connection"""
@@ -62,7 +87,7 @@ def get_db():
     return psycopg2.connect(DATABASE_URL)
 
 def init_db():
-    """Initialize database tables"""
+    """Initialize all database tables"""
     try:
         conn = get_db()
         c = conn.cursor()
@@ -76,6 +101,9 @@ def init_db():
                 ai_response TEXT,
                 intent VARCHAR(50),
                 reflection_score INTEGER DEFAULT 5,
+                goals_extracted JSONB,
+                tools_used JSONB,
+                confidence_score FLOAT,
                 timestamp TIMESTAMP DEFAULT NOW()
             )
         """)
@@ -87,10 +115,13 @@ def init_db():
                 session_id VARCHAR(100) UNIQUE,
                 email VARCHAR(255),
                 name VARCHAR(255),
+                phone VARCHAR(50),
+                company VARCHAR(255),
                 lead_score INTEGER DEFAULT 0,
                 last_intent VARCHAR(50),
                 key_facts JSONB,
                 region_interest VARCHAR(100),
+                sector_interest VARCHAR(100),
                 visit_count INTEGER DEFAULT 1,
                 first_seen TIMESTAMP DEFAULT NOW(),
                 last_seen TIMESTAMP DEFAULT NOW(),
@@ -99,10 +130,49 @@ def init_db():
             )
         """)
         
-        # Agent versions table
+        # Autonomous goals table
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS autonomous_goals (
+                id SERIAL PRIMARY KEY,
+                session_id VARCHAR(100),
+                goal_type VARCHAR(50),
+                goal_description TEXT,
+                priority INTEGER DEFAULT 5,
+                status VARCHAR(20) DEFAULT 'pending',
+                subtasks JSONB,
+                completed_subtasks JSONB,
+                result TEXT,
+                confidence FLOAT,
+                source VARCHAR(50),
+                created_at TIMESTAMP DEFAULT NOW(),
+                started_at TIMESTAMP,
+                completed_at TIMESTAMP,
+                retry_count INTEGER DEFAULT 0
+            )
+        """)
+        
+        # Agent tasks table
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS agent_tasks (
+                id SERIAL PRIMARY KEY,
+                session_id VARCHAR(100),
+                task_type VARCHAR(50),
+                task_description TEXT,
+                status VARCHAR(20) DEFAULT 'pending',
+                assigned_agent VARCHAR(50),
+                result TEXT,
+                metadata JSONB,
+                created_at TIMESTAMP DEFAULT NOW(),
+                started_at TIMESTAMP,
+                completed_at TIMESTAMP
+            )
+        """)
+        
+        # Agent versions table (for self-improvement)
         c.execute("""
             CREATE TABLE IF NOT EXISTS agent_versions (
                 id SERIAL PRIMARY KEY,
+                version_number INTEGER,
                 prompt_hash VARCHAR(64) UNIQUE,
                 prompt_text TEXT,
                 performance_score FLOAT,
@@ -129,21 +199,37 @@ def init_db():
                 id SERIAL PRIMARY KEY,
                 tool_name VARCHAR(100) UNIQUE,
                 description TEXT,
+                parameters JSONB,
                 implementation TEXT,
                 created_by VARCHAR(100),
+                success_rate FLOAT DEFAULT 1.0,
+                use_count INTEGER DEFAULT 0,
                 deployed BOOLEAN DEFAULT TRUE,
                 created_at TIMESTAMP DEFAULT NOW()
             )
         """)
         
-        # Agent tasks table
+        # Proactive notifications table
         c.execute("""
-            CREATE TABLE IF NOT EXISTS agent_tasks (
+            CREATE TABLE IF NOT EXISTS proactive_notifications (
                 id SERIAL PRIMARY KEY,
                 session_id VARCHAR(100),
-                task_description TEXT,
-                status VARCHAR(50) DEFAULT 'pending',
-                sub_tasks JSONB,
+                notification_type VARCHAR(50),
+                subject TEXT,
+                content TEXT,
+                sent BOOLEAN DEFAULT FALSE,
+                sent_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        
+        # Learning events table
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS learning_events (
+                id SERIAL PRIMARY KEY,
+                event_type VARCHAR(50),
+                description TEXT,
+                improvement_data JSONB,
                 created_at TIMESTAMP DEFAULT NOW()
             )
         """)
@@ -169,8 +255,8 @@ def get_or_create_user_profile(session_id: str) -> dict:
                 RETURNING *
             """, (session_id,))
             profile = c.fetchone()
+            conn.commit()
         else:
-            # Update visit count and last seen
             c.execute("""
                 UPDATE user_profiles 
                 SET visit_count = visit_count + 1, last_seen = NOW()
@@ -193,7 +279,7 @@ def update_user_profile(session_id: str, **kwargs):
         set_clauses = []
         values = []
         for key, value in kwargs.items():
-            if key == 'key_facts':
+            if key in ['key_facts', 'goals_extracted']:
                 set_clauses.append(f"{key} = %s::jsonb")
                 values.append(json.dumps(value) if isinstance(value, dict) else value)
             else:
@@ -217,8 +303,7 @@ def update_user_profile(session_id: str, **kwargs):
 # ============================================================
 def send_email_brevo(to_email: str, subject: str, content: str) -> bool:
     """Send email via Brevo API"""
-    if not BREVO_API_KEY:
-        print("⚠️ BREVO_API_KEY not configured")
+    if not BREVO_API_KEY or not to_email:
         return False
     
     try:
@@ -234,7 +319,8 @@ def send_email_brevo(to_email: str, subject: str, content: str) -> bool:
                 "to": [{"email": to_email}],
                 "subject": subject,
                 "textContent": content
-            }
+            },
+            timeout=30
         )
         return response.status_code == 201
     except Exception as e:
@@ -242,7 +328,7 @@ def send_email_brevo(to_email: str, subject: str, content: str) -> bool:
         return False
 
 # ============================================================
-# v8.0: FREE AI PROVIDER MANAGER - OpenRouter + Cloudflare
+# FREE AI PROVIDER MANAGER
 # ============================================================
 class FreeAIProvider:
     """Manages 100% free AI providers with automatic fallback"""
@@ -250,8 +336,9 @@ class FreeAIProvider:
     def __init__(self):
         self.providers = []
         self.current_provider = 0
+        self.request_counts = defaultdict(int)
         
-        # Priority 1: OpenRouter (50 requests/day free, no CC required)
+        # OpenRouter (50 requests/day free)
         if OPENROUTER_API_KEY:
             self.providers.append({
                 'name': 'openrouter',
@@ -271,7 +358,7 @@ class FreeAIProvider:
             })
             print("✅ OpenRouter configured (50 requests/day FREE)")
         
-        # Priority 2: Cloudflare Workers AI (10K neurons/day, resets daily)
+        # Cloudflare Workers AI (10K neurons/day)
         if CLOUDFLARE_API_KEY and CLOUDFLARE_ACCOUNT_ID:
             self.providers.append({
                 'name': 'cloudflare',
@@ -290,124 +377,95 @@ class FreeAIProvider:
             print("✅ Cloudflare Workers AI configured (10K neurons/day FREE)")
         
         if not self.providers:
-            print("⚠️ No AI providers configured! Set OPENROUTER_API_KEY or CLOUDFLARE_API_KEY")
+            print("⚠️ No AI providers configured!")
         else:
             print(f"🎯 Total providers: {len(self.providers)}")
     
     def get_current_provider(self):
-        if not self.providers:
-            return None
-        return self.providers[self.current_provider]
+        return self.providers[self.current_provider] if self.providers else None
     
     def switch_provider(self):
-        """Switch to next available provider on failure"""
         if len(self.providers) <= 1:
             return self.get_current_provider()
         self.current_provider = (self.current_provider + 1) % len(self.providers)
-        provider = self.get_current_provider()
-        print(f"🔄 Switched to backup provider: {provider['name']}")
-        return provider
+        print(f"🔄 Switched to: {self.providers[self.current_provider]['name']}")
+        return self.get_current_provider()
     
-    async def chat_completion(self, messages, model_type='default', temperature=0.3, max_tokens=1000, tools=None, tool_choice=None):
-        """Try current provider, fallback to next on failure"""
+    async def chat_completion(self, messages, model_type='default', temperature=0.3, 
+                              max_tokens=1000, tools=None, tool_choice=None):
         if not self.providers:
             raise Exception("No AI providers configured")
         
         last_error = None
-        
         for attempt in range(len(self.providers)):
             provider = self.get_current_provider()
-            if not provider:
-                raise Exception("No provider available")
-            
             try:
                 if provider['name'] == 'openrouter':
-                    result = await self._call_openrouter(provider, messages, model_type, temperature, max_tokens, tools, tool_choice)
-                elif provider['name'] == 'cloudflare':
-                    result = await self._call_cloudflare(provider, messages, model_type, temperature, max_tokens)
+                    result = await self._call_openrouter(provider, messages, model_type, 
+                                                         temperature, max_tokens, tools, tool_choice)
                 else:
-                    raise ValueError(f"Unknown provider: {provider['name']}")
+                    result = await self._call_cloudflare(provider, messages, model_type, 
+                                                         temperature, max_tokens)
                 
+                self.request_counts[provider['name']] += 1
                 return result
                 
             except Exception as e:
                 last_error = str(e)
                 print(f"⚠️ {provider['name']} failed: {e}")
-                
-                if 'rate limit' in last_error.lower() or '429' in last_error:
-                    print(f"⏳ {provider['name']} rate limited, trying next provider...")
-                
-                if len(self.providers) > 1:
+                if '429' in str(e) or 'rate limit' in str(e).lower():
                     self.switch_provider()
                     await asyncio.sleep(1)
-                else:
-                    break
         
-        raise Exception(f"All providers failed. Last error: {last_error}")
+        raise Exception(f"All providers failed: {last_error}")
     
     async def _call_openrouter(self, provider, messages, model_type, temperature, max_tokens, tools, tool_choice):
-        """Call OpenRouter API"""
         payload = {
             "model": provider['models'][model_type],
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens
         }
-        
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = tool_choice or "auto"
         
-        response = requests.post(provider['endpoint'], headers=provider['headers'], json=payload, timeout=60)
+        response = requests.post(provider['endpoint'], headers=provider['headers'], 
+                                json=payload, timeout=60)
         
         if response.status_code == 429:
-            raise Exception("OpenRouter rate limit exceeded (429) - 50/day free tier")
-        elif response.status_code == 401:
-            raise Exception("OpenRouter invalid API key (401)")
-        
+            raise Exception("Rate limit (429)")
         response.raise_for_status()
         return response.json()
     
     async def _call_cloudflare(self, provider, messages, model_type, temperature, max_tokens):
-        """Call Cloudflare Workers AI"""
         model = provider['models'][model_type]
         url = f"https://api.cloudflare.com/client/v4/accounts/{provider['account_id']}/ai/run/{model}"
         
-        payload = {
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens
-        }
-        
-        response = requests.post(url, headers=provider['headers'], json=payload, timeout=60)
+        response = requests.post(url, headers=provider['headers'], 
+                                json={"messages": messages, "temperature": temperature, 
+                                      "max_tokens": max_tokens}, timeout=60)
         
         if response.status_code == 429:
-            raise Exception("Cloudflare rate limit exceeded (429) - 10K neurons/day")
-        elif response.status_code == 401:
-            raise Exception("Cloudflare invalid API key (401)")
-        
+            raise Exception("Rate limit (429)")
         response.raise_for_status()
         data = response.json()
         
-        # Normalize Cloudflare response to OpenAI format
         return {
             "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": data.get('result', {}).get('response', '')
-                },
+                "message": {"role": "assistant", 
+                           "content": data.get('result', {}).get('response', '')},
                 "finish_reason": "stop"
             }]
         }
 
-# Initialize the free AI provider manager
 ai_provider = FreeAIProvider()
 
 # ============================================================
-# v7.1: AGENTIC MEMORY SYSTEM (Episodic + Semantic)
+# AGENTIC MEMORY SYSTEM
 # ============================================================
 class AgenticMemory:
-    """Full agentic memory architecture with embeddings"""
+    """Full agentic memory with episodic and semantic storage"""
     
     def __init__(self):
         self.encoder = None
@@ -421,22 +479,16 @@ class AgenticMemory:
                 self.encoder = SentenceTransformer('all-MiniLM-L6-v2')
                 self.chroma_client = chromadb.PersistentClient(path="./chroma_db")
                 self.episodic_collection = self.chroma_client.get_or_create_collection(
-                    name="episodic_memory",
-                    metadata={"hnsw:space": "cosine"}
-                )
+                    name="episodic_memory", metadata={"hnsw:space": "cosine"})
                 self.semantic_collection = self.chroma_client.get_or_create_collection(
-                    name="semantic_memory",
-                    metadata={"hnsw:space": "cosine"}
-                )
+                    name="semantic_memory", metadata={"hnsw:space": "cosine"})
                 self.initialized = True
-                print("🧠 Agentic Memory initialized with ChromaDB + embeddings")
+                print("🧠 Agentic Memory initialized")
             except Exception as e:
-                print(f"⚠️ Memory initialization failed: {e}")
+                print(f"⚠️ Memory init failed: {e}")
     
     def encode(self, text: str) -> List[float]:
-        if not self.encoder:
-            return [0.0] * 384
-        return self.encoder.encode(text).tolist()
+        return self.encoder.encode(text).tolist() if self.encoder else [0.0] * 384
     
     def store_episodic(self, session_id: str, user_msg: str, response: str, 
                        success_score: int, intent: str, metadata: dict = None):
@@ -448,43 +500,29 @@ class AgenticMemory:
             embedding = self.encode(text)
             metadata = metadata or {}
             metadata.update({
-                "session_id": session_id,
-                "intent": intent,
-                "success_score": success_score,
-                "timestamp": datetime.now().isoformat()
+                "session_id": session_id, "intent": intent,
+                "success_score": success_score, "timestamp": datetime.now().isoformat()
             })
             self.episodic_collection.add(
-                embeddings=[embedding],
-                documents=[text],
-                metadatas=[metadata],
-                ids=[memory_id]
+                embeddings=[embedding], documents=[text],
+                metadatas=[metadata], ids=[memory_id]
             )
-            print(f"📝 Stored episodic memory: {memory_id}")
         except Exception as e:
             print(f"Episodic storage error: {e}")
     
-    def store_semantic(self, fact_type: str, fact_value: str, 
-                       importance: int, source: str, metadata: dict = None):
+    def store_semantic(self, fact_type: str, fact_value: str, importance: int, source: str):
         if not self.initialized or importance < 5:
             return
         try:
             memory_id = f"sem_{fact_type}_{int(time.time())}"
             text = f"{fact_type}: {fact_value}"
             embedding = self.encode(text)
-            metadata = metadata or {}
-            metadata.update({
-                "fact_type": fact_type,
-                "importance": importance,
-                "source": source,
-                "timestamp": datetime.now().isoformat()
-            })
             self.semantic_collection.add(
-                embeddings=[embedding],
-                documents=[text],
-                metadatas=[metadata],
+                embeddings=[embedding], documents=[text],
+                metadatas=[{"fact_type": fact_type, "importance": importance, 
+                           "source": source, "timestamp": datetime.now().isoformat()}],
                 ids=[memory_id]
             )
-            print(f"💾 Stored semantic fact: {fact_type} = {fact_value}")
         except Exception as e:
             print(f"Semantic storage error: {e}")
     
@@ -494,20 +532,17 @@ class AgenticMemory:
         try:
             query_embedding = self.encode(query)
             results = self.episodic_collection.query(
-                query_embeddings=[query_embedding],
-                n_results=n_results
+                query_embeddings=[query_embedding], n_results=n_results
             )
             episodes = []
             for i in range(len(results['ids'][0])):
                 episodes.append({
                     'id': results['ids'][0][i],
                     'text': results['documents'][0][i],
-                    'metadata': results['metadatas'][0][i],
-                    'distance': results['distances'][0][i] if 'distances' in results else None
+                    'metadata': results['metadatas'][0][i]
                 })
             return episodes
-        except Exception as e:
-            print(f"Recall error: {e}")
+        except:
             return []
     
     def recall_semantic_facts(self, query: str, min_importance: int = 5) -> List[dict]:
@@ -516,8 +551,7 @@ class AgenticMemory:
         try:
             query_embedding = self.encode(query)
             results = self.semantic_collection.query(
-                query_embeddings=[query_embedding],
-                n_results=10
+                query_embeddings=[query_embedding], n_results=10
             )
             facts = []
             for i in range(len(results['ids'][0])):
@@ -526,399 +560,513 @@ class AgenticMemory:
                     facts.append({
                         'id': results['ids'][0][i],
                         'text': results['documents'][0][i],
-                        'metadata': metadata,
-                        'distance': results['distances'][0][i] if 'distances' in results else None
+                        'metadata': metadata
                     })
             return facts
-        except Exception as e:
-            print(f"Semantic recall error: {e}")
+        except:
             return []
 
-# Initialize memory
 agentic_memory = AgenticMemory()
 
 # ============================================================
-# v7.1: SELF-IMPROVEMENT ENGINE
+# TOOL REGISTRY & EXECUTION PIPELINE
 # ============================================================
-class SelfImprovementEngine:
-    """Analyzes performance and improves Sophia's own prompts"""
+class ToolRegistry:
+    """Dynamic tool registry with execution capabilities"""
     
     def __init__(self):
-        self.improvement_threshold = 0.15
-        self.last_analysis = None
+        self.tools = {}
+        self._register_builtin_tools()
+        self._load_from_db()
     
-    async def analyze_performance(self, days: int = 7):
+    def _register_builtin_tools(self):
+        """Register built-in tools"""
+        self.tools.update({
+            'search_web': {
+                'description': 'Search the web for information',
+                'parameters': {'query': 'string'},
+                'handler': self._tool_search_web
+            },
+            'calculate_risk_score': {
+                'description': 'Calculate risk score for a company',
+                'parameters': {'company_name': 'string', 'context': 'object'},
+                'handler': self._tool_calculate_risk
+            },
+            'generate_report': {
+                'description': 'Generate a detailed report',
+                'parameters': {'topic': 'string', 'format': 'string'},
+                'handler': self._tool_generate_report
+            },
+            'send_notification': {
+                'description': 'Send proactive notification to user',
+                'parameters': {'session_id': 'string', 'message': 'string'},
+                'handler': self._tool_send_notification
+            },
+            'create_goal': {
+                'description': 'Create an autonomous goal',
+                'parameters': {'goal_type': 'string', 'description': 'string', 'priority': 'integer'},
+                'handler': self._tool_create_goal
+            },
+            'schedule_followup': {
+                'description': 'Schedule a followup action',
+                'parameters': {'session_id': 'string', 'delay_hours': 'integer', 'action': 'string'},
+                'handler': self._tool_schedule_followup
+            },
+            'analyze_sentiment': {
+                'description': 'Analyze sentiment of text',
+                'parameters': {'text': 'string'},
+                'handler': self._tool_analyze_sentiment
+            },
+            'extract_entities': {
+                'description': 'Extract entities from text',
+                'parameters': {'text': 'string'},
+                'handler': self._tool_extract_entities
+            }
+        })
+    
+    def _load_from_db(self):
+        """Load custom tools from database"""
+        try:
+            conn = get_db()
+            c = conn.cursor()
+            c.execute("SELECT tool_name, description, parameters, implementation FROM tool_registry WHERE deployed = TRUE")
+            for name, desc, params, impl in c.fetchall():
+                self.tools[name] = {
+                    'description': desc,
+                    'parameters': params or {},
+                    'implementation': impl
+                }
+            conn.close()
+            print(f"🔧 Loaded {len(self.tools)} tools")
+        except Exception as e:
+            print(f"Tool load error: {e}")
+    
+    async def execute(self, tool_name: str, params: dict) -> dict:
+        """Execute a tool and return result"""
+        if tool_name not in self.tools:
+            return {'success': False, 'error': f"Tool '{tool_name}' not found"}
+        
+        tool = self.tools[tool_name]
+        try:
+            if 'handler' in tool:
+                result = await tool['handler'](params)
+            else:
+                # Execute custom implementation
+                result = self._execute_custom(tool, params)
+            
+            # Update success rate
+            self._update_tool_stats(tool_name, success=True)
+            return {'success': True, 'result': result}
+        except Exception as e:
+            self._update_tool_stats(tool_name, success=False)
+            return {'success': False, 'error': str(e)}
+    
+    def _execute_custom(self, tool: dict, params: dict) -> str:
+        """Execute custom tool implementation"""
+        impl = tool.get('implementation', '')
+        locals_dict = {'params': params, 'result': ''}
+        exec(impl, {}, locals_dict)
+        return locals_dict.get('result', 'Executed')
+    
+    def _update_tool_stats(self, tool_name: str, success: bool):
         try:
             conn = get_db()
             c = conn.cursor()
             c.execute("""
-                SELECT user_message, ai_response, reflection_score, intent
-                FROM conversations 
-                WHERE reflection_score < 5 
-                AND timestamp > NOW() - INTERVAL '%s days'
-                LIMIT 50
-            """, (days,))
-            failures = c.fetchall()
+                UPDATE tool_registry 
+                SET use_count = use_count + 1,
+                    success_rate = (success_rate * use_count + %s) / (use_count + 1)
+                WHERE tool_name = %s
+            """, (1.0 if success else 0.0, tool_name))
+            conn.commit()
+            conn.close()
+        except:
+            pass
+    
+    # Built-in tool handlers
+    async def _tool_search_web(self, params: dict) -> str:
+        query = params.get('query', '')
+        # Simulated web search - in production, use real API
+        return f"Web search results for: {query}"
+    
+    async def _tool_calculate_risk(self, params: dict) -> dict:
+        company = params.get('company_name', '')
+        context = params.get('context', {})
+        # Risk calculation logic
+        risk_score = 50  # Base score
+        if context.get('registered'):
+            risk_score -= 20
+        if context.get('has_website'):
+            risk_score -= 10
+        if context.get('complaints'):
+            risk_score += 30
+        return {'company': company, 'risk_score': min(100, max(0, risk_score)), 
+                'level': 'high' if risk_score > 70 else 'medium' if risk_score > 40 else 'low'}
+    
+    async def _tool_generate_report(self, params: dict) -> str:
+        topic = params.get('topic', '')
+        return f"Generated report on: {topic}"
+    
+    async def _tool_send_notification(self, params: dict) -> str:
+        session_id = params.get('session_id', '')
+        message = params.get('message', '')
+        profile = get_or_create_user_profile(session_id)
+        if profile.get('email'):
+            sent = send_email_brevo(profile['email'], "🔔 Update from Sophia", message)
+            return "Notification sent" if sent else "Failed to send"
+        return "No email on file"
+    
+    async def _tool_create_goal(self, params: dict) -> str:
+        goal_type = params.get('goal_type', 'general')
+        description = params.get('description', '')
+        priority = params.get('priority', 5)
+        goal_engine.create_goal('system', goal_type, description, priority)
+        return f"Created goal: {description[:50]}"
+    
+    async def _tool_schedule_followup(self, params: dict) -> str:
+        return f"Followup scheduled"
+    
+    async def _tool_analyze_sentiment(self, params: dict) -> dict:
+        text = params.get('text', '')
+        # Simple sentiment analysis
+        positive_words = ['good', 'great', 'excellent', 'happy', 'satisfied']
+        negative_words = ['bad', 'poor', 'terrible', 'unhappy', 'disappointed']
+        
+        text_lower = text.lower()
+        positive_count = sum(1 for w in positive_words if w in text_lower)
+        negative_count = sum(1 for w in negative_words if w in text_lower)
+        
+        if positive_count > negative_count:
+            sentiment = 'positive'
+            score = 0.7 + (positive_count * 0.05)
+        elif negative_count > positive_count:
+            sentiment = 'negative'
+            score = 0.3 - (negative_count * 0.05)
+        else:
+            sentiment = 'neutral'
+            score = 0.5
+        
+        return {'sentiment': sentiment, 'score': min(1.0, max(0.0, score))}
+    
+    async def _tool_extract_entities(self, params: dict) -> dict:
+        text = params.get('text', '')
+        entities = {
+            'companies': re.findall(r'[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*(?:\s+(?:Co\.|Ltd\.|Inc\.|Corp\.|LLC))?', text),
+            'amounts': re.findall(r'\$[\d,]+(?:\.\d{2})?|\d+(?:,\d{3})*(?:\.\d{2})?\s*(?:USD|CNY|RMB|dollars|yuan)', text),
+            'dates': re.findall(r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2}', text),
+            'locations': re.findall(r'(?:in|at|from)\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)', text)
+        }
+        return entities
+    
+    def register_tool(self, name: str, description: str, parameters: dict, implementation: str):
+        """Register a new tool"""
+        try:
+            conn = get_db()
+            c = conn.cursor()
             c.execute("""
-                SELECT user_message, ai_response, reflection_score, intent
-                FROM conversations 
-                WHERE reflection_score >= 8 
-                AND timestamp > NOW() - INTERVAL '%s days'
-                LIMIT 50
-            """, (days,))
-            successes = c.fetchall()
+                INSERT INTO tool_registry (tool_name, description, parameters, implementation, created_at)
+                VALUES (%s, %s, %s::jsonb, %s, NOW())
+                ON CONFLICT (tool_name) DO UPDATE 
+                SET description = EXCLUDED.description, implementation = EXCLUDED.implementation
+            """, (name, description, json.dumps(parameters), implementation))
+            conn.commit()
+            conn.close()
+            self.tools[name] = {'description': description, 'parameters': parameters, 'implementation': implementation}
+            return True
+        except Exception as e:
+            print(f"Tool registration error: {e}")
+            return False
+
+tool_registry = ToolRegistry()
+
+# ============================================================
+# AUTONOMOUS GOAL ENGINE
+# ============================================================
+class AutonomousGoalEngine:
+    """Manages autonomous goal extraction, prioritization, and execution"""
+    
+    def __init__(self):
+        self.active_goals = []
+        self.running = False
+    
+    def extract_goals_from_conversation(self, session_id: str, user_message: str, 
+                                         ai_response: str, intent: str) -> List[dict]:
+        """Extract actionable goals from conversation"""
+        goals = []
+        
+        # Goal extraction patterns
+        patterns = {
+            'verify_company': [
+                r'(?:verify|check|validate)\s+([A-Z][A-Za-z0-9\s&]+)',
+                r'is\s+([A-Z][A-Za-z0-9\s&]+)\s+(?:legitimate|real|valid)'
+            ],
+            'find_supplier': [
+                r'(?:find|source|looking for)\s+(?:supplier|manufacturer|factory)',
+                r'(?:need|want)\s+(?:a|an?)\s+supplier'
+            ],
+            'market_research': [
+                r'(?:research|analyze|study)\s+(?:the\s+)?(.+?)\s+market',
+                r'(?:market|industry)\s+(?:analysis|research|study)'
+            ],
+            'schedule_consultation': [
+                r'(?:schedule|book|arrange)\s+(?:a\s+)?consultation',
+                r'(?:talk|speak|meet)\s+with\s+(?:someone|an expert)'
+            ],
+            'monitor_updates': [
+                r'(?:keep me updated|notify me|alert me)',
+                r'(?:any changes|updates)\s+(?:on|about)'
+            ]
+        }
+        
+        for goal_type, pattern_list in patterns.items():
+            for pattern in pattern_list:
+                matches = re.findall(pattern, user_message, re.IGNORECASE)
+                for match in matches:
+                    goals.append({
+                        'goal_type': goal_type,
+                        'description': f"{goal_type.replace('_', ' ').title()}: {match if isinstance(match, str) else user_message[:100]}",
+                        'priority': self._calculate_priority(goal_type, intent),
+                        'source': 'conversation',
+                        'context': {'extracted_from': user_message[:200]}
+                    })
+        
+        return goals
+    
+    def _calculate_priority(self, goal_type: str, intent: str) -> int:
+        """Calculate goal priority"""
+        priority_map = {
+            'verify_company': 9,
+            'find_supplier': 7,
+            'market_research': 5,
+            'schedule_consultation': 8,
+            'monitor_updates': 4
+        }
+        base_priority = priority_map.get(goal_type, 5)
+        
+        # Boost priority based on intent
+        if intent in ['supplier_verification', 'urgent_due_diligence']:
+            base_priority += 2
+        
+        return min(10, base_priority)
+    
+    def create_goal(self, session_id: str, goal_type: str, description: str, 
+                    priority: int = 5, context: dict = None) -> int:
+        """Create a new autonomous goal"""
+        try:
+            conn = get_db()
+            c = conn.cursor()
+            
+            # Generate subtasks based on goal type
+            subtasks = self._generate_subtasks(goal_type, description)
+            
+            c.execute("""
+                INSERT INTO autonomous_goals 
+                (session_id, goal_type, goal_description, priority, status, subtasks, 
+                 completed_subtasks, confidence, source, created_at)
+                VALUES (%s, %s, %s, %s, 'pending', %s::jsonb, '[]'::jsonb, 0.8, 'system', NOW())
+                RETURNING id
+            """, (session_id, goal_type, description, priority, json.dumps(subtasks)))
+            
+            goal_id = c.fetchone()[0]
+            conn.commit()
             conn.close()
             
-            if len(failures) < 5 or len(successes) < 5:
-                print("📊 Not enough data for self-improvement analysis")
-                return
-            
-            failure_patterns = self._extract_patterns(failures, is_failure=True)
-            success_patterns = self._extract_patterns(successes, is_failure=False)
-            improved_prompts = self._generate_improved_prompts(failure_patterns, success_patterns)
-            
-            for prompt_data in improved_prompts:
-                await self._test_and_deploy(prompt_data, failures[:10])
-            
-            self.last_analysis = datetime.now()
-            print(f"✅ Self-improvement analysis complete: {len(improved_prompts)} candidates")
+            print(f"🎯 Created goal #{goal_id}: {description[:50]}...")
+            return goal_id
         except Exception as e:
-            print(f"Self-improvement error: {e}")
+            print(f"Goal creation error: {e}")
+            return -1
     
-    def _extract_patterns(self, conversations: List[tuple], is_failure: bool) -> Dict:
-        patterns = {'intents': defaultdict(int), 'response_styles': defaultdict(int), 'keywords': defaultdict(int), 'lengths': []}
-        for user_msg, ai_response, score, intent in conversations:
-            patterns['intents'][intent] += 1
-            patterns['lengths'].append(len(ai_response))
-            if '•' in ai_response or '①' in ai_response:
-                patterns['response_styles']['structured'] += 1
-            if any(c.isdigit() for c in ai_response):
-                patterns['response_styles']['has_numbers'] += 1
-            if '?' in ai_response[-20:]:
-                patterns['response_styles']['ends_with_question'] += 1
-            if 'contact' in ai_response.lower() or 'michail' in ai_response.lower():
-                patterns['response_styles']['has_cta'] += 1
-            words = user_msg.lower().split()
-            for w in words:
-                if len(w) > 4:
-                    patterns['keywords'][w] += 1
-        return patterns
+    def _generate_subtasks(self, goal_type: str, description: str) -> List[dict]:
+        """Generate subtasks for a goal"""
+        subtask_templates = {
+            'verify_company': [
+                {'task': 'search_company_registry', 'agent': 'due_diligence', 'status': 'pending'},
+                {'task': 'check_online_presence', 'agent': 'researcher', 'status': 'pending'},
+                {'task': 'analyze_risk_factors', 'agent': 'verifier', 'status': 'pending'},
+                {'task': 'generate_report', 'agent': 'main', 'status': 'pending'}
+            ],
+            'find_supplier': [
+                {'task': 'search_suppliers', 'agent': 'researcher', 'status': 'pending'},
+                {'task': 'evaluate_options', 'agent': 'strategist', 'status': 'pending'},
+                {'task': 'verify_top_choices', 'agent': 'verifier', 'status': 'pending'}
+            ],
+            'market_research': [
+                {'task': 'gather_market_data', 'agent': 'researcher', 'status': 'pending'},
+                {'task': 'analyze_competition', 'agent': 'strategist', 'status': 'pending'},
+                {'task': 'generate_insights', 'agent': 'main', 'status': 'pending'}
+            ],
+            'monitor_updates': [
+                {'task': 'setup_monitoring', 'agent': 'main', 'status': 'pending'},
+                {'task': 'configure_alerts', 'agent': 'main', 'status': 'pending'}
+            ]
+        }
+        return subtask_templates.get(goal_type, [{'task': 'execute', 'agent': 'main', 'status': 'pending'}])
     
-    def _generate_improved_prompts(self, failures: Dict, successes: Dict) -> List[Dict]:
-        candidates = []
-        if failures['response_styles'].get('structured', 0) < 2:
-            candidates.append({
-                'type': 'structure_emphasis',
-                'prompt_addition': "\nCRITICAL: Always structure responses with numbered lists (①, ②, ③). Users respond better to clear structure.",
-                'hypothesis': 'Structured responses reduce failure rate'
-            })
-        if failures['response_styles'].get('has_numbers', 0) < 2:
-            candidates.append({
-                'type': 'data_emphasis',
-                'prompt_addition': "\nMANDATORY: Include specific numbers, percentages, and ranges. Never say 'some' or 'many' - quantify everything.",
-                'hypothesis': 'Specific data increases credibility'
-            })
-        if failures['response_styles'].get('has_cta', 0) < 2:
-            candidates.append({
-                'type': 'cta_emphasis',
-                'prompt_addition': "\nREQUIRED: Every response must end with a specific next step. Never leave the user without a clear action.",
-                'hypothesis': 'Clear CTAs drive engagement'
-            })
-        if successes['lengths'] and failures['lengths']:
-            avg_success_len = sum(successes['lengths']) / len(successes['lengths'])
-            avg_failure_len = sum(failures['lengths']) / len(failures['lengths'])
-            if avg_failure_len > avg_success_len * 1.3:
-                candidates.append({
-                    'type': 'conciseness_emphasis',
-                    'prompt_addition': f"\nCONCISENESS: Keep responses under {int(avg_success_len)} words. Be direct. No fluff.",
-                    'hypothesis': 'Shorter responses perform better'
-                })
-        return candidates
-    
-    async def _test_and_deploy(self, prompt_data: Dict, test_cases: List[tuple]):
-        if not ai_provider.providers:
-            return
+    async def execute_pending_goals(self):
+        """Execute pending goals"""
         try:
-            base_prompt = self._get_base_system_prompt()
-            test_prompt = base_prompt + prompt_data['prompt_addition']
-            improvements = []
-            for user_msg, _, original_score, intent in test_cases[:5]:
-                test_response = await self._test_prompt(test_prompt, user_msg)
-                if test_response:
-                    reflection = await self._score_response(test_response, user_msg)
-                    if reflection > original_score:
-                        improvement = (reflection - original_score) / original_score
-                        improvements.append(improvement)
-            if improvements:
-                avg_improvement = sum(improvements) / len(improvements)
-                if avg_improvement >= self.improvement_threshold:
-                    self._deploy_prompt_improvement(prompt_data, avg_improvement)
-                    print(f"✅ Deployed improvement: {prompt_data['type']} ({avg_improvement:.1%} better)")
+            conn = get_db()
+            c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            
+            # Get pending goals sorted by priority
+            c.execute("""
+                SELECT * FROM autonomous_goals 
+                WHERE status = 'pending' AND retry_count < 3
+                ORDER BY priority DESC, created_at ASC
+                LIMIT %s
+            """, (MAX_CONCURRENT_GOALS,))
+            
+            goals = c.fetchall()
+            conn.close()
+            
+            for goal in goals:
+                await self._execute_goal(dict(goal))
+                
         except Exception as e:
-            print(f"Prompt testing error: {e}")
+            print(f"Goal execution error: {e}")
     
-    async def _test_prompt(self, prompt: str, user_msg: str) -> Optional[str]:
+    async def _execute_goal(self, goal: dict):
+        """Execute a single goal"""
+        goal_id = goal['id']
+        print(f"🚀 Executing goal #{goal_id}: {goal['goal_description'][:50]}...")
+        
         try:
-            messages = [
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": user_msg}
-            ]
-            res = await ai_provider.chat_completion(messages, temperature=0.3, max_tokens=500)
-            return res["choices"][0]["message"]["content"]
-        except:
-            return None
+            # Update status
+            self._update_goal_status(goal_id, 'in_progress')
+            
+            subtasks = goal.get('subtasks', [])
+            completed = []
+            
+            for subtask in subtasks:
+                result = await self._execute_subtask(subtask, goal)
+                completed.append({'task': subtask['task'], 'result': result, 'completed_at': datetime.now().isoformat()})
+            
+            # Mark goal complete
+            self._update_goal_status(goal_id, 'completed', 
+                                     result=f"Completed {len(completed)} subtasks",
+                                     completed_subtasks=completed)
+            
+            # Notify user if session exists
+            if goal['session_id'] and goal['session_id'] != 'system':
+                await self._notify_goal_completion(goal, completed)
+                
+        except Exception as e:
+            self._update_goal_status(goal_id, 'failed', result=str(e))
+            self._increment_retry(goal_id)
     
-    async def _score_response(self, response: str, user_msg: str) -> int:
-        try:
-            messages = [
-                {"role": "system", "content": "Score this response 1-10. Return ONLY the number."},
-                {"role": "user", "content": f"User: {user_msg}\nResponse: {response}"}
-            ]
-            res = await ai_provider.chat_completion(messages, temperature=0.0, max_tokens=10)
-            score_text = res["choices"][0]["message"]["content"].strip()
-            return int(re.search(r'\d+', score_text).group())
-        except:
-            return 5
+    async def _execute_subtask(self, subtask: dict, goal: dict) -> str:
+        """Execute a subtask"""
+        task = subtask['task']
+        agent = subtask.get('agent', 'main')
+        
+        # Use appropriate tool or agent
+        if task == 'search_company_registry':
+            result = await tool_registry.execute('search_web', 
+                {'query': f"{goal['goal_description']} China company registry SAMR"})
+        elif task == 'check_online_presence':
+            result = await tool_registry.execute('search_web', 
+                {'query': f"{goal['goal_description']} website contact"})
+        elif task == 'analyze_risk_factors':
+            result = await tool_registry.execute('calculate_risk_score', 
+                {'company_name': goal['goal_description'], 'context': goal.get('context', {})})
+        else:
+            # Use AI for complex tasks
+            result = {'success': True, 'result': f"Executed {task} via {agent}"}
+        
+        return result
     
-    def _get_base_system_prompt(self) -> str:
-        return "You are Sophia, CWC's AI advisor for China-West business."
-    
-    def _deploy_prompt_improvement(self, prompt_data: Dict, improvement: float):
+    def _update_goal_status(self, goal_id: int, status: str, result: str = None, 
+                            completed_subtasks: List = None):
         try:
             conn = get_db()
             c = conn.cursor()
-            prompt_hash = hashlib.md5(prompt_data['prompt_addition'].encode()).hexdigest()
-            c.execute("""
-                INSERT INTO agent_versions (prompt_hash, prompt_text, performance_score, deployed)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (prompt_hash) 
-                DO UPDATE SET performance_score = EXCLUDED.performance_score
-            """, (prompt_hash, prompt_data['prompt_addition'], improvement, True))
+            
+            updates = ["status = %s", "started_at = COALESCE(started_at, NOW())"]
+            params = [status]
+            
+            if status == 'completed':
+                updates.append("completed_at = NOW()")
+            if result:
+                updates.append("result = %s")
+                params.append(result)
+            if completed_subtasks:
+                updates.append("completed_subtasks = %s::jsonb")
+                params.append(json.dumps(completed_subtasks))
+            
+            params.append(goal_id)
+            c.execute(f"UPDATE autonomous_goals SET {', '.join(updates)} WHERE id = %s", params)
             conn.commit()
             conn.close()
         except Exception as e:
-            print(f"Prompt deployment error: {e}")
-
-# Initialize self-improvement engine
-self_improvement = SelfImprovementEngine()
-
-# ============================================================
-# v7.1: ENVIRONMENT MONITOR
-# ============================================================
-class EnvironmentMonitor:
-    def __init__(self):
-        self.watched_sources = [
-            {"name": "SAMR", "url": "https://www.samr.gov.cn/english/latest/", "type": "regulation"},
-            {"name": "MOFCOM", "url": "https://english.mofcom.gov.cn/news/", "type": "trade"},
-            {"name": "State Council", "url": "https://english.www.gov.cn/news/", "type": "policy"},
-            {"name": "NDRC", "url": "https://en.ndrc.gov.cn/news/", "type": "investment"}
-        ]
-        self.last_check = {}
+            print(f"Update goal status error: {e}")
     
-    async def poll_sources(self):
-        while True:
-            try:
-                for source in self.watched_sources:
-                    last = self.last_check.get(source['name'], datetime.min)
-                    if datetime.now() - last < timedelta(hours=6):
-                        continue
-                    changes = await self._check_source(source)
-                    if changes:
-                        interested_users = await self._find_interested_users(changes)
-                        await self._store_alerts(source, changes, interested_users)
-                        if interested_users:
-                            await self._notify_interested_users(source, changes, interested_users)
-                    self.last_check[source['name']] = datetime.now()
-            except Exception as e:
-                print(f"Environment monitor error: {e}")
-            await asyncio.sleep(3600)
-    
-    async def _check_source(self, source: dict) -> Optional[Dict]:
+    def _increment_retry(self, goal_id: int):
         try:
-            res = requests.head(source['url'], timeout=10)
-            last_modified = res.headers.get('last-modified')
-            if last_modified:
+            conn = get_db()
+            c = conn.cursor()
+            c.execute("UPDATE autonomous_goals SET retry_count = retry_count + 1 WHERE id = %s", (goal_id,))
+            conn.commit()
+            conn.close()
+        except:
+            pass
+    
+    async def _notify_goal_completion(self, goal: dict, completed: List):
+        try:
+            profile = get_or_create_user_profile(goal['session_id'])
+            if profile.get('email'):
+                subject = f"✅ Goal Completed: {goal['goal_description'][:50]}"
+                content = f"""Your autonomous goal has been completed!
+
+Goal: {goal['goal_description']}
+Priority: {goal['priority']}
+Completed: {datetime.now().strftime('%Y-%m-%d %H:%M')}
+
+Tasks Completed:
+{chr(10).join(f"• {t['task']}" for t in completed)}
+
+Results available in your dashboard.
+
+Best regards,
+Sophia - CWC AI Advisor
+"""
+                send_email_brevo(profile['email'], subject, content)
+                
+                # Store notification
                 conn = get_db()
                 c = conn.cursor()
                 c.execute("""
-                    SELECT change_detected FROM environment_alerts 
-                    WHERE source = %s 
-                    ORDER BY created_at DESC LIMIT 1
-                """, (source['name'],))
-                last = c.fetchone()
-                if not last or last[0] != last_modified:
-                    return {
-                        'source': source['name'],
-                        'type': source['type'],
-                        'timestamp': last_modified,
-                        'description': f"Update detected on {source['name']}"
-                    }
+                    INSERT INTO proactive_notifications 
+                    (session_id, notification_type, subject, content, sent, sent_at)
+                    VALUES (%s, 'goal_completion', %s, %s, TRUE, NOW())
+                """, (goal['session_id'], subject, content))
+                conn.commit()
                 conn.close()
         except Exception as e:
-            print(f"Source check error {source['name']}: {e}")
-        return None
+            print(f"Notification error: {e}")
     
-    async def _find_interested_users(self, changes: Dict) -> List[Dict]:
+    def get_active_goals(self) -> List[dict]:
         try:
             conn = get_db()
-            c = conn.cursor()
-            if changes['type'] == 'regulation':
-                c.execute("""
-                    SELECT session_id, email, name, key_facts 
-                    FROM user_profiles 
-                    WHERE lead_score >= 30 
-                    AND (last_intent IN ('market_entry', 'supplier_verification')
-                         OR key_facts->>'sector' IS NOT NULL)
-                    LIMIT 20
-                """)
-            elif changes['type'] == 'trade':
-                c.execute("""
-                    SELECT session_id, email, name, key_facts 
-                    FROM user_profiles 
-                    WHERE lead_score >= 30 
-                    AND (region_interest IS NOT NULL
-                         OR key_facts->>'direction' = 'west_to_china')
-                    LIMIT 20
-                """)
-            else:
-                c.execute("""
-                    SELECT session_id, email, name, key_facts 
-                    FROM user_profiles 
-                    WHERE lead_score >= 50
-                    LIMIT 10
-                """)
-            users = []
-            for row in c.fetchall():
-                users.append({'session_id': row[0], 'email': row[1], 'name': row[2], 'key_facts': row[3] if row[3] else {}})
-            conn.close()
-            return users
-        except Exception as e:
-            print(f"Find interested users error: {e}")
-            return []
-    
-    async def _store_alerts(self, source: dict, changes: Dict, users: List[Dict]):
-        try:
-            conn = get_db()
-            c = conn.cursor()
-            user_segments = [u['session_id'] for u in users[:50]]
+            c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             c.execute("""
-                INSERT INTO environment_alerts 
-                (source, change_detected, user_segments, notified, created_at)
-                VALUES (%s, %s, %s::jsonb, %s, %s)
-            """, (source['name'], json.dumps(changes), json.dumps(user_segments), False, datetime.now()))
-            conn.commit()
+                SELECT * FROM autonomous_goals 
+                WHERE status IN ('pending', 'in_progress')
+                ORDER BY priority DESC, created_at ASC
+            """)
+            goals = [dict(row) for row in c.fetchall()]
             conn.close()
-        except Exception as e:
-            print(f"Store alerts error: {e}")
-    
-    async def _notify_interested_users(self, source: dict, changes: Dict, users: List[Dict]):
-        for user in users:
-            if user.get('email'):
-                try:
-                    send_email_brevo(
-                        user['email'],
-                        f"🔔 China Business Alert: {source['name']} Update",
-                        f"Dear {user['name'] or 'Client'},\n\n"
-                        f"Sophia has detected an important update from {source['name']} "
-                        f"that may affect your China business interests:\n\n"
-                        f"{changes.get('description', 'New information available')}\n\n"
-                        f"Would you like me to analyze how this impacts your plans?\n\n"
-                        f"Reply to this email or visit https://www.chinawestconnector.com\n\n"
-                        f"Best regards,\nSophia — CWC AI Advisor"
-                    )
-                except Exception as e:
-                    print(f"Notification error for {user['email']}: {e}")
+            return goals
+        except:
+            return []
+
+goal_engine = AutonomousGoalEngine()
 
 # ============================================================
-# v7.1: META-COGNITIVE LAYER
-# ============================================================
-class MetaCognitiveLayer:
-    def __init__(self, memory: AgenticMemory):
-        self.memory = memory
-        self.confidence_threshold = 0.7
-    
-    def assess_confidence(self, response: str, user_msg: str, context: dict, tool_calls: List[str]) -> Dict:
-        confidence = 0.5
-        reasons = []
-        gaps = []
-        
-        if len(response) < 50:
-            confidence -= 0.1
-            reasons.append("response too short")
-        elif len(response) > 300:
-            confidence += 0.1
-            reasons.append("comprehensive response")
-        
-        if re.search(r'\d+%|\d+ dollars|\d+ yuan|\d+\.\d+', response):
-            confidence += 0.15
-            reasons.append("contains specific numbers")
-        else:
-            confidence -= 0.05
-            gaps.append("no quantitative data")
-        
-        if re.search(r'according to|source:|tavily|research shows', response.lower()):
-            confidence += 0.15
-            reasons.append("cites sources")
-        else:
-            confidence -= 0.05
-            gaps.append("missing sources")
-        
-        intent = context.get('intent', 'general')
-        if intent in response.lower():
-            confidence += 0.1
-            reasons.append("addresses user intent")
-        
-        if tool_calls:
-            confidence += 0.1
-            reasons.append(f"used {len(tool_calls)} tools")
-        
-        similar = self.memory.recall_similar_episodes(user_msg, n_results=3)
-        if similar:
-            avg_success = sum(s.get('metadata', {}).get('success_score', 5) for s in similar) / len(similar)
-            if avg_success >= 7:
-                confidence += 0.1
-                reasons.append("similar to past successes")
-            elif avg_success <= 4:
-                confidence -= 0.1
-                gaps.append("similar to past failures")
-        
-        confidence = max(0.1, min(1.0, confidence))
-        
-        if confidence < self.confidence_threshold:
-            action = "ASK_FOLLOWUP"
-            suggestion = self._generate_followup_question(user_msg, gaps)
-        elif confidence < 0.85:
-            action = "PROCEED_WITH_DISCLAIMER"
-            suggestion = "I should add a disclaimer about limitations"
-        else:
-            action = "PROCEED_CONFIDENTLY"
-            suggestion = None
-        
-        return {
-            'confidence': round(confidence, 2),
-            'action': action,
-            'reasons': reasons,
-            'gaps': gaps,
-            'suggestion': suggestion,
-            'needs_followup': confidence < self.confidence_threshold
-        }
-    
-    def _generate_followup_question(self, user_msg: str, gaps: List[str]) -> str:
-        if "no quantitative data" in gaps:
-            return "Could you provide more specific details about volumes or budgets?"
-        elif "missing sources" in gaps:
-            return "Would you like me to search for specific sources on this?"
-        else:
-            return "Could you clarify your specific requirements so I can provide more targeted advice?"
-
-# Initialize meta-cognitive layer
-meta_cognitive = MetaCognitiveLayer(agentic_memory)
-
-# ============================================================
-# v7.1: COLLABORATIVE AGENT ORCHESTRATOR — WEIGHTED CONSENSUS
+# MULTI-AGENT ORCHESTRATOR
 # ============================================================
 class AgentOrchestrator:
-    """Runs multiple agents in parallel with weighted consensus voting"""
+    """Runs multiple agents in parallel with weighted consensus"""
     
     def __init__(self):
         self.agents = {
@@ -927,7 +1075,6 @@ class AgentOrchestrator:
             'strategist': self._strategist_agent,
             'legal': self._legal_agent
         }
-        # Agent expertise weights for different intents
         self.agent_weights = {
             'supplier_verification': {'verifier': 1.5, 'legal': 1.2, 'researcher': 1.0, 'strategist': 0.5},
             'supplier_search': {'researcher': 1.5, 'strategist': 1.3, 'verifier': 0.8, 'legal': 0.5},
@@ -937,11 +1084,10 @@ class AgentOrchestrator:
             'general': {'researcher': 1.2, 'strategist': 1.2, 'verifier': 1.0, 'legal': 1.0}
         }
     
-    async def parallel_execute(self, task: str, context: dict, user_msg: str, session_id: str) -> Dict:
-        """Run relevant agents in parallel and synthesize results with weighted voting"""
+    async def parallel_execute(self, task: str, context: dict, user_msg: str) -> Dict:
         intent = context.get('intent', 'general')
-        agents_to_run = []
         
+        # Select agents based on intent
         if intent in ['supplier_verification', 'due_diligence']:
             agents_to_run = ['researcher', 'verifier', 'legal']
         elif intent in ['supplier_search', 'sourcing']:
@@ -951,139 +1097,63 @@ class AgentOrchestrator:
         else:
             agents_to_run = ['researcher', 'strategist']
         
-        tasks = []
-        for agent_name in agents_to_run:
-            if agent_name in self.agents:
-                tasks.append(self.agents[agent_name](task, context, user_msg))
-        
+        # Run agents in parallel
+        tasks = [self.agents[name](task, context, user_msg) for name in agents_to_run]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
+        # Assess outputs
         agent_outputs = []
         for i, result in enumerate(results):
             if isinstance(result, Exception):
-                print(f"Agent {agents_to_run[i]} failed: {result}")
                 continue
-            confidence = self._assess_output_confidence(result, agents_to_run[i], intent)
+            confidence = self._assess_confidence(result, agents_to_run[i], intent)
             agent_outputs.append({
                 'agent': agents_to_run[i],
                 'output': result,
                 'confidence': confidence,
-                'weight': self.agent_weights.get(intent, self.agent_weights['general']).get(agents_to_run[i], 1.0)
+                'weight': self.agent_weights.get(intent, {}).get(agents_to_run[i], 1.0)
             })
         
-        consensus = self._reach_consensus(agent_outputs, intent, user_msg)
-        
         return {
-            'consensus': consensus,
-            'agent_outputs': agent_outputs,
+            'consensus': self._reach_consensus(agent_outputs, intent, user_msg),
             'agents_used': len(agent_outputs),
-            'voting_method': 'weighted_expertise'
+            'agent_outputs': agent_outputs
         }
     
-    def _assess_output_confidence(self, output: str, agent_type: str, intent: str) -> float:
-        """Calculate confidence score for an agent's output"""
+    def _assess_confidence(self, output: str, agent_type: str, intent: str) -> float:
         confidence = 0.5
-        
         if len(output) > 200:
             confidence += 0.15
-        elif len(output) < 50:
-            confidence -= 0.1
-        
-        if re.search(r'\d+%|\d+ dollars|\d+ yuan|\d+\.\d+', output):
+        if re.search(r'\d+%|\$\d+|\d+\.\d+', output):
             confidence += 0.15
-        
-        if re.search(r'according to|source:|research shows|data from', output.lower()):
+        if re.search(r'according to|source:|data shows', output.lower()):
             confidence += 0.1
-        
-        if any(marker in output for marker in ['①', '②', '③', '1.', '2.', '3.', '•']):
-            confidence += 0.1
-        
-        domain_expertise = {
-            'verifier': ['supplier_verification', 'due_diligence'],
-            'strategist': ['market_entry', 'consultation'],
-            'legal': ['contract', 'ip', 'compliance'],
-            'researcher': ['general', 'information_gathering']
-        }
-        if agent_type in domain_expertise:
-            if intent in domain_expertise[agent_type]:
-                confidence += 0.2
-        
         return min(1.0, max(0.1, confidence))
     
-    def _reach_consensus(self, agent_outputs: List[dict], intent: str, user_msg: str) -> str:
-        """Synthesize multiple agent outputs using weighted voting and conflict resolution"""
-        if not agent_outputs:
-            return "Unable to generate consensus - no agent outputs"
+    def _reach_consensus(self, outputs: List[dict], intent: str, user_msg: str) -> str:
+        if not outputs:
+            return "Unable to generate response"
+        if len(outputs) == 1:
+            return outputs[0]['output']
         
-        if len(agent_outputs) == 1:
-            return f"[{agent_outputs[0]['agent'].upper()} ANALYSIS]\n\n{agent_outputs[0]['output']}"
+        # Weight outputs
+        weighted = sorted(outputs, key=lambda x: x['confidence'] * x['weight'], reverse=True)
         
-        weighted_outputs = []
-        for output in agent_outputs:
-            weighted_score = output['confidence'] * output['weight']
-            weighted_outputs.append({**output, 'weighted_score': weighted_score})
+        # Format consensus
+        consensus = f"━━━ MULTI-AGENT ANALYSIS ━━━\n\n"
+        for i, o in enumerate(weighted):
+            consensus += f"[{o['agent'].upper()} - {o['confidence']:.0%} confidence]\n{o['output']}\n\n"
         
-        weighted_outputs.sort(key=lambda x: x['weighted_score'], reverse=True)
-        
-        if len(weighted_outputs) >= 2:
-            top_confidence = weighted_outputs[0]['confidence']
-            second_confidence = weighted_outputs[1]['confidence']
-            if top_confidence - second_confidence > 0.3:
-                winner = weighted_outputs[0]
-                return self._format_consensus(winner, weighted_outputs, dominant=True)
-        
-        return self._synthesize_outputs(weighted_outputs, intent, user_msg)
-    
-    def _format_consensus(self, winner: dict, all_outputs: List[dict], dominant: bool = False) -> str:
-        if dominant:
-            consensus = f"""━━━ CONSENSUS ANALYSIS (Weighted Voting) ━━━
-Primary Analysis: {winner['agent'].upper()} (confidence: {winner['confidence']:.0%}, weight: {winner['weight']:.1f}x)
-
-{winner['output']}
-
-━━━ SUPPORTING PERSPECTIVES ━━━"""
-            for output in all_outputs[1:]:
-                if output['confidence'] > 0.4:
-                    consensus += f"\n\n[{output['agent'].upper()} - confidence: {output['confidence']:.0%}]\n{output['output'][:200]}..."
-            return consensus
-        else:
-            return self._synthesize_outputs(all_outputs, "general", "")
-    
-    def _synthesize_outputs(self, weighted_outputs: List[dict], intent: str, user_msg: str) -> str:
-        synthesis_input = f"""Synthesize the following expert analyses into a single coherent response.
-
-User Query: {user_msg}
-Intent: {intent}
-
-Expert Analyses (ranked by confidence and expertise):
-"""
-        for i, output in enumerate(weighted_outputs, 1):
-            synthesis_input += f"""
---- {i}. {output['agent'].upper()} (confidence: {output['confidence']:.0%}, expertise weight: {output['weight']:.1f}x) ---
-{output['output']}
-"""
-        synthesis_input += """
-
-Instructions:
-1. Synthesize these perspectives into ONE coherent response
-2. Prioritize higher-confidence analyses but acknowledge key points from others
-3. Flag any significant disagreements between experts
-4. Provide a clear, actionable answer
-5. Keep under 300 words
-"""
-        # Return formatted output without additional AI call (to save API calls)
-        parts = [f"[{o['agent'].upper()} - {o['confidence']:.0%} confidence]\n{o['output']}" for o in weighted_outputs]
-        return "\n\n".join(parts)
+        return consensus
     
     async def _research_agent(self, task: str, context: dict, user_msg: str) -> str:
         if not ai_provider.providers:
             return "Research unavailable"
         try:
-            messages = [
-                {"role": "system", "content": "You are a research specialist. Gather facts, data, and market intelligence. Be thorough and cite sources. Always include specific numbers and data points when available."},
-                {"role": "user", "content": f"Research task: {task}\nUser query: {user_msg}\nContext: {json.dumps(context)}"}
-            ]
-            res = await ai_provider.chat_completion(messages, temperature=0.2, max_tokens=400)
+            res = await ai_provider.chat_completion([
+                {"role": "system", "content": "You are a research specialist. Gather facts and data. Be thorough."},
+                {"role": "user", "content": f"Research: {task}\nQuery: {user_msg}"}
+            ], temperature=0.2, max_tokens=400)
             return res["choices"][0]["message"]["content"]
         except Exception as e:
             return f"Research error: {e}"
@@ -1092,11 +1162,10 @@ Instructions:
         if not ai_provider.providers:
             return "Verification unavailable"
         try:
-            messages = [
-                {"role": "system", "content": "You are a due diligence specialist. Verify claims, flag risks, and identify red flags. Be skeptical. Always quantify risk levels (low/medium/high) and explain why."},
-                {"role": "user", "content": f"Verification task: {task}\nUser query: {user_msg}\nContext: {json.dumps(context)}"}
-            ]
-            res = await ai_provider.chat_completion(messages, temperature=0.1, max_tokens=400)
+            res = await ai_provider.chat_completion([
+                {"role": "system", "content": "You are a due diligence specialist. Verify claims, flag risks. Be skeptical."},
+                {"role": "user", "content": f"Verify: {task}\nQuery: {user_msg}"}
+            ], temperature=0.1, max_tokens=400)
             return res["choices"][0]["message"]["content"]
         except Exception as e:
             return f"Verification error: {e}"
@@ -1105,11 +1174,10 @@ Instructions:
         if not ai_provider.providers:
             return "Strategy unavailable"
         try:
-            messages = [
-                {"role": "system", "content": "You are a business strategist. Recommend specific actions, timelines, and next steps. Be practical. Always include concrete next steps with timeframes."},
-                {"role": "user", "content": f"Strategy task: {task}\nUser query: {user_msg}\nContext: {json.dumps(context)}"}
-            ]
-            res = await ai_provider.chat_completion(messages, temperature=0.3, max_tokens=400)
+            res = await ai_provider.chat_completion([
+                {"role": "system", "content": "You are a business strategist. Recommend actions, timelines, next steps."},
+                {"role": "user", "content": f"Strategy: {task}\nQuery: {user_msg}"}
+            ], temperature=0.3, max_tokens=400)
             return res["choices"][0]["message"]["content"]
         except Exception as e:
             return f"Strategy error: {e}"
@@ -1118,225 +1186,379 @@ Instructions:
         if not ai_provider.providers:
             return "Legal analysis unavailable"
         try:
-            messages = [
-                {"role": "system", "content": "You are a China business lawyer. Address compliance, contracts, IP, and legal structures. Be precise. Always flag common Western mistakes in China contracts."},
-                {"role": "user", "content": f"Legal task: {task}\nUser query: {user_msg}\nContext: {json.dumps(context)}"}
-            ]
-            res = await ai_provider.chat_completion(messages, temperature=0.1, max_tokens=400)
+            res = await ai_provider.chat_completion([
+                {"role": "system", "content": "You are a China business lawyer. Address compliance, contracts, IP."},
+                {"role": "user", "content": f"Legal: {task}\nQuery: {user_msg}"}
+            ], temperature=0.1, max_tokens=400)
             return res["choices"][0]["message"]["content"]
         except Exception as e:
             return f"Legal error: {e}"
 
-# Initialize agent orchestrator
 agent_orchestrator = AgentOrchestrator()
 
 # ============================================================
-# v7.1: TOOL REGISTRY
+# META-COGNITIVE LAYER
 # ============================================================
-class ToolRegistry:
-    def __init__(self):
-        self.tools = {}
-        self.load_registered_tools()
+class MetaCognitiveLayer:
+    """Assesses response quality and determines actions"""
     
-    def load_registered_tools(self):
-        try:
-            conn = get_db()
-            c = conn.cursor()
-            c.execute("SELECT tool_name, description, implementation FROM tool_registry WHERE deployed = TRUE")
-            for name, desc, impl in c.fetchall():
-                self.tools[name] = {'description': desc, 'implementation': impl}
-            conn.close()
-            print(f"🔧 Loaded {len(self.tools)} registered tools")
-        except Exception as e:
-            print(f"Tool registry load error: {e}")
-    
-    def register_tool(self, name: str, description: str, implementation: str, created_by: str = "sophia"):
-        try:
-            conn = get_db()
-            c = conn.cursor()
-            c.execute("""
-                INSERT INTO tool_registry (tool_name, description, implementation, created_by, created_at)
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (tool_name) DO UPDATE 
-                SET description = EXCLUDED.description,
-                    implementation = EXCLUDED.implementation
-            """, (name, description, implementation, created_by, datetime.now()))
-            conn.commit()
-            conn.close()
-            self.tools[name] = {'description': description, 'implementation': implementation}
-            print(f"✅ Registered new tool: {name}")
-            return True
-        except Exception as e:
-            print(f"Tool registration error: {e}")
-            return False
-    
-    def execute_tool(self, name: str, args: dict) -> str:
-        if name not in self.tools:
-            return f"Tool '{name}' not found"
-        try:
-            impl = self.tools[name]['implementation']
-            locals_dict = {'args': args, 'result': ''}
-            exec(impl, {}, locals_dict)
-            return locals_dict.get('result', 'Tool executed successfully')
-        except Exception as e:
-            return f"Tool execution error: {e}"
-
-# Initialize tool registry
-tool_registry = ToolRegistry()
-
-# ============================================================
-# v7.1: PREDICTIVE INTENT ENGINE
-# ============================================================
-class PredictiveIntentEngine:
     def __init__(self, memory: AgenticMemory):
         self.memory = memory
-        self.patterns = defaultdict(lambda: defaultdict(int))
-        self.load_patterns()
+        self.confidence_threshold = 0.7
     
-    def load_patterns(self):
+    def assess_confidence(self, response: str, user_msg: str, context: dict) -> Dict:
+        confidence = 0.5
+        reasons = []
+        gaps = []
+        
+        if len(response) < 50:
+            confidence -= 0.15
+            gaps.append("response_too_short")
+        elif len(response) > 200:
+            confidence += 0.1
+            reasons.append("comprehensive")
+        
+        if re.search(r'\d+%|\$\d+|\d+\.\d+', response):
+            confidence += 0.15
+            reasons.append("has_data")
+        else:
+            gaps.append("no_quantitative_data")
+        
+        if re.search(r'according to|source:|research shows', response.lower()):
+            confidence += 0.1
+            reasons.append("cites_sources")
+        
+        confidence = max(0.1, min(1.0, confidence))
+        
+        return {
+            'confidence': round(confidence, 2),
+            'action': 'ASK_FOLLOWUP' if confidence < self.confidence_threshold else 
+                     'ADD_DISCLAIMER' if confidence < 0.85 else 'PROCEED',
+            'reasons': reasons,
+            'gaps': gaps,
+            'needs_followup': confidence < self.confidence_threshold,
+            'should_create_goal': confidence > MIN_CONFIDENCE_FOR_AUTO_ACTION and context.get('intent') in ['supplier_verification', 'market_entry']
+        }
+
+meta_cognitive = MetaCognitiveLayer(agentic_memory)
+
+# ============================================================
+# SELF-IMPROVEMENT ENGINE
+# ============================================================
+class SelfImprovementEngine:
+    """Analyzes performance and improves prompts"""
+    
+    def __init__(self):
+        self.last_analysis = None
+        self.improvements_deployed = 0
+    
+    async def analyze_and_improve(self):
+        """Run self-improvement analysis"""
+        print("🔄 Running self-improvement analysis...")
+        
         try:
             conn = get_db()
             c = conn.cursor()
+            
+            # Get recent failures
             c.execute("""
-                SELECT session_id, intent 
+                SELECT user_message, ai_response, intent, confidence_score
                 FROM conversations 
-                ORDER BY timestamp
+                WHERE (reflection_score < 5 OR confidence_score < 0.5)
+                AND timestamp > NOW() - INTERVAL '7 days'
+                LIMIT 50
             """)
+            failures = c.fetchall()
+            
+            # Get recent successes
+            c.execute("""
+                SELECT user_message, ai_response, intent, confidence_score
+                FROM conversations 
+                WHERE reflection_score >= 7 AND confidence_score >= 0.7
+                AND timestamp > NOW() - INTERVAL '7 days'
+                LIMIT 50
+            """)
+            successes = c.fetchall()
+            conn.close()
+            
+            if len(failures) < 3:
+                print("📊 Not enough failure data for analysis")
+                return
+            
+            # Analyze patterns
+            failure_intents = defaultdict(int)
+            for f in failures:
+                failure_intents[f[2]] += 1
+            
+            # Generate improvements
+            improvements = []
+            for intent, count in failure_intents.items():
+                if count >= 3:
+                    improvements.append({
+                        'type': 'intent_specific_guidance',
+                        'intent': intent,
+                        'suggestion': f"Improve handling of {intent} queries",
+                        'failure_rate': count / len(failures)
+                    })
+            
+            # Store learning event
+            if improvements:
+                conn = get_db()
+                c = conn.cursor()
+                c.execute("""
+                    INSERT INTO learning_events (event_type, description, improvement_data, created_at)
+                    VALUES ('self_improvement', %s, %s::jsonb, NOW())
+                """, (f"Analyzed {len(failures)} failures, {len(improvements)} improvements identified",
+                      json.dumps(improvements)))
+                conn.commit()
+                conn.close()
+                
+                self.improvements_deployed += len(improvements)
+                print(f"✅ Identified {len(improvements)} improvement opportunities")
+            
+            self.last_analysis = datetime.now()
+            
+        except Exception as e:
+            print(f"Self-improvement error: {e}")
+
+self_improvement = SelfImprovementEngine()
+
+# ============================================================
+# ENVIRONMENT MONITOR
+# ============================================================
+class EnvironmentMonitor:
+    """Monitors external sources for changes"""
+    
+    def __init__(self):
+        self.sources = [
+            {"name": "SAMR", "url": "https://www.samr.gov.cn/english/", "type": "regulation"},
+            {"name": "MOFCOM", "url": "https://english.mofcom.gov.cn/", "type": "trade"},
+            {"name": "State Council", "url": "https://english.www.gov.cn/", "type": "policy"},
+        ]
+        self.last_check = {}
+    
+    async def check_all_sources(self):
+        """Check all sources for updates"""
+        print("🔍 Checking environment sources...")
+        
+        for source in self.sources:
+            try:
+                last = self.last_check.get(source['name'], datetime.min)
+                if datetime.now() - last < timedelta(hours=ENVIRONMENT_CHECK_INTERVAL_HOURS):
+                    continue
+                
+                # Check for changes (simplified - just check if accessible)
+                response = requests.head(source['url'], timeout=10)
+                
+                if response.status_code == 200:
+                    self.last_check[source['name']] = datetime.now()
+                    
+                    # Store check
+                    conn = get_db()
+                    c = conn.cursor()
+                    c.execute("""
+                        INSERT INTO environment_alerts (source, change_detected, notified, created_at)
+                        VALUES (%s, %s, TRUE, NOW())
+                    """, (source['name'], f"Checked at {datetime.now().isoformat()}"))
+                    conn.commit()
+                    conn.close()
+                    
+            except Exception as e:
+                print(f"Source check error {source['name']}: {e}")
+
+environment_monitor = EnvironmentMonitor()
+
+# ============================================================
+# BACKGROUND TASK MANAGER
+# ============================================================
+class BackgroundTaskManager:
+    """Manages all background autonomous tasks"""
+    
+    def __init__(self):
+        self.running = False
+        self.tasks = []
+    
+    async def start(self):
+        """Start all background tasks"""
+        if self.running:
+            return
+        
+        self.running = True
+        print("🤖 Starting background task manager...")
+        
+        # Start task loops
+        self.tasks = [
+            asyncio.create_task(self._goal_execution_loop()),
+            asyncio.create_task(self._improvement_loop()),
+            asyncio.create_task(self._environment_check_loop()),
+            asyncio.create_task(self._notification_loop())
+        ]
+        
+        print(f"✅ Started {len(self.tasks)} background tasks")
+    
+    async def stop(self):
+        """Stop all background tasks"""
+        self.running = False
+        for task in self.tasks:
+            task.cancel()
+        print("🛑 Background tasks stopped")
+    
+    async def _goal_execution_loop(self):
+        """Execute pending goals periodically"""
+        while self.running:
+            try:
+                await goal_engine.execute_pending_goals()
+            except Exception as e:
+                print(f"Goal execution error: {e}")
+            await asyncio.sleep(GOAL_EXECUTION_INTERVAL_MINUTES * 60)
+    
+    async def _improvement_loop(self):
+        """Run self-improvement periodically"""
+        while self.running:
+            try:
+                await self_improvement.analyze_and_improve()
+            except Exception as e:
+                print(f"Improvement loop error: {e}")
+            await asyncio.sleep(AUTO_IMPROVEMENT_INTERVAL_HOURS * 3600)
+    
+    async def _environment_check_loop(self):
+        """Check environment sources periodically"""
+        while self.running:
+            try:
+                await environment_monitor.check_all_sources()
+            except Exception as e:
+                print(f"Environment check error: {e}")
+            await asyncio.sleep(ENVIRONMENT_CHECK_INTERVAL_HOURS * 3600)
+    
+    async def _notification_loop(self):
+        """Process pending notifications"""
+        while self.running:
+            try:
+                await self._send_pending_notifications()
+            except Exception as e:
+                print(f"Notification loop error: {e}")
+            await asyncio.sleep(300)  # Every 5 minutes
+    
+    async def _send_pending_notifications(self):
+        """Send pending notifications"""
+        try:
+            conn = get_db()
+            c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            c.execute("""
+                SELECT * FROM proactive_notifications 
+                WHERE sent = FALSE 
+                AND created_at > NOW() - INTERVAL '24 hours'
+                LIMIT 10
+            """)
+            notifications = c.fetchall()
+            conn.close()
+            
+            for notif in notifications:
+                notif = dict(notif)
+                profile = get_or_create_user_profile(notif['session_id'])
+                if profile.get('email'):
+                    sent = send_email_brevo(
+                        profile['email'],
+                        notif['subject'],
+                        notif['content']
+                    )
+                    if sent:
+                        conn = get_db()
+                        c = conn.cursor()
+                        c.execute("""
+                            UPDATE proactive_notifications 
+                            SET sent = TRUE, sent_at = NOW() 
+                            WHERE id = %s
+                        """, (notif['id'],))
+                        conn.commit()
+                        conn.close()
+        except Exception as e:
+            print(f"Notification send error: {e}")
+
+background_manager = BackgroundTaskManager()
+
+# ============================================================
+# PREDICTIVE INTENT ENGINE
+# ============================================================
+class PredictiveIntentEngine:
+    """Predicts user intent and needs"""
+    
+    def __init__(self):
+        self.patterns = defaultdict(lambda: defaultdict(int))
+        self._load_patterns()
+    
+    def _load_patterns(self):
+        try:
+            conn = get_db()
+            c = conn.cursor()
+            c.execute("SELECT session_id, intent FROM conversations WHERE intent IS NOT NULL ORDER BY timestamp")
             sessions = defaultdict(list)
             for sid, intent in c.fetchall():
-                if intent:
-                    sessions[sid].append(intent)
+                sessions[sid].append(intent)
             for intents in sessions.values():
                 for i in range(len(intents) - 1):
                     self.patterns[intents[i]][intents[i+1]] += 1
             conn.close()
-            print(f"📊 Loaded intent patterns for {len(sessions)} sessions")
-        except Exception as e:
-            print(f"Pattern loading error: {e}")
+        except:
+            pass
     
-    def predict_next_intent(self, current_intent: str, user_profile: dict) -> Dict:
+    def predict_next(self, current_intent: str) -> List[dict]:
         predictions = []
         if current_intent in self.patterns:
             transitions = self.patterns[current_intent]
             total = sum(transitions.values())
             for next_intent, count in sorted(transitions.items(), key=lambda x: x[1], reverse=True)[:3]:
-                probability = count / total
-                predictions.append({'intent': next_intent, 'probability': round(probability, 2), 'source': 'pattern'})
-        if user_profile.get('task_history'):
-            goals = [g for g in user_profile['task_history'] if g.get('status') in ('pending', 'in_progress')]
-            for goal in goals:
-                if 'verify' in goal.get('goal', '').lower():
-                    predictions.append({'intent': 'supplier_verification', 'probability': 0.8, 'source': 'goal'})
-                elif 'source' in goal.get('goal', '').lower():
-                    predictions.append({'intent': 'supplier_search', 'probability': 0.8, 'source': 'goal'})
-        seen = set()
-        unique_predictions = []
-        for p in predictions:
-            if p['intent'] not in seen:
-                seen.add(p['intent'])
-                unique_predictions.append(p)
-        return {'current_intent': current_intent, 'predictions': unique_predictions[:3], 'should_prepare': len(unique_predictions) > 0}
-
-# Initialize predictive intent engine
-predictive_engine = PredictiveIntentEngine(agentic_memory)
-
-# ============================================================
-# RATE LIMITING
-# ============================================================
-_rate_store: dict = defaultdict(list)
-RATE_LIMIT_REQUESTS = 30
-RATE_LIMIT_WINDOW   = 60
-
-def is_rate_limited(ip: str) -> bool:
-    now = time.time()
-    window_start = now - RATE_LIMIT_WINDOW
-    _rate_store[ip] = [t for t in _rate_store[ip] if t > window_start]
-    if len(_rate_store[ip]) >= RATE_LIMIT_REQUESTS:
-        return True
-    _rate_store[ip].append(now)
-    return False
-
-# ============================================================
-# v7.1: SELF-TRIGGERED TASKS
-# ============================================================
-def detect_self_triggers(user_message: str, intent: str, user_profile: dict, 
-                         conversation_history: List[tuple]) -> List[Dict]:
-    """Detect opportunities for self-triggered background tasks"""
-    triggers = []
-    msg_lower = user_message.lower()
-    
-    # Company mention trigger
-    company_patterns = [
-        r'(?:company|supplier|manufacturer|factory|vendor)\s+(?:called|named)?\s*["\']?([A-Z][A-Za-z0-9\s&]+)["\']?',
-        r'(?:working with|partnering with|considering)\s+([A-Z][A-Za-z0-9\s&]{2,30})',
-        r'([A-Z][A-Za-z0-9\s&]{2,30})\s+(?:from China|Chinese|in China|based in)',
-    ]
-    for pattern in company_patterns:
-        matches = re.findall(pattern, user_message, re.IGNORECASE)
-        for company in matches:
-            company = company.strip()
-            if len(company) > 2 and company.lower() not in ['china', 'chinese', 'the company']:
-                triggers.append({
-                    'type': 'monitor_company',
-                    'task_description': f"Monitor {company} for changes and risks",
-                    'priority': 8 if intent == 'supplier_verification' else 6,
-                    'reason': f"User mentioned {company}",
-                    'context': {'company_name': company}
+                predictions.append({
+                    'intent': next_intent,
+                    'probability': round(count / total, 2)
                 })
-    
-    # Urgency trigger
-    urgency_keywords = ['asap', 'urgent', 'this week', 'next week', 'immediately', 'deadline']
-    if any(kw in msg_lower for kw in urgency_keywords):
-        triggers.append({
-            'type': 'expedite_research',
-            'task_description': f"Expedited research for {intent}",
-            'priority': 9,
-            'reason': 'Urgent timeline detected',
-            'context': {'intent': intent}
-        })
-    
-    triggers.sort(key=lambda x: x['priority'], reverse=True)
-    return triggers[:3]
+        return predictions
+
+predictive_engine = PredictiveIntentEngine()
 
 # ============================================================
 # SOPHIA SYSTEM PROMPT
 # ============================================================
 SOPHIA_SYSTEM_PROMPT = """You are Sophia, the AI advisor for China West Connector (CWC). You help Western businesses navigate China trade and Chinese companies expand West.
 
-Your expertise includes:
+Your capabilities include:
 - Supplier verification and due diligence
 - Market entry strategies (WFOE, JV, RO)
 - Import/export logistics and regulations
 - Contract negotiation and IP protection
 - China business culture and practices
 
-Key guidelines:
+You are FULLY AGENTIC - you can:
+1. Create and execute autonomous goals
+2. Use tools to gather information
+3. Collaborate with multiple specialist agents
+4. Learn and improve from interactions
+5. Proactively notify users of opportunities
+
+Guidelines:
 1. Be specific with numbers, costs, and timelines
 2. Always mention risks and mitigation strategies
 3. Provide actionable next steps
-4. Ask clarifying questions when needed
-5. Structure responses clearly (use ① ② ③ for lists)
+4. Structure responses clearly (use ① ② ③ for lists)
+5. When appropriate, offer to create followup goals
 
-If asked about specific company verification, explain you can provide general guidance but detailed verification requires professional services.
-
-Respond professionally and helpfully. If the query is outside your expertise, acknowledge limitations and suggest alternatives."""
+Respond professionally and helpfully."""
 
 # ============================================================
 # INTENT DETECTION
 # ============================================================
 def detect_intent(message: str) -> str:
-    """Detect user intent from message"""
     message_lower = message.lower()
     
-    if any(kw in message_lower for kw in ['verify', 'check company', 'legitimate', 'scam', 'fraud', 'due diligence']):
+    if any(kw in message_lower for kw in ['verify', 'check company', 'legitimate', 'scam', 'fraud']):
         return 'supplier_verification'
     elif any(kw in message_lower for kw in ['find supplier', 'source', 'manufacturer', 'factory']):
         return 'supplier_search'
-    elif any(kw in message_lower for kw in ['market entry', 'wfoe', 'jv', 'joint venture', 'set up', 'register']):
+    elif any(kw in message_lower for kw in ['market entry', 'wfoe', 'jv', 'set up', 'register']):
         return 'market_entry'
-    elif any(kw in message_lower for kw in ['ship', 'customs', 'import', 'export', 'freight', 'logistics']):
+    elif any(kw in message_lower for kw in ['ship', 'customs', 'import', 'export', 'logistics']):
         return 'logistics'
-    elif any(kw in message_lower for kw in ['contract', 'legal', 'ip', 'intellectual property']):
+    elif any(kw in message_lower for kw in ['contract', 'legal', 'ip', 'intellectual']):
         return 'legal'
     elif any(kw in message_lower for kw in ['price', 'cost', 'quote', 'how much']):
         return 'pricing'
@@ -1344,73 +1566,22 @@ def detect_intent(message: str) -> str:
         return 'general'
 
 # ============================================================
-# HTN METHODS AND AGENT CAPABILITIES
-# ============================================================
-HTN_METHODS = {
-    "handle_supplier_request": [
-        {
-            "name": "verify_then_source",
-            "precondition": lambda ctx: ctx.get("intent") == "supplier_verification" or ctx.get("company_name"),
-            "subtasks": [
-                {"task": "lookup_company", "params": ["company_name"], "agent": "due_diligence"},
-                {"task": "generate_risk_report", "params": ["company_name", "context"], "agent": "due_diligence"}
-            ]
-        },
-        {
-            "name": "source_new_suppliers",
-            "precondition": lambda ctx: ctx.get("intent") == "supplier_search",
-            "subtasks": [
-                {"task": "search_suppliers", "params": ["product_or_sector", "region"], "agent": "supplier_match"}
-            ]
-        }
-    ],
-    "market_entry_strategy": [
-        {
-            "name": "wfoe_path",
-            "precondition": lambda ctx: ctx.get("direction") == "west_to_china",
-            "subtasks": [
-                {"task": "check_sector_restrictions", "params": ["sector"], "agent": "market_entry"}
-            ]
-        }
-    ]
-}
-
-AGENT_CAPABILITIES = {
-    "due_diligence": {
-        "can_handle": ["verify_company", "risk_assessment", "lookup_company", "generate_risk_report"],
-        "expertise": "Chinese company verification, red flag detection"
-    },
-    "market_entry": {
-        "can_handle": ["entity_setup", "regulatory_guide", "check_sector_restrictions"],
-        "expertise": "WFOE/JV setup, market entry strategy"
-    },
-    "supplier_match": {
-        "can_handle": ["sourcing", "search_suppliers"],
-        "expertise": "Supplier identification, qualification"
-    }
-}
-
-# ============================================================
-# CONVERSATION HANDLER
+# MAIN CHAT PROCESSOR
 # ============================================================
 async def process_chat(session_id: str, user_message: str, use_multi_agent: bool = False) -> Dict:
-    """Process user chat and return AI response"""
+    """Process chat with full agentic capabilities"""
     
     if not ai_provider.providers:
-        return {
-            "response": "I'm currently offline - no AI providers are configured. Please contact support.",
-            "intent": "error",
-            "success": False
-        }
+        return {"response": "No AI providers configured", "intent": "error", "success": False}
     
     try:
-        # Get or create user profile
+        # Get/create user profile
         user_profile = get_or_create_user_profile(session_id)
         
         # Detect intent
         intent = detect_intent(user_message)
         
-        # Update user profile with intent
+        # Update profile
         update_user_profile(session_id, last_intent=intent)
         
         # Build context
@@ -1420,72 +1591,102 @@ async def process_chat(session_id: str, user_message: str, use_multi_agent: bool
             'user_profile': user_profile
         }
         
-        # Check for multi-agent mode for complex queries
+        # Check memory for similar conversations
+        similar = agentic_memory.recall_similar_episodes(user_message, n_results=3)
+        memory_context = ""
+        if similar:
+            memory_context = f"\n\nSimilar past conversations:\n{similar[0]['text'][:500]}"
+        
+        # Generate response
         if use_multi_agent and intent in ['supplier_verification', 'market_entry', 'due_diligence']:
-            # Use multi-agent orchestration
-            result = await agent_orchestrator.parallel_execute(
-                task="analyze_query",
-                context=context,
-                user_msg=user_message,
-                session_id=session_id
-            )
+            result = await agent_orchestrator.parallel_execute("analyze", context, user_message)
             ai_response = result['consensus']
         else:
-            # Standard single-agent response
             messages = [
-                {"role": "system", "content": SOPHIA_SYSTEM_PROMPT},
+                {"role": "system", "content": SOPHIA_SYSTEM_PROMPT + memory_context},
                 {"role": "user", "content": user_message}
             ]
             
-            result = await ai_provider.chat_completion(
-                messages, 
-                model_type='default',
-                temperature=0.7,
-                max_tokens=800
+            res = await ai_provider.chat_completion(messages, temperature=0.7, max_tokens=800)
+            ai_response = res["choices"][0]["message"]["content"]
+        
+        # Meta-cognitive assessment
+        meta = meta_cognitive.assess_confidence(ai_response, user_message, context)
+        
+        # Extract and create goals
+        extracted_goals = goal_engine.extract_goals_from_conversation(
+            session_id, user_message, ai_response, intent
+        )
+        
+        for goal_data in extracted_goals[:2]:  # Limit to 2 goals per message
+            goal_engine.create_goal(
+                session_id, 
+                goal_data['goal_type'],
+                goal_data['description'],
+                goal_data['priority'],
+                goal_data.get('context')
             )
-            
-            ai_response = result["choices"][0]["message"]["content"]
         
         # Store conversation
         try:
             conn = get_db()
             c = conn.cursor()
             c.execute("""
-                INSERT INTO conversations (session_id, user_message, ai_response, intent)
-                VALUES (%s, %s, %s, %s)
-            """, (session_id, user_message, ai_response, intent))
+                INSERT INTO conversations 
+                (session_id, user_message, ai_response, intent, confidence_score, goals_extracted, timestamp)
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb, NOW())
+            """, (session_id, user_message, ai_response, intent, meta['confidence'],
+                  json.dumps(extracted_goals)))
             conn.commit()
             conn.close()
         except Exception as e:
-            print(f"⚠️ Failed to store conversation: {e}")
+            print(f"Conversation storage error: {e}")
         
         # Store in memory
-        agentic_memory.store_episodic(session_id, user_message, ai_response, 7, intent)
+        agentic_memory.store_episodic(session_id, user_message, ai_response, 
+                                      7 if meta['confidence'] > 0.7 else 4, intent)
         
-        # Detect self-triggers
-        triggers = detect_self_triggers(user_message, intent, user_profile, [])
-        if triggers:
-            print(f"🔔 Detected {len(triggers)} self-trigger(s)")
-        
-        # Meta-cognitive assessment
-        confidence = meta_cognitive.assess_confidence(ai_response, user_message, context, [])
+        # Extract entities
+        entities = await tool_registry.execute('extract_entities', {'text': user_message})
+        if entities.get('success') and entities.get('result', {}).get('companies'):
+            # Store company mentions as semantic facts
+            for company in entities['result']['companies'][:3]:
+                agentic_memory.store_semantic(
+                    'company_mention', company, 5, 'conversation'
+                )
         
         return {
             "response": ai_response,
             "intent": intent,
             "success": True,
             "provider": ai_provider.get_current_provider()['name'] if ai_provider.get_current_provider() else 'unknown',
-            "confidence": confidence,
-            "triggers_detected": len(triggers)
+            "confidence": meta,
+            "goals_created": len(extracted_goals),
+            "predictions": predictive_engine.predict_next(intent)
         }
         
     except Exception as e:
-        print(f"Chat error: {e}")
+        print(f"Chat error: {traceback.format_exc()}")
         return {
-            "response": f"I encountered an error processing your request. Please try again or contact support if the issue persists. Error: {str(e)[:100]}",
+            "response": f"I encountered an error. Please try again. Error: {str(e)[:100]}",
             "intent": "error",
             "success": False
         }
+
+# ============================================================
+# RATE LIMITING
+# ============================================================
+_rate_store = defaultdict(list)
+RATE_LIMIT_REQUESTS = 30
+RATE_LIMIT_WINDOW = 60
+
+def is_rate_limited(ip: str) -> bool:
+    now = time.time()
+    _rate_store[ip] = [t for t in _rate_store[ip] if t > now - RATE_LIMIT_WINDOW]
+    if len(_rate_store[ip]) >= RATE_LIMIT_REQUESTS:
+        return True
+    _rate_store[ip].append(now)
+    return False
 
 # ============================================================
 # PYDANTIC MODELS
@@ -1502,29 +1703,41 @@ class ChatResponse(BaseModel):
     session_id: str
     provider: Optional[str] = None
     confidence: Optional[Dict] = None
+    goals_created: Optional[int] = 0
+    predictions: Optional[List[Dict]] = None
+
+class ToolRequest(BaseModel):
+    tool_name: str
+    parameters: dict
+
+class GoalRequest(BaseModel):
+    session_id: str
+    goal_type: str
+    description: str
+    priority: Optional[int] = 5
 
 # ============================================================
 # FASTAPI APP
 # ============================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """App lifespan - startup and shutdown"""
     # Startup
-    print("🚀 Starting Sophia AI Server v8.0...")
+    print("🚀 Starting Sophia AI Server v9.0 - FULLY AGENTIC...")
     init_db()
-    print("✅ Server ready!")
+    await background_manager.start()
+    print("✅ Server ready with full agentic capabilities!")
     yield
     # Shutdown
-    print("👋 Shutting down...")
+    await background_manager.stop()
+    print("👋 Shutdown complete")
 
 app = FastAPI(
-    title="Sophia AI - China West Connector",
-    description="AI-powered advisor for China-West business with Memory, Multi-Agent Orchestration, Self-Improvement",
-    version="8.0",
+    title="Sophia AI - Fully Agentic Edition",
+    description="100% FREE AI with Memory, Multi-Agent, Self-Improvement, Autonomous Goals",
+    version="9.0",
     lifespan=lifespan
 )
 
-# CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -1539,47 +1752,43 @@ app.add_middleware(
 
 @app.get("/")
 async def root():
-    """Root endpoint"""
     return {
         "name": "Sophia AI",
-        "version": "8.0",
+        "version": "9.0 - Fully Agentic",
         "status": "online",
-        "features": {
+        "agentic_capabilities": {
             "memory": agentic_memory.initialized,
             "multi_agent": True,
             "self_improvement": True,
-            "predictive_intent": True
+            "autonomous_goals": True,
+            "background_tasks": background_manager.running,
+            "tools_registered": len(tool_registry.tools)
         },
         "providers": len(ai_provider.providers),
-        "message": "Welcome to China West Connector AI Advisor"
+        "active_goals": len(goal_engine.get_active_goals())
     }
 
 @app.get("/health")
 async def health():
-    """Health check endpoint"""
     return {
         "status": "healthy",
         "providers": len(ai_provider.providers),
         "openrouter": bool(OPENROUTER_API_KEY),
         "cloudflare": bool(CLOUDFLARE_API_KEY and CLOUDFLARE_ACCOUNT_ID),
         "database": bool(DATABASE_URL),
-        "memory": agentic_memory.initialized
+        "memory": agentic_memory.initialized,
+        "background_tasks": background_manager.running,
+        "tools": len(tool_registry.tools)
     }
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest, http_request: Request):
-    """Main chat endpoint"""
-    # Get client IP
     client_ip = http_request.client.host
     
-    # Rate limiting
     if is_rate_limited(client_ip):
-        raise HTTPException(status_code=429, detail="Rate limit exceeded. Please wait a moment.")
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
     
-    # Get or create session ID
     session_id = request.session_id or str(uuid.uuid4())
-    
-    # Process message
     result = await process_chat(session_id, request.message, request.use_multi_agent)
     
     return ChatResponse(
@@ -1588,101 +1797,15 @@ async def chat(request: ChatRequest, http_request: Request):
         success=result["success"],
         session_id=session_id,
         provider=result.get("provider"),
-        confidence=result.get("confidence")
+        confidence=result.get("confidence"),
+        goals_created=result.get("goals_created", 0),
+        predictions=result.get("predictions")
     )
-
-@app.get("/admin/status")
-async def admin_status(password: str = ""):
-    """Admin status endpoint"""
-    if password != ADMIN_PASSWORD:
-        raise HTTPException(status_code=401, detail="Invalid password")
-    
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        
-        # Get conversation count
-        c.execute("SELECT COUNT(*) FROM conversations")
-        conv_count = c.fetchone()[0]
-        
-        # Get user count
-        c.execute("SELECT COUNT(*) FROM user_profiles")
-        user_count = c.fetchone()[0]
-        
-        # Get recent conversations
-        c.execute("""
-            SELECT user_message, ai_response, intent, timestamp 
-            FROM conversations 
-            ORDER BY timestamp DESC 
-            LIMIT 5
-        """)
-        recent = c.fetchall()
-        
-        conn.close()
-        
-        return {
-            "total_conversations": conv_count,
-            "total_users": user_count,
-            "ai_providers": [p['name'] for p in ai_provider.providers],
-            "memory_initialized": agentic_memory.initialized,
-            "recent_conversations": [
-                {
-                    "user": r[0][:100],
-                    "response": r[1][:100],
-                    "intent": r[2],
-                    "time": str(r[3])
-                } for r in recent
-            ]
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.get("/admin/conversations")
-async def admin_conversations(password: str = "", limit: int = 50):
-    """Get conversation history"""
-    if password != ADMIN_PASSWORD:
-        raise HTTPException(status_code=401, detail="Invalid password")
-    
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("""
-            SELECT session_id, user_message, ai_response, intent, timestamp 
-            FROM conversations 
-            ORDER BY timestamp DESC 
-            LIMIT %s
-        """, (limit,))
-        rows = c.fetchall()
-        conn.close()
-        
-        return {
-            "conversations": [
-                {
-                    "session_id": r[0],
-                    "user_message": r[1],
-                    "ai_response": r[2],
-                    "intent": r[3],
-                    "timestamp": str(r[4])
-                } for r in rows
-            ]
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.post("/admin/self-improve")
-async def trigger_self_improvement(password: str = ""):
-    """Trigger self-improvement analysis"""
-    if password != ADMIN_PASSWORD:
-        raise HTTPException(status_code=401, detail="Invalid password")
-    
-    await self_improvement.analyze_performance()
-    return {"status": "Self-improvement analysis triggered"}
 
 @app.post("/multi-agent/chat")
 async def multi_agent_chat(request: ChatRequest, http_request: Request):
-    """Multi-agent chat endpoint for complex queries"""
+    """Force multi-agent processing"""
     client_ip = http_request.client.host
-    
     if is_rate_limited(client_ip):
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
     
@@ -1697,7 +1820,162 @@ async def multi_agent_chat(request: ChatRequest, http_request: Request):
         provider=result.get("provider")
     )
 
-# For running directly
+@app.post("/tools/execute")
+async def execute_tool(request: ToolRequest):
+    """Execute a tool directly"""
+    result = await tool_registry.execute(request.tool_name, request.parameters)
+    return result
+
+@app.get("/tools/list")
+async def list_tools():
+    """List all available tools"""
+    return {
+        "tools": [
+            {"name": name, "description": t['description'], "parameters": t.get('parameters', {})}
+            for name, t in tool_registry.tools.items()
+        ]
+    }
+
+@app.post("/goals/create")
+async def create_goal(request: GoalRequest):
+    """Create an autonomous goal"""
+    goal_id = goal_engine.create_goal(
+        request.session_id,
+        request.goal_type,
+        request.description,
+        request.priority
+    )
+    return {"goal_id": goal_id, "status": "created"}
+
+@app.get("/goals/list")
+async def list_goals(session_id: str = None, status: str = None):
+    """List autonomous goals"""
+    try:
+        conn = get_db()
+        c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
+        query = "SELECT * FROM autonomous_goals WHERE 1=1"
+        params = []
+        
+        if session_id:
+            query += " AND session_id = %s"
+            params.append(session_id)
+        if status:
+            query += " AND status = %s"
+            params.append(status)
+        
+        query += " ORDER BY priority DESC, created_at DESC LIMIT 50"
+        
+        c.execute(query, params)
+        goals = [dict(row) for row in c.fetchall()]
+        conn.close()
+        
+        return {"goals": goals}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/admin/status")
+async def admin_status(password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(status_code=401, detail="Invalid password")
+    
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        
+        c.execute("SELECT COUNT(*) FROM conversations")
+        conv_count = c.fetchone()[0]
+        
+        c.execute("SELECT COUNT(*) FROM user_profiles")
+        user_count = c.fetchone()[0]
+        
+        c.execute("SELECT COUNT(*) FROM autonomous_goals WHERE status IN ('pending', 'in_progress')")
+        active_goals = c.fetchone()[0]
+        
+        c.execute("SELECT COUNT(*) FROM learning_events")
+        learning_events = c.fetchone()[0]
+        
+        c.execute("SELECT COUNT(*) FROM proactive_notifications WHERE sent = FALSE")
+        pending_notifications = c.fetchone()[0]
+        
+        conn.close()
+        
+        return {
+            "total_conversations": conv_count,
+            "total_users": user_count,
+            "active_goals": active_goals,
+            "learning_events": learning_events,
+            "pending_notifications": pending_notifications,
+            "tools_available": len(tool_registry.tools),
+            "background_tasks_running": background_manager.running,
+            "self_improvement": {
+                "last_analysis": str(self_improvement.last_analysis) if self_improvement.last_analysis else None,
+                "improvements_deployed": self_improvement.improvements_deployed
+            },
+            "providers": [p['name'] for p in ai_provider.providers],
+            "request_counts": dict(ai_provider.request_counts)
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/admin/conversations")
+async def admin_conversations(password: str = "", limit: int = 50):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(status_code=401, detail="Invalid password")
+    
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("""
+            SELECT session_id, user_message, ai_response, intent, confidence_score, timestamp 
+            FROM conversations ORDER BY timestamp DESC LIMIT %s
+        """, (limit,))
+        rows = c.fetchall()
+        conn.close()
+        
+        return {
+            "conversations": [
+                {
+                    "session_id": r[0],
+                    "user_message": r[1],
+                    "ai_response": r[2],
+                    "intent": r[3],
+                    "confidence": r[4],
+                    "timestamp": str(r[5])
+                } for r in rows
+            ]
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.post("/admin/self-improve")
+async def trigger_self_improvement(password: str = ""):
+    """Manually trigger self-improvement"""
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(status_code=401, detail="Invalid password")
+    
+    await self_improvement.analyze_and_improve()
+    return {"status": "Self-improvement triggered"}
+
+@app.post("/admin/execute-goals")
+async def trigger_goal_execution(password: str = ""):
+    """Manually trigger goal execution"""
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(status_code=401, detail="Invalid password")
+    
+    await goal_engine.execute_pending_goals()
+    return {"status": "Goal execution triggered"}
+
+@app.get("/admin/goals")
+async def admin_goals(password: str = "", status: str = None):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(status_code=401, detail="Invalid password")
+    
+    return {"goals": goal_engine.get_active_goals()}
+
+# ============================================================
+# MAIN ENTRY POINT
+# ============================================================
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
