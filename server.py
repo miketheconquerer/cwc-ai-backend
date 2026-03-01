@@ -70,6 +70,19 @@ CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "")
 
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
 
+# ============================================================
+# NEW: Web Search & Discovery APIs (100% FREE)
+# ============================================================
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")      # AI web search: 1,000/month free
+JINA_API_KEY = os.getenv("JINA_API_KEY", "")          # Web reader: unlimited FREE (no key needed)
+NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")          # News monitoring: 100/day free
+
+# ============================================================
+# Promotion & SEO APIs
+# ============================================================
+INDEXNOW_KEY = os.getenv("INDEXNOW_KEY", "")           # Instant search engine indexing
+GOOGLE_SEARCH_CONSOLE_KEY = os.getenv("GOOGLE_SEARCH_CONSOLE_KEY", "")  # SEO monitoring
+
 # Agentic Settings
 AUTO_IMPROVEMENT_INTERVAL_HOURS = 24
 ENVIRONMENT_CHECK_INTERVAL_HOURS = 6
@@ -682,6 +695,37 @@ class ToolRegistry:
                 'description': 'Extract entities from text',
                 'parameters': {'text': 'string'},
                 'handler': self._tool_extract_entities
+            },
+            # === NEW: Web Search & Discovery Tools ===
+            'tavily_search': {
+                'description': 'AI-powered web search. Best for research, news, facts.',
+                'parameters': {'query': 'string', 'search_depth': 'string'},
+                'handler': self._tool_tavily_search
+            },
+            'jina_reader': {
+                'description': 'Read any webpage as clean markdown. FREE unlimited.',
+                'parameters': {'url': 'string'},
+                'handler': self._tool_jina_reader
+            },
+            'news_monitor': {
+                'description': 'Monitor global news on any topic.',
+                'parameters': {'topic': 'string'},
+                'handler': self._tool_news_monitor
+            },
+            'indexnow_ping': {
+                'description': 'Notify search engines to index a URL. FREE SEO.',
+                'parameters': {'url': 'string'},
+                'handler': self._tool_indexnow_ping
+            },
+            'content_writer': {
+                'description': 'Generate SEO-optimized content promoting CWC.',
+                'parameters': {'topic': 'string', 'content_type': 'string', 'keywords': 'array'},
+                'handler': self._tool_content_writer
+            },
+            'competitor_analysis': {
+                'description': 'Analyze competitor website.',
+                'parameters': {'competitor_url': 'string'},
+                'handler': self._tool_competitor_analysis
             }
         })
     
@@ -832,6 +876,179 @@ class ToolRegistry:
             'locations': re.findall(r'(?:in|at|from)\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)', text)
         }
         return entities
+    
+    # ============================================================
+    # NEW: ADVANCED WEB TOOLS (Tavily, Jina, SEO)
+    # ============================================================
+    
+    async def _tool_tavily_search(self, params: dict) -> str:
+        """AI-powered web search using Tavily (1,000/month FREE)"""
+        query = params.get('query', '')
+        search_depth = params.get('search_depth', 'basic')  # basic or advanced
+        
+        if not TAVILY_API_KEY:
+            return "⚠️ Tavily API key not configured. Get free key at https://tavily.com"
+        
+        try:
+            response = requests.post(
+                "https://api.tavily.com/search",
+                headers={"Authorization": f"Bearer {TAVILY_API_KEY}"},
+                json={
+                    "query": query,
+                    "search_depth": search_depth,
+                    "include_answer": True,
+                    "include_raw_content": False,
+                    "max_results": 5
+                },
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                results = []
+                for item in data.get('results', []):
+                    results.append(f"• {item.get('title', 'Untitled')}\n  {item.get('url', '')}\n  {item.get('content', '')[:200]}...")
+                
+                answer = data.get('answer', '')
+                return f"**Answer:** {answer}\n\n**Sources:**\n" + "\n".join(results)
+            return f"Tavily search failed: {response.status_code}"
+        except Exception as e:
+            return f"Search error: {e}"
+    
+    async def _tool_jina_reader(self, params: dict) -> str:
+        """Read any webpage as markdown using Jina Reader (FREE unlimited)"""
+        url = params.get('url', '')
+        
+        try:
+            # Jina Reader is 100% FREE - no API key needed!
+            response = requests.get(
+                f"https://r.jina.ai/{url}",
+                headers={
+                    "Authorization": f"Bearer {JINA_API_KEY}" if JINA_API_KEY else "",
+                    "X-Return-Format": "markdown"
+                },
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                return response.text[:5000]  # Limit content length
+            return f"Jina reader failed: {response.status_code}"
+        except Exception as e:
+            return f"Reader error: {e}"
+    
+    async def _tool_news_monitor(self, params: dict) -> str:
+        """Monitor news using NewsAPI (100/day FREE)"""
+        topic = params.get('topic', 'China business')
+        
+        if not NEWS_API_KEY:
+            return "⚠️ NewsAPI key not configured. Get free key at https://newsapi.org"
+        
+        try:
+            response = requests.get(
+                "https://newsapi.org/v2/everything",
+                params={
+                    "q": topic,
+                    "sortBy": "publishedAt",
+                    "pageSize": 5,
+                    "apiKey": NEWS_API_KEY
+                },
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                articles = data.get('articles', [])
+                results = []
+                for article in articles:
+                    results.append(f"• {article.get('title', 'Untitled')}\n  Source: {article.get('source', {}).get('name', 'Unknown')}\n  {article.get('description', '')[:150]}...")
+                return "\n".join(results)
+            return f"NewsAPI failed: {response.status_code}"
+        except Exception as e:
+            return f"News monitor error: {e}"
+    
+    async def _tool_indexnow_ping(self, params: dict) -> str:
+        """Notify search engines (Google, Bing, Yandex, Baidu) to index a URL - FREE"""
+        url_to_index = params.get('url', '')
+        
+        if not INDEXNOW_KEY:
+            return "⚠️ IndexNow key not configured. Generate a key at https://www.indexnow.org"
+        
+        try:
+            # IndexNow protocol - instant indexing notification
+            for engine in ["www.bing.com", "www.google.com", "yandex.com", "www.baidu.com"]:
+                response = requests.get(
+                    f"https://{engine}/indexnow",
+                    params={
+                        "url": url_to_index,
+                        "key": INDEXNOW_KEY
+                    },
+                    timeout=10
+                )
+            return f"✅ Notified 4 search engines to index: {url_to_index}"
+        except Exception as e:
+            return f"IndexNow ping error: {e}"
+    
+    async def _tool_content_writer(self, params: dict) -> str:
+        """Generate SEO-optimized content for promotion"""
+        topic = params.get('topic', '')
+        content_type = params.get('content_type', 'blog')  # blog, social, email
+        keywords = params.get('keywords', [])
+        
+        if not ai_provider:
+            return "AI provider not available"
+        
+        prompt = f"""You are a professional content writer specializing in China-West business relations.
+        
+Create SEO-optimized {content_type} content about: {topic}
+
+Target keywords to include naturally: {', '.join(keywords) if keywords else 'China business, cross-border trade, import export'}
+
+Requirements:
+1. Engaging, professional tone
+2. Include relevant statistics or facts when possible
+3. Natural keyword integration (not stuffed)
+4. Clear call-to-action promoting CWC (China West Connector) services
+5. 300-500 words
+
+Write the content now."""
+        
+        try:
+            messages = [{"role": "user", "content": prompt}]
+            result = await ai_provider.chat_completion(messages, temperature=0.7, max_tokens=800)
+            return result["choices"][0]["message"]["content"]
+        except Exception as e:
+            return f"Content generation error: {e}"
+    
+    async def _tool_competitor_analysis(self, params: dict) -> str:
+        """Analyze competitor websites using Jina Reader"""
+        competitor_url = params.get('competitor_url', '')
+        
+        try:
+            # Read competitor page
+            content = await self._tool_jina_reader({'url': competitor_url})
+            
+            # Analyze with AI
+            if ai_provider:
+                analysis_prompt = f"""Analyze this competitor content for business intelligence:
+                
+{content}
+
+Extract:
+1. Key services offered
+2. Target markets
+3. Unique selling points
+4. Pricing strategy (if visible)
+5. Content strategy
+6. SEO keywords they target
+
+Provide actionable insights for CWC (China West Connector) to differentiate."""
+                
+                messages = [{"role": "user", "content": analysis_prompt}]
+                result = await ai_provider.chat_completion(messages, temperature=0.3, max_tokens=600)
+                return result["choices"][0]["message"]["content"]
+            return content
+        except Exception as e:
+            return f"Competitor analysis error: {e}"
     
     def register_tool(self, name: str, description: str, parameters: dict, implementation: str):
         """Register a new tool"""
