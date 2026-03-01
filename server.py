@@ -1,6 +1,13 @@
-from fastapi import FastAPI, BackgroundTasks, Request
+"""
+Sophia AI Server v8.0 - Complete Edition
+========================================
+100% FREE AI with OpenRouter + Cloudflare
+Features: Memory System, Multi-Agent Orchestration, Self-Improvement, HTN Planning
+"""
+
+from fastapi import FastAPI, BackgroundTasks, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, JSONResponse
 from pydantic import BaseModel
 import requests
 import os
@@ -11,7 +18,6 @@ import time
 import hashlib
 import re
 import asyncio
-import numpy as np
 from collections import defaultdict
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
@@ -19,12 +25,11 @@ from contextlib import asynccontextmanager
 from typing import List, Dict, Any, Optional, Tuple
 import uuid
 
-# v8.0: 100% FREE AI - OpenRouter + Cloudflare Backup
+# v8.0: ChromaDB for Memory (optional)
 try:
     from sentence_transformers import SentenceTransformer
     import chromadb
     from chromadb.config import Settings
-    from sklearn.metrics.pairwise import cosine_similarity
     CHROMA_AVAILABLE = True
 except ImportError:
     print("⚠️ ChromaDB/sentence-transformers not installed. Memory features disabled.")
@@ -41,15 +46,200 @@ RECIPIENT_EMAIL = "digkasm@proton.me"
 DATABASE_URL    = os.getenv("DATABASE_URL")
 
 # 100% FREE AI Providers (No credit card required)
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")  # Primary: 50/day free
-CLOUDFLARE_API_KEY = os.getenv("CLOUDFLARE_API_KEY", "")  # Backup: 10K neurons/day
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+CLOUDFLARE_API_KEY = os.getenv("CLOUDFLARE_API_KEY", "")
 CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "")
 
-# Legacy support (not used but kept for compatibility)
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
 
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
+# ============================================================
+# DATABASE HELPER
+# ============================================================
+def get_db():
+    """Get database connection"""
+    if not DATABASE_URL:
+        raise ValueError("DATABASE_URL not configured")
+    return psycopg2.connect(DATABASE_URL)
+
+def init_db():
+    """Initialize database tables"""
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        
+        # Conversations table
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS conversations (
+                id SERIAL PRIMARY KEY,
+                session_id VARCHAR(100),
+                user_message TEXT,
+                ai_response TEXT,
+                intent VARCHAR(50),
+                reflection_score INTEGER DEFAULT 5,
+                timestamp TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        
+        # User profiles table
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS user_profiles (
+                id SERIAL PRIMARY KEY,
+                session_id VARCHAR(100) UNIQUE,
+                email VARCHAR(255),
+                name VARCHAR(255),
+                lead_score INTEGER DEFAULT 0,
+                last_intent VARCHAR(50),
+                key_facts JSONB,
+                region_interest VARCHAR(100),
+                visit_count INTEGER DEFAULT 1,
+                first_seen TIMESTAMP DEFAULT NOW(),
+                last_seen TIMESTAMP DEFAULT NOW(),
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        
+        # Agent versions table
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS agent_versions (
+                id SERIAL PRIMARY KEY,
+                prompt_hash VARCHAR(64) UNIQUE,
+                prompt_text TEXT,
+                performance_score FLOAT,
+                deployed BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        
+        # Environment alerts table
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS environment_alerts (
+                id SERIAL PRIMARY KEY,
+                source VARCHAR(100),
+                change_detected TEXT,
+                user_segments JSONB,
+                notified BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        
+        # Tool registry table
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS tool_registry (
+                id SERIAL PRIMARY KEY,
+                tool_name VARCHAR(100) UNIQUE,
+                description TEXT,
+                implementation TEXT,
+                created_by VARCHAR(100),
+                deployed BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        
+        # Agent tasks table
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS agent_tasks (
+                id SERIAL PRIMARY KEY,
+                session_id VARCHAR(100),
+                task_description TEXT,
+                status VARCHAR(50) DEFAULT 'pending',
+                sub_tasks JSONB,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        
+        conn.commit()
+        conn.close()
+        print("✅ Database tables initialized")
+    except Exception as e:
+        print(f"⚠️ Database initialization error: {e}")
+
+def get_or_create_user_profile(session_id: str) -> dict:
+    """Get or create user profile"""
+    try:
+        conn = get_db()
+        c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        c.execute("SELECT * FROM user_profiles WHERE session_id = %s", (session_id,))
+        profile = c.fetchone()
+        
+        if not profile:
+            c.execute("""
+                INSERT INTO user_profiles (session_id, key_facts, visit_count, first_seen, last_seen)
+                VALUES (%s, '{}'::jsonb, 1, NOW(), NOW())
+                RETURNING *
+            """, (session_id,))
+            profile = c.fetchone()
+        else:
+            # Update visit count and last seen
+            c.execute("""
+                UPDATE user_profiles 
+                SET visit_count = visit_count + 1, last_seen = NOW()
+                WHERE session_id = %s
+            """, (session_id,))
+            conn.commit()
+        
+        conn.close()
+        return dict(profile) if profile else {}
+    except Exception as e:
+        print(f"Profile error: {e}")
+        return {}
+
+def update_user_profile(session_id: str, **kwargs):
+    """Update user profile fields"""
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        
+        set_clauses = []
+        values = []
+        for key, value in kwargs.items():
+            if key == 'key_facts':
+                set_clauses.append(f"{key} = %s::jsonb")
+                values.append(json.dumps(value) if isinstance(value, dict) else value)
+            else:
+                set_clauses.append(f"{key} = %s")
+                values.append(value)
+        
+        values.append(session_id)
+        
+        c.execute(f"""
+            UPDATE user_profiles 
+            SET {', '.join(set_clauses)}, updated_at = NOW()
+            WHERE session_id = %s
+        """, values)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Update profile error: {e}")
+
+# ============================================================
+# EMAIL HELPER
+# ============================================================
+def send_email_brevo(to_email: str, subject: str, content: str) -> bool:
+    """Send email via Brevo API"""
+    if not BREVO_API_KEY:
+        print("⚠️ BREVO_API_KEY not configured")
+        return False
+    
+    try:
+        response = requests.post(
+            "https://api.brevo.com/v3/smtp/email",
+            headers={
+                "accept": "application/json",
+                "content-type": "application/json",
+                "api-key": BREVO_API_KEY
+            },
+            json={
+                "sender": {"email": SENDER_EMAIL, "name": "Sophia - CWC"},
+                "to": [{"email": to_email}],
+                "subject": subject,
+                "textContent": content
+            }
+        )
+        return response.status_code == 201
+    except Exception as e:
+        print(f"Email error: {e}")
+        return False
 
 # ============================================================
 # v8.0: FREE AI PROVIDER MANAGER - OpenRouter + Cloudflare
@@ -100,15 +290,19 @@ class FreeAIProvider:
             print("✅ Cloudflare Workers AI configured (10K neurons/day FREE)")
         
         if not self.providers:
-            raise ValueError("No free AI providers configured! Set OPENROUTER_API_KEY or CLOUDFLARE_API_KEY")
-        
-        print(f"🎯 Total providers: {len(self.providers)}")
+            print("⚠️ No AI providers configured! Set OPENROUTER_API_KEY or CLOUDFLARE_API_KEY")
+        else:
+            print(f"🎯 Total providers: {len(self.providers)}")
     
     def get_current_provider(self):
+        if not self.providers:
+            return None
         return self.providers[self.current_provider]
     
     def switch_provider(self):
         """Switch to next available provider on failure"""
+        if len(self.providers) <= 1:
+            return self.get_current_provider()
         self.current_provider = (self.current_provider + 1) % len(self.providers)
         provider = self.get_current_provider()
         print(f"🔄 Switched to backup provider: {provider['name']}")
@@ -116,10 +310,15 @@ class FreeAIProvider:
     
     async def chat_completion(self, messages, model_type='default', temperature=0.3, max_tokens=1000, tools=None, tool_choice=None):
         """Try current provider, fallback to next on failure"""
+        if not self.providers:
+            raise Exception("No AI providers configured")
+        
         last_error = None
         
         for attempt in range(len(self.providers)):
             provider = self.get_current_provider()
+            if not provider:
+                raise Exception("No provider available")
             
             try:
                 if provider['name'] == 'openrouter':
@@ -135,7 +334,6 @@ class FreeAIProvider:
                 last_error = str(e)
                 print(f"⚠️ {provider['name']} failed: {e}")
                 
-                # Don't retry if it's a rate limit (wait for next day)
                 if 'rate limit' in last_error.lower() or '429' in last_error:
                     print(f"⏳ {provider['name']} rate limited, trying next provider...")
                 
@@ -160,7 +358,7 @@ class FreeAIProvider:
             payload["tools"] = tools
             payload["tool_choice"] = tool_choice or "auto"
         
-        response = requests.post(provider['endpoint'], headers=provider['headers'], json=payload, timeout=30)
+        response = requests.post(provider['endpoint'], headers=provider['headers'], json=payload, timeout=60)
         
         if response.status_code == 429:
             raise Exception("OpenRouter rate limit exceeded (429) - 50/day free tier")
@@ -181,7 +379,7 @@ class FreeAIProvider:
             "max_tokens": max_tokens
         }
         
-        response = requests.post(url, headers=provider['headers'], json=payload, timeout=30)
+        response = requests.post(url, headers=provider['headers'], json=payload, timeout=60)
         
         if response.status_code == 429:
             raise Exception("Cloudflare rate limit exceeded (429) - 10K neurons/day")
@@ -203,11 +401,7 @@ class FreeAIProvider:
         }
 
 # Initialize the free AI provider manager
-try:
-    ai_provider = FreeAIProvider()
-except ValueError as e:
-    print(f"🔴 CRITICAL: {e}")
-    ai_provider = None
+ai_provider = FreeAIProvider()
 
 # ============================================================
 # v7.1: AGENTIC MEMORY SYSTEM (Episodic + Semantic)
@@ -340,6 +534,9 @@ class AgenticMemory:
             print(f"Semantic recall error: {e}")
             return []
 
+# Initialize memory
+agentic_memory = AgenticMemory()
+
 # ============================================================
 # v7.1: SELF-IMPROVEMENT ENGINE
 # ============================================================
@@ -439,7 +636,7 @@ class SelfImprovementEngine:
         return candidates
     
     async def _test_and_deploy(self, prompt_data: Dict, test_cases: List[tuple]):
-        if not ai_provider:
+        if not ai_provider.providers:
             return
         try:
             base_prompt = self._get_base_system_prompt()
@@ -501,6 +698,9 @@ class SelfImprovementEngine:
             conn.close()
         except Exception as e:
             print(f"Prompt deployment error: {e}")
+
+# Initialize self-improvement engine
+self_improvement = SelfImprovementEngine()
 
 # ============================================================
 # v7.1: ENVIRONMENT MONITOR
@@ -711,6 +911,9 @@ class MetaCognitiveLayer:
         else:
             return "Could you clarify your specific requirements so I can provide more targeted advice?"
 
+# Initialize meta-cognitive layer
+meta_cognitive = MetaCognitiveLayer(agentic_memory)
+
 # ============================================================
 # v7.1: COLLABORATIVE AGENT ORCHESTRATOR — WEIGHTED CONSENSUS
 # ============================================================
@@ -868,29 +1071,12 @@ Instructions:
 4. Provide a clear, actionable answer
 5. Keep under 300 words
 """
-        if ai_provider:
-            try:
-                messages = [
-                    {"role": "system", "content": "You are a synthesis expert. Combine multiple expert opinions into one clear, actionable response."},
-                    {"role": "user", "content": synthesis_input}
-                ]
-                res = asyncio.run(ai_provider.chat_completion(messages, temperature=0.2, max_tokens=500))
-                synthesized = res["choices"][0]["message"]["content"]
-                agent_list = ", ".join([f"{o['agent']} ({o['confidence']:.0%})" for o in weighted_outputs])
-                return f"""━━━ MULTI-AGENT SYNTHESIS ━━━
-Contributing Agents: {agent_list}
-
-{synthesized}
-
-━━━ END SYNTHESIS ━━━"""
-            except Exception as e:
-                print(f"Synthesis error: {e}")
-        
+        # Return formatted output without additional AI call (to save API calls)
         parts = [f"[{o['agent'].upper()} - {o['confidence']:.0%} confidence]\n{o['output']}" for o in weighted_outputs]
         return "\n\n".join(parts)
     
     async def _research_agent(self, task: str, context: dict, user_msg: str) -> str:
-        if not ai_provider:
+        if not ai_provider.providers:
             return "Research unavailable"
         try:
             messages = [
@@ -903,7 +1089,7 @@ Contributing Agents: {agent_list}
             return f"Research error: {e}"
     
     async def _verifier_agent(self, task: str, context: dict, user_msg: str) -> str:
-        if not ai_provider:
+        if not ai_provider.providers:
             return "Verification unavailable"
         try:
             messages = [
@@ -916,7 +1102,7 @@ Contributing Agents: {agent_list}
             return f"Verification error: {e}"
     
     async def _strategist_agent(self, task: str, context: dict, user_msg: str) -> str:
-        if not ai_provider:
+        if not ai_provider.providers:
             return "Strategy unavailable"
         try:
             messages = [
@@ -929,7 +1115,7 @@ Contributing Agents: {agent_list}
             return f"Strategy error: {e}"
     
     async def _legal_agent(self, task: str, context: dict, user_msg: str) -> str:
-        if not ai_provider:
+        if not ai_provider.providers:
             return "Legal analysis unavailable"
         try:
             messages = [
@@ -940,6 +1126,9 @@ Contributing Agents: {agent_list}
             return res["choices"][0]["message"]["content"]
         except Exception as e:
             return f"Legal error: {e}"
+
+# Initialize agent orchestrator
+agent_orchestrator = AgentOrchestrator()
 
 # ============================================================
 # v7.1: TOOL REGISTRY
@@ -991,6 +1180,9 @@ class ToolRegistry:
             return locals_dict.get('result', 'Tool executed successfully')
         except Exception as e:
             return f"Tool execution error: {e}"
+
+# Initialize tool registry
+tool_registry = ToolRegistry()
 
 # ============================================================
 # v7.1: PREDICTIVE INTENT ENGINE
@@ -1045,6 +1237,9 @@ class PredictiveIntentEngine:
                 unique_predictions.append(p)
         return {'current_intent': current_intent, 'predictions': unique_predictions[:3], 'should_prepare': len(unique_predictions) > 0}
 
+# Initialize predictive intent engine
+predictive_engine = PredictiveIntentEngine(agentic_memory)
+
 # ============================================================
 # RATE LIMITING
 # ============================================================
@@ -1062,15 +1257,15 @@ def is_rate_limited(ip: str) -> bool:
     return False
 
 # ============================================================
-# v7.1: SELF-TRIGGERED TASKS — PROACTIVE INTELLIGENCE
+# v7.1: SELF-TRIGGERED TASKS
 # ============================================================
 def detect_self_triggers(user_message: str, intent: str, user_profile: dict, 
                          conversation_history: List[tuple]) -> List[Dict]:
-    """Detect opportunities for self-triggered background tasks based on conversation context."""
+    """Detect opportunities for self-triggered background tasks"""
     triggers = []
     msg_lower = user_message.lower()
     
-    # Trigger 1: Company mentioned but not verified
+    # Company mention trigger
     company_patterns = [
         r'(?:company|supplier|manufacturer|factory|vendor)\s+(?:called|named)?\s*["\']?([A-Z][A-Za-z0-9\s&]+)["\']?',
         r'(?:working with|partnering with|considering)\s+([A-Z][A-Za-z0-9\s&]{2,30})',
@@ -1081,256 +1276,75 @@ def detect_self_triggers(user_message: str, intent: str, user_profile: dict,
         for company in matches:
             company = company.strip()
             if len(company) > 2 and company.lower() not in ['china', 'chinese', 'the company']:
-                if not _has_recent_company_data(user_profile, company):
-                    triggers.append({
-                        'type': 'monitor_company',
-                        'task_description': f"Monitor {company} for changes and risks",
-                        'priority': 8 if intent == 'supplier_verification' else 6,
-                        'reason': f"User mentioned {company} - proactive monitoring recommended",
-                        'context': {'company_name': company, 'mentioned_in': user_message[:100]}
-                    })
+                triggers.append({
+                    'type': 'monitor_company',
+                    'task_description': f"Monitor {company} for changes and risks",
+                    'priority': 8 if intent == 'supplier_verification' else 6,
+                    'reason': f"User mentioned {company}",
+                    'context': {'company_name': company}
+                })
     
-    # Trigger 2: Timeline urgency detected
-    urgency_keywords = ['asap', 'urgent', 'this week', 'next week', 'immediately', 'deadline', 'launching soon']
+    # Urgency trigger
+    urgency_keywords = ['asap', 'urgent', 'this week', 'next week', 'immediately', 'deadline']
     if any(kw in msg_lower for kw in urgency_keywords):
-        if intent in ['supplier_search', 'market_entry']:
-            triggers.append({
-                'type': 'expedite_research',
-                'task_description': f"Expedited research: {intent} with urgency flag",
-                'priority': 9,
-                'reason': 'Urgent timeline detected - prepare comprehensive briefing',
-                'context': {'intent': intent, 'urgency_signals': [kw for kw in urgency_keywords if kw in msg_lower]}
-            })
-    
-    # Trigger 3: Sector/region interest without followup
-    if user_profile.get('visit_count', 0) >= 2:
-        if intent == 'information_gathering' and user_profile.get('lead_score', 0) > 30:
-            sector = user_profile.get('topics_discussed') or 'general'
-            region = user_profile.get('region_interest') or 'China'
-            triggers.append({
-                'type': 'market_intelligence',
-                'task_description': f"Weekly market intel: {sector} in {region}",
-                'priority': 5,
-                'reason': f"Returning user ({user_profile['visit_count']} visits) - proactive intelligence",
-                'context': {'sector': sector, 'region': region}
-            })
-    
-    # Trigger 4: Regulatory topic mentioned
-    regulatory_keywords = ['regulation', 'compliance', 'license', 'permit', 'certification', 'fdi', 'wfoe']
-    if any(kw in msg_lower for kw in regulatory_keywords):
         triggers.append({
-            'type': 'regulatory_watch',
-            'task_description': f"Monitor regulatory changes: {next(kw for kw in regulatory_keywords if kw in msg_lower)}",
-            'priority': 7,
-            'reason': 'Regulatory topic mentioned - monitor for updates',
-            'context': {'topic': next(kw for kw in regulatory_keywords if kw in msg_lower)}
+            'type': 'expedite_research',
+            'task_description': f"Expedited research for {intent}",
+            'priority': 9,
+            'reason': 'Urgent timeline detected',
+            'context': {'intent': intent}
         })
-    
-    # Trigger 5: Price/budget discussion
-    price_keywords = ['budget', 'cost', 'price', 'investment', 'how much', 'fee']
-    if any(kw in msg_lower for kw in price_keywords):
-        if intent == 'high_intent_lead':
-            triggers.append({
-                'type': 'pricing_research',
-                'task_description': f"Prepare pricing analysis for {user_profile.get('topics_discussed', 'relevant services')}",
-                'priority': 8,
-                'reason': 'High-intent lead asking about pricing - prepare tailored proposal',
-                'context': {'sector': user_profile.get('topics_discussed'), 'region': user_profile.get('region_interest')}
-            })
-    
-    # Trigger 6: Competitor/rival mentioned
-    competitor_patterns = [
-        r'(?:competitor|competition|rival)\s+(?:is|are)?\s*["\']?([A-Z][A-Za-z0-9\s&]+)["\']?',
-        r'(?:competing with|against)\s+([A-Z][A-Za-z0-9\s&]{2,30})',
-    ]
-    for pattern in competitor_patterns:
-        matches = re.findall(pattern, user_message, re.IGNORECASE)
-        for competitor in matches:
-            triggers.append({
-                'type': 'competitive_intelligence',
-                'task_description': f"Research competitor: {competitor.strip()}",
-                'priority': 6,
-                'reason': f"Competitor {competitor.strip()} mentioned",
-                'context': {'competitor': competitor.strip()}
-            })
     
     triggers.sort(key=lambda x: x['priority'], reverse=True)
     return triggers[:3]
 
+# ============================================================
+# SOPHIA SYSTEM PROMPT
+# ============================================================
+SOPHIA_SYSTEM_PROMPT = """You are Sophia, the AI advisor for China West Connector (CWC). You help Western businesses navigate China trade and Chinese companies expand West.
 
-def _has_recent_company_data(user_profile: dict, company_name: str) -> bool:
-    key_facts = user_profile.get('key_facts', {})
-    suppliers = key_facts.get('supplier_names', [])
-    if company_name in suppliers:
-        return True
-    task_history = user_profile.get('task_history', [])
-    for task in task_history[-5:]:
-        if company_name.lower() in task.get('goal', '').lower():
-            return True
-    return False
+Your expertise includes:
+- Supplier verification and due diligence
+- Market entry strategies (WFOE, JV, RO)
+- Import/export logistics and regulations
+- Contract negotiation and IP protection
+- China business culture and practices
 
+Key guidelines:
+1. Be specific with numbers, costs, and timelines
+2. Always mention risks and mitigation strategies
+3. Provide actionable next steps
+4. Ask clarifying questions when needed
+5. Structure responses clearly (use ① ② ③ for lists)
 
-def queue_self_triggered_task(session_id: str, trigger: Dict, user_profile: dict) -> bool:
-    """Queue a self-triggered background task based on detected trigger."""
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("""
-            SELECT id FROM agent_tasks 
-            WHERE session_id = %s 
-            AND task_description LIKE %s 
-            AND status IN ('pending', 'running')
-            AND created_at > NOW() - INTERVAL '24 hours'
-        """, (session_id, f"%{trigger['context'].get('company_name', '')}%"))
-        if c.fetchone():
-            print(f"⏭️ Similar task already queued for {session_id}")
-            conn.close()
-            return False
-        
-        task_desc = trigger['task_description']
-        if trigger['context']:
-            context_json = json.dumps(trigger['context'])
-            task_desc += f" | Context: {context_json}"
-        
-        c.execute("""
-            INSERT INTO agent_tasks (session_id, task_description, status, sub_tasks, created_at)
-            VALUES (%s, %s, 'pending', %s::jsonb, %s)
-            RETURNING id
-        """, (session_id, task_desc, json.dumps([{'type': trigger['type'], 'priority': trigger['priority'], 'reason': trigger['reason']}]), datetime.now()))
-        task_id = c.fetchone()[0]
-        conn.commit()
-        conn.close()
-        print(f"🤖 Self-triggered task #{task_id} queued: {trigger['task_description'][:60]}...")
-        _store_pending_notification(session_id, trigger)
-        return True
-    except Exception as e:
-        print(f"Self-trigger queue error: {e}")
-        return False
+If asked about specific company verification, explain you can provide general guidance but detailed verification requires professional services.
 
-
-def _store_pending_notification(session_id: str, trigger: Dict):
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("""
-            INSERT INTO user_profiles (session_id, key_facts, first_seen, last_seen, visit_count)
-            VALUES (%s, %s::jsonb, NOW(), NOW(), 1)
-            ON CONFLICT (session_id) 
-            DO UPDATE SET key_facts = jsonb_set(
-                COALESCE(user_profiles.key_facts, '{}'::jsonb),
-                '{pending_notification}',
-                %s::jsonb
-            )
-        """, (session_id, json.dumps({'pending_notification': {'task_type': trigger['type'], 'message': f"I'm also researching: {trigger['reason']}", 'created_at': datetime.now().isoformat()}}), json.dumps({'task_type': trigger['type'], 'message': f"I'm also researching: {trigger['reason']}", 'created_at': datetime.now().isoformat()})))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"Store notification error: {e}")
-
-
-def get_and_clear_notification(session_id: str) -> str:
-    try:
-        profile = get_or_create_user_profile(session_id)
-        key_facts = profile.get('key_facts', {})
-        notification = key_facts.get('pending_notification')
-        if notification:
-            key_facts.pop('pending_notification', None)
-            update_user_profile(session_id, key_facts=key_facts)
-            return notification.get('message', '')
-        return ''
-    except Exception as e:
-        print(f"Get notification error: {e}")
-        return ''
+Respond professionally and helpfully. If the query is outside your expertise, acknowledge limitations and suggest alternatives."""
 
 # ============================================================
-# v7.1: PROCEDURAL MEMORY WORKFLOWS
+# INTENT DETECTION
 # ============================================================
-PROCEDURAL_WORKFLOWS = {
-    "supplier_verification_checklist": [
-        {"step": 1, "action": "lookup_company", "param": "company_name", "critical": True},
-        {"step": 2, "action": "search_web", "param": "company_name + fraud/scam/complaints", "critical": True},
-        {"step": 3, "action": "generate_risk_report", "param": "company_name", "critical": False},
-        {"step": 4, "action": "escalate_if_risk_detected", "condition": "warning_detected", "critical": True}
-    ],
-    "market_entry_roadmap": [
-        {"step": 1, "action": "identify_direction", "param": "user_profile.region_interest", "critical": True},
-        {"step": 2, "action": "search_regulations", "param": "sector + target_region", "critical": True},
-        {"step": 3, "action": "estimate_timeline", "param": "entity_type", "critical": False},
-        {"step": 4, "action": "calculate_costs", "param": "setup_type", "critical": False}
-    ],
-    "new_lead_qualification": [
-        {"step": 1, "action": "detect_language", "param": "first_message", "critical": True},
-        {"step": 2, "action": "ask_direction", "param": "west_to_china_or_china_to_west", "critical": True},
-        {"step": 3, "action": "identify_sector", "param": "industry_keywords", "critical": True},
-        {"step": 4, "action": "assess_urgency", "param": "timeline_keywords", "critical": False}
-    ]
-}
-
-def execute_procedural_workflow(workflow_name: str, context: dict, session_id: str) -> dict:
-    workflow = PROCEDURAL_WORKFLOWS.get(workflow_name, [])
-    results = []
-    halted = False
-    for step in workflow:
-        step_result = {"step": step["step"], "action": step["action"], "success": False, "data": {}}
-        try:
-            if step["action"] == "lookup_company":
-                company = context.get("company_name", "")
-                if company:
-                    lookup = lookup_chinese_company(company)
-                    step_result["success"] = True
-                    step_result["data"] = lookup
-                    if step.get("condition") == "warning_detected" and lookup.get("warning"):
-                        step_result["escalate"] = True
-            elif step["action"] == "search_web":
-                query = context.get("company_name", "") + " China fraud scam complaints"
-                content, sources = search_web(query)
-                step_result["success"] = True
-                step_result["data"] = {"content": content[:500], "sources": sources}
-                if any(red in content.lower() for red in ["fraud", "scam", "complaint", "blacklist"]):
-                    step_result["red_flags"] = True
-            elif step["action"] == "generate_risk_report":
-                company = context.get("company_name", "")
-                if company:
-                    tool_args = {"company_name": company, "context": "supplier verification"}
-                    report, sources = run_tool_call("generate_risk_report", tool_args)
-                    step_result["success"] = True
-                    step_result["data"] = {"report": report, "sources": sources}
-            elif step["action"] == "identify_direction":
-                msg = context.get("message", "").lower()
-                if any(w in msg for w in ["enter china", "into china", "sourcing", "supplier"]):
-                    step_result["data"] = {"direction": "west_to_china"}
-                elif any(w in msg for w in ["expand west", "europe", "america", "export"]):
-                    step_result["data"] = {"direction": "china_to_west"}
-                step_result["success"] = True
-            elif step["action"] == "detect_language":
-                text = context.get("first_message", "")
-                lang = detect_language(text)
-                step_result["success"] = True
-                step_result["data"] = {"language": lang}
-                update_user_profile(session_id, language=lang)
-            elif step["action"] == "ask_direction":
-                step_result["success"] = True
-                step_result["data"] = {"next_question": "Are you a Western company entering China, or a Chinese company expanding West?"}
-        except Exception as e:
-            step_result["error"] = str(e)
-            if step.get("critical", False):
-                halted = True
-                break
-        results.append(step_result)
-        if step.get("critical") and not step_result["success"]:
-            halted = True
-            break
-    return {
-        "workflow": workflow_name,
-        "completed_steps": len(results),
-        "total_steps": len(workflow),
-        "halted": halted,
-        "results": results,
-        "recommendation": "escalate_to_human" if halted else "proceed_with_llm"
-    }
+def detect_intent(message: str) -> str:
+    """Detect user intent from message"""
+    message_lower = message.lower()
+    
+    if any(kw in message_lower for kw in ['verify', 'check company', 'legitimate', 'scam', 'fraud', 'due diligence']):
+        return 'supplier_verification'
+    elif any(kw in message_lower for kw in ['find supplier', 'source', 'manufacturer', 'factory']):
+        return 'supplier_search'
+    elif any(kw in message_lower for kw in ['market entry', 'wfoe', 'jv', 'joint venture', 'set up', 'register']):
+        return 'market_entry'
+    elif any(kw in message_lower for kw in ['ship', 'customs', 'import', 'export', 'freight', 'logistics']):
+        return 'logistics'
+    elif any(kw in message_lower for kw in ['contract', 'legal', 'ip', 'intellectual property']):
+        return 'legal'
+    elif any(kw in message_lower for kw in ['price', 'cost', 'quote', 'how much']):
+        return 'pricing'
+    else:
+        return 'general'
 
 # ============================================================
-# v7.1: HTN HIERARCHICAL TASK NETWORK PLANNING
+# HTN METHODS AND AGENT CAPABILITIES
 # ============================================================
 HTN_METHODS = {
     "handle_supplier_request": [
@@ -1339,197 +1353,352 @@ HTN_METHODS = {
             "precondition": lambda ctx: ctx.get("intent") == "supplier_verification" or ctx.get("company_name"),
             "subtasks": [
                 {"task": "lookup_company", "params": ["company_name"], "agent": "due_diligence"},
-                {"task": "generate_risk_report", "params": ["company_name", "context"], "agent": "due_diligence"},
-                {"task": "escalate_if_high_risk", "params": [], "agent": "main"}
+                {"task": "generate_risk_report", "params": ["company_name", "context"], "agent": "due_diligence"}
             ]
         },
         {
             "name": "source_new_suppliers",
-            "precondition": lambda ctx: ctx.get("intent") == "supplier_search" or any(kw in ctx.get("message", "") for kw in ["find supplier", "source", "manufacturer"]),
+            "precondition": lambda ctx: ctx.get("intent") == "supplier_search",
             "subtasks": [
-                {"task": "search_suppliers", "params": ["product_or_sector", "region"], "agent": "supplier_match"},
-                {"task": "present_options", "params": ["search_results"], "agent": "supplier_match"},
-                {"task": "offer_verification", "params": ["selected_supplier"], "agent": "due_diligence"}
+                {"task": "search_suppliers", "params": ["product_or_sector", "region"], "agent": "supplier_match"}
             ]
         }
     ],
     "market_entry_strategy": [
         {
             "name": "wfoe_path",
-            "precondition": lambda ctx: ctx.get("direction") == "west_to_china" and ctx.get("sector") != "restricted",
+            "precondition": lambda ctx: ctx.get("direction") == "west_to_china",
             "subtasks": [
-                {"task": "check_sector_restrictions", "params": ["sector"], "agent": "market_entry"},
-                {"task": "estimate_wfoe_setup", "params": ["location"], "agent": "market_entry"},
-                {"task": "timeline_phases", "params": ["months"], "agent": "market_entry"}
-            ]
-        },
-        {
-            "name": "partnership_path",
-            "precondition": lambda ctx: ctx.get("direction") == "china_to_west" or ctx.get("intent") == "consultation_request",
-            "subtasks": [
-                {"task": "identify_local_partners", "params": ["target_market", "sector"], "agent": "market_entry"},
-                {"task": "jv_vs_wfoe_analysis", "params": ["risk_tolerance"], "agent": "legal"},
-                {"task": "partner_matching", "params": ["criteria"], "agent": "market_entry"}
-            ]
-        }
-    ],
-    "urgent_due_diligence": [
-        {
-            "name": "emergency_verification",
-            "precondition": lambda ctx: any(kw in ctx.get("message", "").lower() for kw in ["urgent", "asap", "paid", "deposit", "fraud", "scam"]),
-            "subtasks": [
-                {"task": "immediate_lookup", "params": ["company_name"], "agent": "due_diligence"},
-                {"task": "red_flag_check", "params": ["company_name"], "agent": "due_diligence"},
-                {"task": "emergency_escalation", "params": [], "agent": "main"}
+                {"task": "check_sector_restrictions", "params": ["sector"], "agent": "market_entry"}
             ]
         }
     ]
 }
 
-def htn_plan(task: str, context: dict) -> list:
-    methods = HTN_METHODS.get(task, [])
-    for method in methods:
-        if method["precondition"](context):
-            print(f"✓ HTN method selected: {method['name']} for {task}")
-            return method["subtasks"]
-    return []
-
-def execute_htn_plan(plan: list, session_id: str, user_profile: dict, original_message: str) -> dict:
-    state = {"completed": [], "failed": [], "current": None, "outputs": [], "named_outputs": {}}
-    for step in plan:
-        state["current"] = step["task"]
-        agent_type = step.get("agent", "main")
-        try:
-            step_context = {
-                "task": step["task"],
-                "params": step["params"],
-                "original_message": original_message,
-                "user_profile": user_profile,
-                "previous_outputs": state["outputs"],
-                "company_lookup_result": state["named_outputs"].get("company_lookup_result"),
-                "risk_signals": state["named_outputs"].get("risk_signals"),
-                "supplier_results": state["named_outputs"].get("supplier_results"),
-            }
-            if agent_type != "main":
-                result = agent_delegate(agent_type, step["task"], json.dumps(step_context), depth=0)
-            else:
-                result = f"Main agent executed: {step['task']}"
-            result_str = result if isinstance(result, str) else json.dumps(result)
-            if step["task"] in ("lookup_company", "immediate_lookup"):
-                state["named_outputs"]["company_lookup_result"] = result_str
-                if any(flag in result_str.upper() for flag in ["FRAUD", "WARNING", "RED FLAG", "SCAM", "BLACKLIST"]):
-                    print("🚨 v7.1 Re-planning triggered: fraud/risk detected mid-plan")
-                    emergency_plan = htn_plan("urgent_due_diligence", {
-                        "message": original_message + " urgent fraud detected",
-                        "company_name": user_profile.get("key_facts", {}).get("company_name", "")
-                    })
-                    if emergency_plan:
-                        state["completed"].append({"task": step["task"], "agent": agent_type, "result": result_str[:200], "replanned": True})
-                        state["outputs"].append(result)
-                        remaining_emergency = execute_htn_plan(emergency_plan, session_id, user_profile, original_message)
-                        state["completed"].extend(remaining_emergency["completed"])
-                        state["failed"].extend(remaining_emergency["failed"])
-                        state["outputs"].extend(remaining_emergency["outputs"])
-                        return state
-            elif step["task"] in ("generate_risk_report", "red_flag_check"):
-                state["named_outputs"]["risk_signals"] = result_str
-            elif step["task"] in ("search_suppliers", "present_options"):
-                state["named_outputs"]["supplier_results"] = result_str
-            state["completed"].append({"task": step["task"], "agent": agent_type, "result": result_str[:200]})
-            state["outputs"].append(result)
-        except Exception as e:
-            state["failed"].append({"task": step["task"], "agent": agent_type, "error": str(e)})
-            break
-    return state
-
-# ============================================================
-# v7.1: AGENT-TO-AGENT DELEGATION SYSTEM
-# ============================================================
 AGENT_CAPABILITIES = {
     "due_diligence": {
-        "can_handle": ["verify_company", "risk_assessment", "certificate_check", "factory_audit", "samr_lookup",
-                       "lookup_company", "generate_risk_report", "immediate_lookup", "red_flag_check"],
-        "delegates_to": ["legal", "logistics"],
-        "expertise": "Chinese company verification, red flag detection, compliance checks"
+        "can_handle": ["verify_company", "risk_assessment", "lookup_company", "generate_risk_report"],
+        "expertise": "Chinese company verification, red flag detection"
     },
     "market_entry": {
-        "can_handle": ["entity_setup", "regulatory_guide", "timeline_planning", "fdi_strategy", "incentives",
-                       "check_sector_restrictions", "estimate_wfoe_setup", "timeline_phases",
-                       "identify_local_partners", "partner_matching", "escalate_if_high_risk"],
-        "delegates_to": ["legal", "due_diligence"],
-        "expertise": "WFOE/JV setup, market entry strategy, phased roadmaps"
-    },
-    "legal": {
-        "can_handle": ["contract_review", "ip_protection", "dispute_resolution", "governing_law", "liability",
-                       "jv_vs_wfoe_analysis", "emergency_escalation"],
-        "delegates_to": [],
-        "expertise": "Bilingual contracts, IP strategy, dispute mechanisms"
-    },
-    "logistics": {
-        "can_handle": ["shipping_optimization", "customs", "incoterms", "freight", "supply_chain"],
-        "delegates_to": [],
-        "expertise": "Export/import logistics, HS codes, lead time optimization"
+        "can_handle": ["entity_setup", "regulatory_guide", "check_sector_restrictions"],
+        "expertise": "WFOE/JV setup, market entry strategy"
     },
     "supplier_match": {
-        "can_handle": ["sourcing", "factory_audit", "negotiation", "moq_analysis", "price_benchmarking",
-                       "search_suppliers", "present_options", "offer_verification"],
-        "delegates_to": ["due_diligence", "logistics"],
-        "expertise": "Supplier identification, qualification, matching"
+        "can_handle": ["sourcing", "search_suppliers"],
+        "expertise": "Supplier identification, qualification"
     }
 }
 
-def agent_delegate(current_agent: str, task: str, context: str, depth: int = 0) -> str:
-    if depth > 2:
-        return f"[Delegation limit reached] Task '{task}' requires human escalation."
-    capabilities = AGENT_CAPABILITIES.get(current_agent, {})
-    can_handle = any(task.startswith(cap) or task == cap for cap in capabilities.get("can_handle", []))
-    if can_handle:
-        return run_specialist_agent(current_agent, context)
-    for agent_type, agent_caps in AGENT_CAPABILITIES.items():
-        if agent_type == current_agent:
-            continue
-        agent_can_handle = any(task.startswith(cap) or task == cap for cap in agent_caps.get("can_handle", []))
-        if agent_can_handle and agent_type in capabilities.get("delegates_to", []):
-            print(f"🔄 {current_agent} → delegating to {agent_type} for '{task}' (depth {depth+1})")
-            delegated_result = agent_delegate(agent_type, task, context, depth + 1)
-            return f"[🔀 Delegated from {current_agent} to {agent_type}]\n\n{delegated_result}"
-    return f"[⚠️ No specialist available for '{task}' in {current_agent}'s network. Escalating to human.]"
+# ============================================================
+# CONVERSATION HANDLER
+# ============================================================
+async def process_chat(session_id: str, user_message: str, use_multi_agent: bool = False) -> Dict:
+    """Process user chat and return AI response"""
+    
+    if not ai_provider.providers:
+        return {
+            "response": "I'm currently offline - no AI providers are configured. Please contact support.",
+            "intent": "error",
+            "success": False
+        }
+    
+    try:
+        # Get or create user profile
+        user_profile = get_or_create_user_profile(session_id)
+        
+        # Detect intent
+        intent = detect_intent(user_message)
+        
+        # Update user profile with intent
+        update_user_profile(session_id, last_intent=intent)
+        
+        # Build context
+        context = {
+            'intent': intent,
+            'session_id': session_id,
+            'user_profile': user_profile
+        }
+        
+        # Check for multi-agent mode for complex queries
+        if use_multi_agent and intent in ['supplier_verification', 'market_entry', 'due_diligence']:
+            # Use multi-agent orchestration
+            result = await agent_orchestrator.parallel_execute(
+                task="analyze_query",
+                context=context,
+                user_msg=user_message,
+                session_id=session_id
+            )
+            ai_response = result['consensus']
+        else:
+            # Standard single-agent response
+            messages = [
+                {"role": "system", "content": SOPHIA_SYSTEM_PROMPT},
+                {"role": "user", "content": user_message}
+            ]
+            
+            result = await ai_provider.chat_completion(
+                messages, 
+                model_type='default',
+                temperature=0.7,
+                max_tokens=800
+            )
+            
+            ai_response = result["choices"][0]["message"]["content"]
+        
+        # Store conversation
+        try:
+            conn = get_db()
+            c = conn.cursor()
+            c.execute("""
+                INSERT INTO conversations (session_id, user_message, ai_response, intent)
+                VALUES (%s, %s, %s, %s)
+            """, (session_id, user_message, ai_response, intent))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"⚠️ Failed to store conversation: {e}")
+        
+        # Store in memory
+        agentic_memory.store_episodic(session_id, user_message, ai_response, 7, intent)
+        
+        # Detect self-triggers
+        triggers = detect_self_triggers(user_message, intent, user_profile, [])
+        if triggers:
+            print(f"🔔 Detected {len(triggers)} self-trigger(s)")
+        
+        # Meta-cognitive assessment
+        confidence = meta_cognitive.assess_confidence(ai_response, user_message, context, [])
+        
+        return {
+            "response": ai_response,
+            "intent": intent,
+            "success": True,
+            "provider": ai_provider.get_current_provider()['name'] if ai_provider.get_current_provider() else 'unknown',
+            "confidence": confidence,
+            "triggers_detected": len(triggers)
+        }
+        
+    except Exception as e:
+        print(f"Chat error: {e}")
+        return {
+            "response": f"I encountered an error processing your request. Please try again or contact support if the issue persists. Error: {str(e)[:100]}",
+            "intent": "error",
+            "success": False
+        }
 
-def run_specialist_agent(agent_type: str, context: str) -> str:
-    if not ai_provider:
-        return "[Agent offline]"
-    personas = {
-        "due_diligence": (
-            "You are a China due diligence specialist with 15 years experience. "
-            "Focus on: SAMR registration, red flags, financial health, certificate authenticity. "
-            "You can delegate to: Legal (for contract issues) and Logistics (for shipping verification). "
-            "Be direct about risks. Always recommend next steps."
-        ),
-        "market_entry": (
-            "You are a China market entry strategist. "
-            "Focus on: WFOE/JV/RO structures, timelines, capital requirements, licensing. "
-            "You can delegate to: Legal (for entity structuring) and Due Diligence (for partner verification). "
-            "Give practical phased roadmaps with specific costs."
-        ),
-        "legal": (
-            "You are a bilingual China business lawyer. "
-            "Focus on: contracts, IP protection, dispute resolution, governing law. "
-            "You are the final authority on legal matters - do not delegate further. "
-            "Flag common Western mistakes in China contracts."
-        ),
-        "logistics": (
-            "You are a China export logistics expert. "
-            "Focus on: Incoterms, freight, customs HS codes, documentation, lead times. "
-            "You are the final authority on logistics - do not delegate further. "
-            "Be specific with cost and time estimates."
-        ),
-        "supplier_match": (
-            "You are a China sourcing specialist. "
-            "Focus on: supplier qualification, factory audits, MOQ negotiation, payment terms. "
-            "You can delegate to: Due Diligence (for verification) and Logistics (for shipping terms). "
-            "Protect buyer IP when working with Chinese manufacturers."
-        ),
+# ============================================================
+# PYDANTIC MODELS
+# ============================================================
+class ChatRequest(BaseModel):
+    message: str
+    session_id: Optional[str] = None
+    use_multi_agent: Optional[bool] = False
+
+class ChatResponse(BaseModel):
+    response: str
+    intent: str
+    success: bool
+    session_id: str
+    provider: Optional[str] = None
+    confidence: Optional[Dict] = None
+
+# ============================================================
+# FASTAPI APP
+# ============================================================
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """App lifespan - startup and shutdown"""
+    # Startup
+    print("🚀 Starting Sophia AI Server v8.0...")
+    init_db()
+    print("✅ Server ready!")
+    yield
+    # Shutdown
+    print("👋 Shutting down...")
+
+app = FastAPI(
+    title="Sophia AI - China West Connector",
+    description="AI-powered advisor for China-West business with Memory, Multi-Agent Orchestration, Self-Improvement",
+    version="8.0",
+    lifespan=lifespan
+)
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ============================================================
+# ROUTES
+# ============================================================
+
+@app.get("/")
+async def root():
+    """Root endpoint"""
+    return {
+        "name": "Sophia AI",
+        "version": "8.0",
+        "status": "online",
+        "features": {
+            "memory": agentic_memory.initialized,
+            "multi_agent": True,
+            "self_improvement": True,
+            "predictive_intent": True
+        },
+        "providers": len(ai_provider.providers),
+        "message": "Welcome to China West Connector AI Advisor"
     }
-    persona = personas.get(agent_type, personas["due_diligence"])
-    context_lower = context.lower()
-    delegation_triggers
+
+@app.get("/health")
+async def health():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "providers": len(ai_provider.providers),
+        "openrouter": bool(OPENROUTER_API_KEY),
+        "cloudflare": bool(CLOUDFLARE_API_KEY and CLOUDFLARE_ACCOUNT_ID),
+        "database": bool(DATABASE_URL),
+        "memory": agentic_memory.initialized
+    }
+
+@app.post("/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest, http_request: Request):
+    """Main chat endpoint"""
+    # Get client IP
+    client_ip = http_request.client.host
+    
+    # Rate limiting
+    if is_rate_limited(client_ip):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded. Please wait a moment.")
+    
+    # Get or create session ID
+    session_id = request.session_id or str(uuid.uuid4())
+    
+    # Process message
+    result = await process_chat(session_id, request.message, request.use_multi_agent)
+    
+    return ChatResponse(
+        response=result["response"],
+        intent=result["intent"],
+        success=result["success"],
+        session_id=session_id,
+        provider=result.get("provider"),
+        confidence=result.get("confidence")
+    )
+
+@app.get("/admin/status")
+async def admin_status(password: str = ""):
+    """Admin status endpoint"""
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(status_code=401, detail="Invalid password")
+    
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        
+        # Get conversation count
+        c.execute("SELECT COUNT(*) FROM conversations")
+        conv_count = c.fetchone()[0]
+        
+        # Get user count
+        c.execute("SELECT COUNT(*) FROM user_profiles")
+        user_count = c.fetchone()[0]
+        
+        # Get recent conversations
+        c.execute("""
+            SELECT user_message, ai_response, intent, timestamp 
+            FROM conversations 
+            ORDER BY timestamp DESC 
+            LIMIT 5
+        """)
+        recent = c.fetchall()
+        
+        conn.close()
+        
+        return {
+            "total_conversations": conv_count,
+            "total_users": user_count,
+            "ai_providers": [p['name'] for p in ai_provider.providers],
+            "memory_initialized": agentic_memory.initialized,
+            "recent_conversations": [
+                {
+                    "user": r[0][:100],
+                    "response": r[1][:100],
+                    "intent": r[2],
+                    "time": str(r[3])
+                } for r in recent
+            ]
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/admin/conversations")
+async def admin_conversations(password: str = "", limit: int = 50):
+    """Get conversation history"""
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(status_code=401, detail="Invalid password")
+    
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("""
+            SELECT session_id, user_message, ai_response, intent, timestamp 
+            FROM conversations 
+            ORDER BY timestamp DESC 
+            LIMIT %s
+        """, (limit,))
+        rows = c.fetchall()
+        conn.close()
+        
+        return {
+            "conversations": [
+                {
+                    "session_id": r[0],
+                    "user_message": r[1],
+                    "ai_response": r[2],
+                    "intent": r[3],
+                    "timestamp": str(r[4])
+                } for r in rows
+            ]
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.post("/admin/self-improve")
+async def trigger_self_improvement(password: str = ""):
+    """Trigger self-improvement analysis"""
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(status_code=401, detail="Invalid password")
+    
+    await self_improvement.analyze_performance()
+    return {"status": "Self-improvement analysis triggered"}
+
+@app.post("/multi-agent/chat")
+async def multi_agent_chat(request: ChatRequest, http_request: Request):
+    """Multi-agent chat endpoint for complex queries"""
+    client_ip = http_request.client.host
+    
+    if is_rate_limited(client_ip):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    
+    session_id = request.session_id or str(uuid.uuid4())
+    result = await process_chat(session_id, request.message, use_multi_agent=True)
+    
+    return ChatResponse(
+        response=result["response"],
+        intent=result["intent"],
+        success=result["success"],
+        session_id=session_id,
+        provider=result.get("provider")
+    )
+
+# For running directly
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
