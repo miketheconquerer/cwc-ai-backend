@@ -2100,7 +2100,15 @@ Synthesize all the information above into a clear, actionable response.
         try:
             for iteration in range(MAX_ITERATIONS):
                 data = {"model":"llama-3.3-70b-versatile","messages":current_messages,"tools":GROQ_TOOLS,"tool_choice":"auto","temperature":0.3,"max_tokens":1000}
-                res = requests.post(url, headers=headers, json=data, timeout=30)
+                # Retry up to 3 times on 429 rate limit with backoff
+                for _retry in range(3):
+                    res = requests.post(url, headers=headers, json=data, timeout=30)
+                    if res.status_code == 429:
+                        wait = 2 ** _retry  # 1s, 2s, 4s
+                        print(f"⏳ Groq 429 rate limit — retrying in {wait}s (attempt {_retry+1}/3)")
+                        time.sleep(wait)
+                        continue
+                    break
                 res.raise_for_status()
                 choice      = res.json()["choices"][0]
                 message_obj = choice["message"]
@@ -2138,7 +2146,14 @@ Synthesize all the information above into a clear, actionable response.
                             pass
                     current_messages.append({"role":"tool","tool_call_id":tool_call["id"],"content":tool_result or "No results found."})
             if not response_text:
-                res2 = requests.post(url, headers=headers, json={**data,"tools":[],"tool_choice":"none"}, timeout=25)
+                for _retry in range(3):
+                    res2 = requests.post(url, headers=headers, json={**data,"tools":[],"tool_choice":"none"}, timeout=25)
+                    if res2.status_code == 429:
+                        wait = 2 ** _retry
+                        print(f"⏳ Groq 429 fallback rate limit — retrying in {wait}s")
+                        time.sleep(wait)
+                        continue
+                    break
                 res2.raise_for_status()
                 response_text = res2.json()["choices"][0]["message"].get("content", "")
             final_response_text = response_text
@@ -2185,6 +2200,21 @@ def init_db():
     c.execute("CREATE TABLE IF NOT EXISTS tool_registry (id SERIAL PRIMARY KEY, tool_name TEXT UNIQUE, description TEXT, implementation TEXT, created_by TEXT, created_at TIMESTAMP DEFAULT NOW(), deployed BOOLEAN DEFAULT FALSE)")
     c.execute("CREATE TABLE IF NOT EXISTS agent_versions (id SERIAL PRIMARY KEY, prompt_hash TEXT UNIQUE, prompt_text TEXT, performance_score REAL, deployed BOOLEAN DEFAULT FALSE, created_at TIMESTAMP DEFAULT NOW())")
     c.execute("CREATE TABLE IF NOT EXISTS environment_alerts (id SERIAL PRIMARY KEY, source TEXT, change_detected JSONB, user_segments JSONB, notified BOOLEAN DEFAULT FALSE, created_at TIMESTAMP DEFAULT NOW())")
+    # Migrate existing databases that may be missing newer columns
+    migrations = [
+        "ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS is_returning BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS conversation_summary TEXT",
+        "ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS key_facts JSONB DEFAULT '{}'",
+        "ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS task_history JSONB DEFAULT '[]'",
+        "ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS topics_discussed TEXT",
+        "ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS preferred_contact TEXT",
+        "ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS urgency TEXT",
+    ]
+    for migration in migrations:
+        try:
+            c.execute(migration)
+        except Exception as e:
+            print(f"Migration skipped (already exists): {e}")
     conn.commit()
     conn.close()
     print("✅ Database initialized")
