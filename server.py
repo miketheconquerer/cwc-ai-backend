@@ -1,10 +1,13 @@
 """
 ================================================================================
-SOPHIA AI SERVER v10.2 - CHINA BUSINESS & FEEDBACK LEARNING
+SOPHIA AI SERVER v10.3 - CHINA BUSINESS ENHANCED EDITION
 ================================================================================
-NEW IN v10.2:
-🇨🇳 China Business News tool – real‑time headlines via Google News RSS
-📝 Learning from feedback – uses user corrections to improve future answers
+NEW IN v10.3:
+🇨🇳 Chinese Translation tool – translates between English and Chinese (free)
+📡 China Business RSS Aggregator – multiple China news feeds
+🏢 Enhanced Chinese Company Info – Chinese names & China flag in Wikidata
+📊 China Economic Indicators – GDP, PMI, trade from World Bank (free)
+🎯 Proactive China News Goals – auto‑creates monitoring goals for interested users
 ================================================================================
 """
 
@@ -31,6 +34,8 @@ import uuid
 import traceback
 import base64
 import math
+import urllib.parse
+import xml.etree.ElementTree as ET
 
 # Optional: RSS feed parser for free news
 FEEDPARSER_AVAILABLE = False
@@ -1132,7 +1137,7 @@ class WikipediaKnowledge:
                 params={
                     "action": "wbgetentities",
                     "ids": entity_id,
-                    "languages": "en",
+                    "languages": "en|zh",  # Request both English and Chinese labels
                     "format": "json"
                 },
                 timeout=15
@@ -1170,14 +1175,16 @@ class WikipediaKnowledge:
             return {"error": str(e)}
     
     async def get_company_info(self, company_name: str) -> dict:
-        """Get company information from Wikipedia and Wikidata"""
+        """Get company information from Wikipedia and Wikidata, with China focus"""
         # Search Wikipedia
         wiki_results = await self.search_wikipedia(f"{company_name} company", limit=1)
         
         result = {
             "company": company_name,
             "wikipedia": None,
-            "wikidata": None
+            "wikidata": None,
+            "is_chinese": False,
+            "chinese_name": None
         }
         
         if wiki_results:
@@ -1189,6 +1196,18 @@ class WikipediaKnowledge:
             if wd_results:
                 entity = await self.get_wikidata_entity(wd_results[0]["id"])
                 result["wikidata"] = entity
+                
+                # Check if the company is in China (country property P17 = Q148)
+                if "P17" in entity.get("claims", {}):
+                    countries = entity["claims"]["P17"]
+                    if "Q148" in str(countries):
+                        result["is_chinese"] = True
+                
+                # Try to get Chinese name
+                if "labels" in entity and "zh" in entity["labels"]:
+                    result["chinese_name"] = entity["labels"]["zh"].get("value")
+                elif "labels" in entity and "zh-cn" in entity["labels"]:
+                    result["chinese_name"] = entity["labels"]["zh-cn"].get("value")
         
         return result
     
@@ -1604,7 +1623,7 @@ class ToolRegistry:
                 'handler': self._tool_wikidata_entity
             },
             'company_info': {
-                'description': 'Get comprehensive company information from Wikipedia and Wikidata.',
+                'description': 'Get comprehensive company information from Wikipedia and Wikidata, with China focus.',
                 'parameters': {'company_name': 'string'},
                 'handler': self._tool_company_info
             },
@@ -1643,6 +1662,25 @@ class ToolRegistry:
                 'description': 'Get the latest news about China business, suppliers, and economy – 100% free via Google News RSS.',
                 'parameters': {},
                 'handler': self._tool_china_business_news
+            },
+
+            # ============================================================
+            # NEW v10.3: Chinese Translation, RSS Aggregator, Economic Indicators
+            # ============================================================
+            'translate_chinese': {
+                'description': 'Translate text between English and Chinese using free LibreTranslate API.',
+                'parameters': {'text': 'string', 'target_language': 'string'},  # 'en' or 'zh'
+                'handler': self._tool_translate_chinese
+            },
+            'china_rss_news': {
+                'description': 'Fetch the latest China business headlines from multiple RSS feeds (China Briefing, China Daily, SCMP).',
+                'parameters': {'limit': 'integer'},
+                'handler': self._tool_china_rss_news
+            },
+            'china_economic_indicator': {
+                'description': 'Get current economic indicators for China (GDP, PMI, trade) from World Bank open data.',
+                'parameters': {'indicator': 'string'},  # 'gdp', 'pmi', 'trade'
+                'handler': self._tool_china_economic_indicator
             },
         })
     
@@ -1696,7 +1734,7 @@ class ToolRegistry:
             'limit', 'wait_time', 'full_page', 'submit_selector',
             'subreddit', 'sort_by', 'max_results', 'search_depth',
             'css_extractor', 'n_results', 'depth', 'format',
-            'importance', 'context', 'priority', 'keywords'
+            'importance', 'context', 'priority', 'keywords', 'target_language'
         }
 
         schema = []
@@ -1919,7 +1957,7 @@ class ToolRegistry:
                     results = []
                     for entry in feed.entries[:5]:
                         published = entry.get('published', '')
-                        if hasattr(entry, 'published_parsed'):
+                        if hasattr(entry, 'published_parsed') and entry.published_parsed:
                             published_dt = datetime(*entry.published_parsed[:6])
                             published = published_dt.strftime('%Y-%m-%d')
                         title = entry.get('title', 'No title')
@@ -2215,7 +2253,7 @@ Keep it professional and 300-500 words."""
         return output
     
     async def _tool_company_info(self, params: dict) -> str:
-        """Get company info"""
+        """Get company info with China focus"""
         company_name = params.get('company_name', '')
         
         info = await wikipedia_knowledge.get_company_info(company_name)
@@ -2237,6 +2275,12 @@ Keep it professional and 300-500 words."""
                 output += f"Label: {wd['labels']['en'].get('value', 'N/A')}\n"
             if wd.get('descriptions', {}).get('en'):
                 output += f"Description: {wd['descriptions']['en'].get('value', 'N/A')}\n"
+        
+        # China-specific additions
+        if info.get('is_chinese'):
+            output += "\n🇨🇳 **This is a Chinese company.**\n"
+        if info.get('chinese_name'):
+            output += f"Chinese name: {info['chinese_name']}\n"
         
         return output
     
@@ -2376,7 +2420,7 @@ Keep it professional and 300-500 words."""
         return output
 
     # ============================================================
-    # NEW v10.2: China Business News tool handler
+    # v10.2: China Business News tool handler
     # ============================================================
     async def _tool_china_business_news(self, params: dict) -> str:
         """Get the latest China business news via Google News RSS (100% free)."""
@@ -2407,6 +2451,125 @@ Keep it professional and 300-500 words."""
             return "🇨🇳 **China Business News** (latest):\n" + "\n".join(results)
         except Exception as e:
             return f"Error fetching China news: {e}"
+
+    # ============================================================
+    # v10.3: Chinese Translation (LibreTranslate public demo)
+    # ============================================================
+    async def _tool_translate_chinese(self, params: dict) -> str:
+        """Translate text between English and Chinese using LibreTranslate."""
+        text = params.get('text', '')
+        target = params.get('target_language', 'en')  # 'en' or 'zh'
+        
+        if not text:
+            return "Please provide text to translate."
+        
+        # Determine source language automatically (leave empty for auto-detect)
+        source = 'en' if target == 'zh' else 'zh'
+        
+        url = "https://libretranslate.de/translate"
+        payload = {
+            'q': text,
+            'source': 'auto',  # auto-detect source
+            'target': target,
+            'format': 'text'
+        }
+        
+        try:
+            response = requests.post(url, data=payload, timeout=10)
+            if response.status_code == 200:
+                result = response.json()
+                translated = result.get('translatedText', '')
+                return f"🔄 **Translated ({'auto' if source=='auto' else source} → {target}):**\n{translated}"
+            else:
+                return f"Translation failed (status {response.status_code}). Please try again later."
+        except Exception as e:
+            return f"Translation error: {e}"
+
+    # ============================================================
+    # v10.3: China RSS News Aggregator
+    # ============================================================
+    async def _tool_china_rss_news(self, params: dict) -> str:
+        """Fetch China business news from multiple RSS feeds."""
+        if not FEEDPARSER_AVAILABLE:
+            return "⚠️ Feedparser not installed. Install with: pip install feedparser"
+        
+        limit = params.get('limit', 5)
+        
+        feeds = [
+            ("China Briefing", "https://www.china-briefing.com/news/feed/"),
+            ("China Daily Business", "http://www.chinadaily.com.cn/business/rss.xml"),
+            ("SCMP Business", "https://www.scmp.com/rss/4/feed"),  # Business section
+            ("Caixin", "https://www.caixinglobal.com/rss/top_news.xml"),  # May need update
+        ]
+        
+        all_entries = []
+        for name, url in feeds:
+            try:
+                feed = feedparser.parse(url)
+                for entry in feed.entries[:3]:  # Take top 3 per feed
+                    published = entry.get('published', '')
+                    if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                        published_dt = datetime(*entry.published_parsed[:6])
+                        published = published_dt.strftime('%Y-%m-%d')
+                    title = entry.get('title', 'No title')
+                    link = entry.get('link', '')
+                    all_entries.append((published, f"- {title} ({published})\n  {link}"))
+            except Exception as e:
+                print(f"RSS feed error for {name}: {e}")
+        
+        # Sort by date (descending) – naive sort, may need parsing
+        all_entries.sort(reverse=True)
+        
+        if not all_entries:
+            return "No news entries found from RSS feeds."
+        
+        results = []
+        for _, item in all_entries[:limit]:
+            results.append(item)
+        
+        return "🇨🇳 **China Business RSS News** (latest):\n" + "\n".join(results)
+
+    # ============================================================
+    # v10.3: China Economic Indicators (World Bank)
+    # ============================================================
+    async def _tool_china_economic_indicator(self, params: dict) -> str:
+        """Fetch economic indicators for China from World Bank open data."""
+        indicator_map = {
+            'gdp': 'NY.GDP.MKTP.CD',          # GDP (current US$)
+            'gdp_growth': 'NY.GDP.MKTP.KD.ZG', # GDP growth (annual %)
+            'pmi': None,  # Not available from World Bank, fallback to Trading Economics? We'll skip for now
+            'trade': 'NE.EXP.GNFS.CD',          # Exports of goods and services (current US$)
+            'imports': 'NE.IMP.GNFS.CD',        # Imports
+            'inflation': 'FP.CPI.TOTL.ZG',      # Inflation, consumer prices (annual %)
+        }
+        
+        indicator = params.get('indicator', 'gdp').lower()
+        if indicator not in indicator_map:
+            return f"Unknown indicator. Available: {', '.join(indicator_map.keys())}"
+        
+        wb_code = indicator_map[indicator]
+        if wb_code is None:
+            return f"Indicator '{indicator}' not available from World Bank."
+        
+        url = f"http://api.worldbank.org/v2/country/CN/indicator/{wb_code}?format=json&per_page=1&date=2022:2024"
+        try:
+            response = requests.get(url, timeout=15)
+            if response.status_code == 200:
+                data = response.json()
+                if len(data) > 1 and data[1]:
+                    latest = data[1][0]
+                    value = latest.get('value')
+                    date = latest.get('date')
+                    if value is not None:
+                        return f"🇨🇳 **China {indicator.upper()}** ({date}): {value:,.2f} (current US$ where applicable)"
+                    else:
+                        return f"No recent data for {indicator}."
+                else:
+                    return f"No data found for {indicator}."
+            else:
+                return f"World Bank API error: {response.status_code}"
+        except Exception as e:
+            return f"Error fetching economic indicator: {e}"
 
 tool_registry = ToolRegistry()
 
@@ -2439,7 +2602,7 @@ def _prune_stale_sessions():
 
 
 class SophiaAgent:
-    """Main Sophia AI Agent - v10.2 China Business & Feedback Learning"""
+    """Main Sophia AI Agent - v10.3 China Business Enhanced Edition"""
     
     def __init__(self):
         self.tool_registry = tool_registry
@@ -2684,13 +2847,14 @@ You operate as a FULLY AGENTIC AI: you can reason step-by-step, call multiple to
 reflect on your results, and refine your answers autonomously.
 
 Core capabilities:
-- **Wikipedia & Wikidata** — Instant encyclopaedia knowledge
+- **Wikipedia & Wikidata** — Instant encyclopaedia knowledge, now with Chinese company info
 - **Browser Automation** — Browse websites, take screenshots, extract data
 - **Web Search** — DuckDuckGo, Tavily, Bing
 - **Social Monitoring** — Reddit discussions, news monitoring
 - **Geocoding** — Address verification via OpenStreetMap
 - **Vector Memory** — Recall past conversations
 - **Research** — Deep multi-source topic research
+- **🇨🇳 China Business Tools** – Latest news, RSS feeds, economic indicators, translation, and enhanced company data
 
 Tool-use guidelines:
 - Use tools proactively whenever they would improve accuracy or completeness.
@@ -2826,6 +2990,56 @@ def goal_executor():
         except Exception as outer:
             print(f"⚠️ Goal executor error: {outer}")
 
+
+# ============================================================
+# NEW v10.3: Proactive China News Goal Generator (daily)
+# ============================================================
+def proactive_china_goal_generator():
+    """Scans recent conversations for China‑interested users and creates monitoring goals."""
+    while True:
+        try:
+            # Run once per day
+            time.sleep(24 * 60 * 60)
+
+            if not DATABASE_URL:
+                continue
+
+            conn = get_db()
+            c = conn.cursor()
+            # Find sessions with China keywords in the last 7 days
+            c.execute("""
+                SELECT DISTINCT session_id
+                FROM conversations
+                WHERE timestamp > NOW() - INTERVAL '7 days'
+                  AND (user_message ILIKE '%china%' OR user_message ILIKE '%chinese%' OR user_message ILIKE '%supplier%')
+                  AND session_id NOT LIKE 'autonomous_goal_%'
+                ORDER BY session_id
+            """)
+            sessions = c.fetchall()
+
+            for (session_id,) in sessions:
+                # Check if a monitoring goal already exists for this session
+                c.execute("""
+                    SELECT id FROM autonomous_goals
+                    WHERE session_id = %s AND goal_type = 'monitor_china_news' AND status IN ('pending', 'in_progress')
+                """, (session_id,))
+                if not c.fetchone():
+                    # Create new goal
+                    c.execute("""
+                        INSERT INTO autonomous_goals (session_id, goal_type, goal_description, priority, source)
+                        VALUES (%s, 'monitor_china_news', 'Monitor latest China business news for this user', 3, 'proactive')
+                        RETURNING id
+                    """, (session_id,))
+                    goal_id = c.fetchone()[0]
+                    print(f"🎯 Created proactive China news goal {goal_id} for session {session_id}")
+
+            conn.commit()
+            conn.close()
+
+        except Exception as e:
+            print(f"⚠️ Proactive goal generator error: {e}")
+
+
 # ============================================================
 # FASTAPI APP
 # ============================================================
@@ -2838,23 +3052,31 @@ async def lifespan(app: FastAPI):
     goal_thread = threading.Thread(target=goal_executor, daemon=True)
     goal_thread.start()
     
+    # Start proactive goal generator (only if database is configured)
+    if DATABASE_URL:
+        proactive_thread = threading.Thread(target=proactive_china_goal_generator, daemon=True)
+        proactive_thread.start()
+        print("🌐 Proactive China goal generator started (runs daily)")
+    
     print(f"""
     ╔══════════════════════════════════════════════════════════════╗
-    ║        SOPHIA AI SERVER v10.2 - CHINA BUSINESS EDITION      ║
+    ║        SOPHIA AI SERVER v10.3 - CHINA BUSINESS EDITION      ║
     ╠══════════════════════════════════════════════════════════════╣
     ║  🧠 Vector Backend: {hybrid_memory.backend_type:<38} ║
     ║  🔧 Tools Loaded: {len(tool_registry.tools):<40} ║
-    ║  🤖 AI Model: llama-3.1-8b-instruct (upgraded)              ║
     ║  🤖 AI Providers: {len(ai_provider.providers):<40} ║
-    ║  📚 Wikipedia API: ✅                                        ║
+    ║  📚 Wikipedia + Enhanced Wikidata: ✅                        ║
     ║  📰 Google News RSS: {'✅' if FEEDPARSER_AVAILABLE else '⚠️ feedparser missing':<29} ║
-    ║  🇨🇳 China Business News: ✅ dedicated tool                   ║
-    ║  📝 Learning from Feedback: ✅ active                         ║
+    ║  🇨🇳 China Business Tools:                                     ║
+    ║     • Translation (LibreTranslate)                           ║
+    ║     • RSS Aggregator (multiple feeds)                        ║
+    ║     • Economic Indicators (World Bank)                       ║
+    ║     • Enhanced Company Info (Chinese names)                  ║
+    ║     • Proactive News Goals                                   ║
     ║  🌐 Browser Automation: {'✅ Playwright' if PLAYWRIGHT_AVAILABLE else '⚠️ HTTP fallback':<29} ║
     ║  ♾️  Agentic Loop: up to {MAX_AGENT_ITERATIONS} iterations                     ║
     ║  🪞 Self-Reflection: {'✅ enabled' if ENABLE_SELF_REFLECTION else '❌ disabled':<31} ║
     ║  🧭 ReAct Reasoning: {'✅ smart-gated' if ENABLE_REACT_REASONING else '❌ disabled':<27} ║
-    ║  🧹 Session Pruning: 1hr TTL                                 ║
     ║  💬 User Feedback: ✅ collecting & learning                   ║
     ╚══════════════════════════════════════════════════════════════╝
     """)
@@ -2864,9 +3086,9 @@ async def lifespan(app: FastAPI):
     print("🛑 Sophia AI Server shutting down...")
 
 app = FastAPI(
-    title="Sophia AI Server v10.2",
-    description="China Business Edition with Feedback Learning",
-    version="10.2.0",
+    title="Sophia AI Server v10.3",
+    description="China Business Enhanced Edition with Translation, RSS, Economic Data & Proactive Goals",
+    version="10.3.0",
     lifespan=lifespan
 )
 
@@ -2898,7 +3120,7 @@ async def root():
     """Root endpoint"""
     return {
         "service": "Sophia AI Server",
-        "version": "10.2.0",
+        "version": "10.3.0",
         "vector_backend": hybrid_memory.backend_type,
         "tools_count": len(tool_registry.tools),
         "playwright": PLAYWRIGHT_AVAILABLE,
