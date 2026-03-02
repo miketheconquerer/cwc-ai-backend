@@ -1,4 +1,4 @@
-# Sophia AI Server - Minimal for Render Free Tier (512MB RAM)
+# Sophia AI Server v9.8 - Lightweight for Render Free Tier (512MB RAM)
 
 # Web Framework
 fastapi
@@ -12,5 +12,7 @@ psycopg2-binary
 # Basic ML (lightweight)
 numpy<2.0
 
-# NO torch, NO sentence-transformers, NO chromadb
-# Using simple hash-based embeddings for Supabase pgvector
+# NO heavy ML libraries - using hash-based embeddings
+# NO chromadb - using Supabase pgvector
+# NO sentence-transformers - using lightweight hash embeddings
+# NO playwright (install separately if needed for browser automation)

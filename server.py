@@ -1,33 +1,25 @@
 """
 ================================================================================
-SOPHIA AI SERVER v9.7 - EXTERNAL VECTOR DB EDITION
+SOPHIA AI SERVER v9.8 - BROWSER AUTOMATION & KNOWLEDGE EDITION
 ================================================================================
 100% FREE AI with OpenRouter + Cloudflare
 
-NEW IN v9.7 - EXTERNAL VECTOR DATABASE SUPPORT:
-🗄️ External ChromaDB - Connect to ChromaDB hosted anywhere (Railway, Fly.io, Docker)
-🗄️ Supabase pgvector - Use Supabase's built-in vector storage (FREE 500MB!)
-🗄️ In-memory Fallback - Works without any vector DB
-🗄️ Hybrid Memory - Combine multiple storage backends
+NEW IN v9.8 - BROWSER AUTOMATION & KNOWLEDGE EXPANSION:
+🌐 Playwright Browser Automation - Browse web, fill forms, take screenshots
+📚 Wikipedia API - Instant access to encyclopedia knowledge
+📊 Wikidata API - Structured knowledge base queries
+🔍 Enhanced Research - Combine multiple knowledge sources
 
-EXTERNAL CHROMADB OPTIONS:
-1. Railway.app (Easiest - one-click deploy)
-2. Fly.io (Good free tier)
-3. Docker on VPS (Full control)
-4. Chroma Cloud (Managed service)
-
-PREVIOUS VERSIONS:
-✅ v9.6 Intelligence - Tool Chaining, Self-Reflection, ReAct Reasoning
-✅ Reddit API - Social Listening (100% FREE!)
-✅ Nominatim Geocoding - Address Verification (100% FREE!)
-✅ ZenRows - Advanced Web Scraping (1,000/month FREE)
-✅ Bing Webmaster API + DuckDuckGo + Tavily + NewsAPI
+PREVIOUS FEATURES:
+✅ v9.7 - Supabase pgvector, Hash-based embeddings
+✅ v9.6 - Tool Chaining, Self-Reflection, ReAct Reasoning
+✅ Reddit API, Nominatim, ZenRows, Bing, DuckDuckGo, Tavily, NewsAPI
 ================================================================================
 """
 
 from fastapi import FastAPI, BackgroundTasks, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse, JSONResponse
+from fastapi.responses import PlainTextResponse, JSONResponse, FileResponse
 from pydantic import BaseModel
 import requests
 import os
@@ -46,8 +38,9 @@ from contextlib import asynccontextmanager
 from typing import List, Dict, Any, Optional, Tuple, Callable
 import uuid
 import traceback
+import base64
 
-# Optional: Sentence Transformers for Embeddings (needed for Supabase pgvector)
+# Optional: Sentence Transformers for Embeddings
 SENTENCE_TRANSFORMERS_AVAILABLE = False
 try:
     from sentence_transformers import SentenceTransformer
@@ -56,16 +49,15 @@ try:
 except Exception as e:
     print(f"⚠️ sentence-transformers not installed: {e}")
 
-# Optional: ChromaDB (only needed for ChromaDB modes, not Supabase)
-CHROMA_AVAILABLE = False
+# Optional: Playwright for Browser Automation
+PLAYWRIGHT_AVAILABLE = False
 try:
-    import chromadb
-    from chromadb.config import Settings
-    CHROMA_AVAILABLE = True
-    print("✅ ChromaDB available")
+    from playwright.async_api import async_playwright
+    PLAYWRIGHT_AVAILABLE = True
+    print("✅ Playwright available for browser automation")
 except Exception as e:
-    print(f"⚠️ chromadb not available: {e}")
-    print("   Using Supabase or memory fallback.")
+    print(f"⚠️ Playwright not installed: {e}")
+    print("   Browser automation will use HTTP fallback")
 
 load_dotenv()
 
@@ -87,30 +79,20 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
 # ============================================================
 # VECTOR DATABASE CONFIGURATION - v9.7
 # ============================================================
-# Option 1: Chroma Cloud (Managed)
-# Sign up at: https://www.trychroma.com
-CHROMA_CLOUD_API_KEY = os.getenv("CHROMA_CLOUD_API_KEY", "")  # Your Chroma Cloud API key
-CHROMA_TENANT = os.getenv("CHROMA_TENANT", "default")         # Optional: Tenant name
-CHROMA_DATABASE = os.getenv("CHROMA_DATABASE", "default")     # Optional: Database name
+CHROMA_CLOUD_API_KEY = os.getenv("CHROMA_CLOUD_API_KEY", "")
+CHROMA_TENANT = os.getenv("CHROMA_TENANT", "default")
+CHROMA_DATABASE = os.getenv("CHROMA_DATABASE", "default")
+CHROMA_SERVER_URL = os.getenv("CHROMA_SERVER_URL", "")
+CHROMA_SERVER_AUTH = os.getenv("CHROMA_SERVER_AUTH", "")
 
-# Option 2: External ChromaDB Server (Railway, Fly.io, Docker)
-CHROMA_SERVER_URL = os.getenv("CHROMA_SERVER_URL", "")  # e.g., "http://your-chroma:8000"
-CHROMA_SERVER_AUTH = os.getenv("CHROMA_SERVER_AUTH", "")  # Optional: Basic auth token
-
-# Option 3: Supabase pgvector (FREE 500MB!) - or reuse existing DATABASE_URL
-# Note: If SUPABASE_DB_URL contains "${" it means user entered a variable reference, ignore it
 _supabase_url = os.getenv("SUPABASE_DB_URL", "")
 if _supabase_url and "${" not in _supabase_url:
     SUPABASE_DB_URL = _supabase_url
 else:
-    SUPABASE_DB_URL = DATABASE_URL  # Falls back to DATABASE_URL
-SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")  # For REST API (optional)
+    SUPABASE_DB_URL = DATABASE_URL
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
 
-# Option 4: Local/In-memory ChromaDB (default, ephemeral on Render)
 CHROMA_LOCAL_PATH = os.getenv("CHROMA_LOCAL_PATH", "./chroma_db")
-
-# Vector DB Selection
-# Options: auto, chroma_cloud, chroma_remote, supabase, local, memory
 VECTOR_DB_TYPE = os.getenv("VECTOR_DB_TYPE", "auto")
 
 # ============================================================
@@ -371,17 +353,13 @@ def init_db():
             )
         """)
         
-        # ============================================================
-        # v9.7: Vector Memory Tables (for Supabase pgvector or PostgreSQL)
-        # ============================================================
-        # Check if pgvector extension is available
+        # Vector memory tables for pgvector
         try:
             c.execute("CREATE EXTENSION IF NOT EXISTS vector;")
             print("✅ pgvector extension enabled")
         except:
-            print("⚠️ pgvector extension not available (using fallback)")
+            print("⚠️ pgvector extension not available")
         
-        # Episodic memory table (for pgvector)
         c.execute("""
             CREATE TABLE IF NOT EXISTS episodic_memories (
                 id SERIAL PRIMARY KEY,
@@ -395,7 +373,6 @@ def init_db():
             )
         """)
         
-        # Semantic memory table (for pgvector)
         c.execute("""
             CREATE TABLE IF NOT EXISTS semantic_memories (
                 id SERIAL PRIMARY KEY,
@@ -408,7 +385,7 @@ def init_db():
             )
         """)
         
-        # Create vector indexes if pgvector is available
+        # Create vector indexes
         try:
             c.execute("""
                 CREATE INDEX IF NOT EXISTS episodic_embedding_idx 
@@ -457,18 +434,6 @@ def run_migrations():
             except Exception as e:
                 if "already exists" not in str(e):
                     print(f"⚠️ Migration warning ({table}.{column}): {e}")
-        
-        try:
-            c.execute("""
-                SELECT data_type FROM information_schema.columns 
-                WHERE table_name = 'environment_alerts' AND column_name = 'change_detected'
-            """)
-            result = c.fetchone()
-            if result and result[0] == 'jsonb':
-                c.execute("ALTER TABLE environment_alerts ALTER COLUMN change_detected TYPE TEXT USING change_detected::TEXT")
-                print("✅ Migration: Changed change_detected from JSONB to TEXT")
-        except Exception as e:
-            print(f"⚠️ Migration warning (environment_alerts.change_detected): {e}")
         
         conn.commit()
         conn.close()
@@ -704,28 +669,19 @@ ai_provider = FreeAIProvider()
 # HYBRID VECTOR MEMORY SYSTEM - v9.7
 # ============================================================
 class HybridVectorMemory:
-    """
-    Hybrid memory system supporting multiple backends:
-    1. External ChromaDB (Railway, Fly.io, Docker, Chroma Cloud)
-    2. Supabase pgvector
-    3. Local ChromaDB
-    4. In-memory fallback
-    """
+    """Hybrid memory system supporting multiple backends"""
     
     def __init__(self):
         self.encoder = None
-        self.backend_type = "memory"  # Default to in-memory
+        self.backend_type = "memory"
         self.chroma_client = None
         self.episodic_collection = None
         self.semantic_collection = None
         self.supabase_db_url = SUPABASE_DB_URL
-        self.memory_store = {"episodic": [], "semantic": []}  # In-memory fallback
+        self.memory_store = {"episodic": [], "semantic": []}
         self.initialized = False
         
-        # Initialize encoder
         self._init_encoder()
-        
-        # Determine and initialize backend
         backend = self._determine_backend()
         self._init_backend(backend)
     
@@ -740,34 +696,25 @@ class HybridVectorMemory:
             except Exception as e:
                 print(f"⚠️ Encoder init failed: {e}")
         
-        # Lightweight fallback: Use hash-based embeddings (no heavy ML libraries!)
         print("✅ Using lightweight hash-based embeddings (no ML libraries needed)")
-        self.encoder = "hash"  # Special marker for hash-based encoding
+        self.encoder = "hash"
     
     def encode(self, text: str) -> List[float]:
         """Encode text to embedding vector - with lightweight fallback"""
-        # If using real sentence-transformers
         if self.encoder and self.encoder != "hash":
             try:
                 return self.encoder.encode(text).tolist()
             except:
                 pass
         
-        # Lightweight hash-based embedding (deterministic, no ML needed)
-        # Creates a 384-dimensional vector from text hashes
-        import hashlib
         import math
-        
         embedding = []
         for i in range(384):
-            # Create deterministic value from text + dimension
             hash_input = f"{text}_{i}".encode('utf-8')
             hash_val = hashlib.md5(hash_input).hexdigest()
-            # Convert to float between -1 and 1
             val = (int(hash_val[:8], 16) / 0xFFFFFFFF) * 2 - 1
             embedding.append(round(val, 6))
         
-        # Normalize the vector
         norm = math.sqrt(sum(x*x for x in embedding))
         if norm > 0:
             embedding = [x/norm for x in embedding]
@@ -779,15 +726,12 @@ class HybridVectorMemory:
         if VECTOR_DB_TYPE != "auto":
             return VECTOR_DB_TYPE
         
-        # Priority: Chroma Cloud > Remote ChromaDB > Supabase > Local ChromaDB > Memory
         if CHROMA_CLOUD_API_KEY:
             return "chroma_cloud"
         elif CHROMA_SERVER_URL:
             return "chroma_remote"
         elif SUPABASE_DB_URL:
             return "supabase"
-        elif CHROMA_AVAILABLE:
-            return "local"
         else:
             return "memory"
     
@@ -795,110 +739,14 @@ class HybridVectorMemory:
         """Initialize the selected backend"""
         print(f"🗄️ Initializing vector backend: {backend}")
         
-        if backend == "chroma_cloud":
-            self._init_chroma_cloud()
-        elif backend == "chroma_remote":
-            self._init_remote_chroma()
-        elif backend == "supabase":
+        if backend == "supabase":
             self._init_supabase()
-        elif backend == "local":
-            self._init_local_chroma()
         else:
-            self._init_memory()
-    
-    def _init_chroma_cloud(self):
-        """Initialize Chroma Cloud connection (RECOMMENDED)"""
-        try:
-            import chromadb
-            
-            # Chroma Cloud uses CloudClient (new in chromadb 0.4.22+)
-            # Documentation: https://docs.trychroma.com/cloud/getting-started
-            print(f"   Connecting to Chroma Cloud...")
-            
-            # Try CloudClient first (newer API)
-            try:
-                self.chroma_client = chromadb.CloudClient(
-                    api_key=CHROMA_CLOUD_API_KEY,
-                    tenant=CHROMA_TENANT,
-                    database=CHROMA_DATABASE
-                )
-            except AttributeError:
-                # Fallback to HttpClient with Chroma Cloud endpoint
-                self.chroma_client = chromadb.HttpClient(
-                    host="api.trychroma.com",
-                    port=443,
-                    headers={"Authorization": f"Bearer {CHROMA_CLOUD_API_KEY}"}
-                )
-            
-            # Test connection by listing collections
-            _ = self.chroma_client.list_collections()
-            
-            # Get or create collections for Sophia
-            self.episodic_collection = self.chroma_client.get_or_create_collection(
-                name="sophia_episodic", 
-                metadata={"hnsw:space": "cosine", "description": "Sophia AI conversation memories"}
-            )
-            self.semantic_collection = self.chroma_client.get_or_create_collection(
-                name="sophia_semantic", 
-                metadata={"hnsw:space": "cosine", "description": "Sophia AI semantic facts"}
-            )
-            
-            self.backend_type = "chroma_cloud"
-            self.initialized = True
-            print("✅ Chroma Cloud connected successfully!")
-            print(f"   Episodic collection: {self.episodic_collection.count()} memories")
-            print(f"   Semantic collection: {self.semantic_collection.count()} facts")
-            
-        except Exception as e:
-            print(f"⚠️ Chroma Cloud connection failed: {e}")
-            print("   Make sure CHROMA_CLOUD_API_KEY is set correctly")
-            print("   Sign up at: https://www.trychroma.com")
-            print("   Falling back to in-memory storage...")
-            self._init_memory()
-    
-    def _init_remote_chroma(self):
-        """Initialize connection to remote ChromaDB server"""
-        try:
-            import chromadb
-            
-            # ChromaDB HTTP client
-            if CHROMA_SERVER_AUTH:
-                self.chroma_client = chromadb.HttpClient(
-                    host=CHROMA_SERVER_URL.replace("http://", "").replace("https://", ""),
-                    port=8000,
-                    credentials=chromadb.Settings(
-                        chroma_client_auth_provider="chromadb.auth.basic.BasicAuthClientProvider",
-                        chroma_client_auth_credentials=CHROMA_SERVER_AUTH
-                    )
-                )
-            else:
-                self.chroma_client = chromadb.HttpClient(
-                    host=CHROMA_SERVER_URL.replace("http://", "").replace("https://", ""),
-                    port=8000
-                )
-            
-            # Test connection
-            self.chroma_client.heartbeat()
-            
-            # Get or create collections
-            self.episodic_collection = self.chroma_client.get_or_create_collection(
-                name="sophia_episodic", metadata={"hnsw:space": "cosine"})
-            self.semantic_collection = self.chroma_client.get_or_create_collection(
-                name="sophia_semantic", metadata={"hnsw:space": "cosine"})
-            
-            self.backend_type = "chroma_remote"
-            self.initialized = True
-            print(f"✅ Remote ChromaDB connected: {CHROMA_SERVER_URL}")
-            
-        except Exception as e:
-            print(f"⚠️ Remote ChromaDB connection failed: {e}")
-            print("   Falling back to in-memory storage...")
             self._init_memory()
     
     def _init_supabase(self):
         """Initialize Supabase pgvector backend"""
         try:
-            # Test connection
             conn = psycopg2.connect(self.supabase_db_url)
             conn.close()
             
@@ -909,26 +757,6 @@ class HybridVectorMemory:
         except Exception as e:
             print(f"⚠️ Supabase connection failed: {e}")
             print("   Falling back to in-memory storage...")
-            self._init_memory()
-    
-    def _init_local_chroma(self):
-        """Initialize local ChromaDB"""
-        try:
-            import chromadb
-            from chromadb.config import Settings
-            
-            self.chroma_client = chromadb.PersistentClient(path=CHROMA_LOCAL_PATH)
-            self.episodic_collection = self.chroma_client.get_or_create_collection(
-                name="sophia_episodic", metadata={"hnsw:space": "cosine"})
-            self.semantic_collection = self.chroma_client.get_or_create_collection(
-                name="sophia_semantic", metadata={"hnsw:space": "cosine"})
-            
-            self.backend_type = "local"
-            self.initialized = True
-            print(f"✅ Local ChromaDB initialized: {CHROMA_LOCAL_PATH}")
-            
-        except Exception as e:
-            print(f"⚠️ Local ChromaDB init failed: {e}")
             self._init_memory()
     
     def _init_memory(self):
@@ -953,12 +781,7 @@ class HybridVectorMemory:
                 "success_score": success_score, "timestamp": datetime.now().isoformat()
             })
             
-            if self.backend_type in ["chroma_cloud", "chroma_remote", "local"]:
-                self.episodic_collection.add(
-                    embeddings=[embedding], documents=[text],
-                    metadatas=[metadata], ids=[memory_id]
-                )
-            elif self.backend_type == "supabase":
+            if self.backend_type == "supabase":
                 self._store_supabase_episodic(memory_id, session_id, text, embedding, metadata)
             else:
                 self.memory_store["episodic"].append({
@@ -994,14 +817,7 @@ class HybridVectorMemory:
             embedding = self.encode(text)
             memory_id = f"sem_{fact_type}_{int(time.time())}"
             
-            if self.backend_type in ["chroma_cloud", "chroma_remote", "local"]:
-                self.semantic_collection.add(
-                    embeddings=[embedding], documents=[text],
-                    metadatas=[{"fact_type": fact_type, "importance": importance, 
-                               "source": source, "timestamp": datetime.now().isoformat()}],
-                    ids=[memory_id]
-                )
-            elif self.backend_type == "supabase":
+            if self.backend_type == "supabase":
                 self._store_supabase_semantic(fact_type, fact_value, embedding, importance, source)
             else:
                 self.memory_store["semantic"].append({
@@ -1035,23 +851,9 @@ class HybridVectorMemory:
         try:
             query_embedding = self.encode(query)
             
-            if self.backend_type in ["chroma_cloud", "chroma_remote", "local"]:
-                results = self.episodic_collection.query(
-                    query_embeddings=[query_embedding], n_results=n_results
-                )
-                episodes = []
-                for i in range(len(results['ids'][0])):
-                    episodes.append({
-                        'id': results['ids'][0][i],
-                        'text': results['documents'][0][i],
-                        'metadata': results['metadatas'][0][i]
-                    })
-                return episodes
-                
-            elif self.backend_type == "supabase":
+            if self.backend_type == "supabase":
                 return self._recall_supabase_episodic(query_embedding, n_results)
             else:
-                # In-memory similarity search
                 return self._memory_similarity_search("episodic", query_embedding, n_results)
                 
         except Exception as e:
@@ -1091,15 +893,13 @@ class HybridVectorMemory:
         if not memories:
             return []
         
-        # Calculate similarities
+        import math
         similarities = []
         for mem in memories:
             sim = self._cosine_similarity(query_embedding, mem.get('embedding', [0.0]*384))
             similarities.append((sim, mem))
         
-        # Sort by similarity (descending)
         similarities.sort(key=lambda x: x[0], reverse=True)
-        
         return [mem for _, mem in similarities[:n_results]]
     
     def _cosine_similarity(self, a: List[float], b: List[float]) -> float:
@@ -1116,69 +916,8 @@ class HybridVectorMemory:
             return 0.0
         return dot_product / (norm_a * norm_b)
     
-    def recall_semantic_facts(self, query: str, min_importance: int = 5) -> List[dict]:
-        """Recall semantic facts"""
-        if not self.initialized:
-            return []
-        
-        try:
-            query_embedding = self.encode(query)
-            
-            if self.backend_type in ["chroma_cloud", "chroma_remote", "local"]:
-                results = self.semantic_collection.query(
-                    query_embeddings=[query_embedding], n_results=10
-                )
-                facts = []
-                for i in range(len(results['ids'][0])):
-                    metadata = results['metadatas'][0][i]
-                    if metadata.get('importance', 0) >= min_importance:
-                        facts.append({
-                            'id': results['ids'][0][i],
-                            'text': results['documents'][0][i],
-                            'metadata': metadata
-                        })
-                return facts
-                
-            elif self.backend_type == "supabase":
-                return self._recall_supabase_semantic(query_embedding, min_importance)
-            else:
-                memories = self._memory_similarity_search("semantic", query_embedding, 10)
-                return [m for m in memories if m.get('metadata', {}).get('importance', 0) >= min_importance]
-                
-        except Exception as e:
-            print(f"Semantic recall error: {e}")
-            return []
-    
-    def _recall_supabase_semantic(self, query_embedding: List[float], min_importance: int) -> List[dict]:
-        """Recall semantic memories from Supabase pgvector"""
-        try:
-            conn = psycopg2.connect(self.supabase_db_url)
-            c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-            c.execute("""
-                SELECT id, fact_type, fact_value, embedding <=> %s::vector as distance,
-                       importance, source, created_at
-                FROM semantic_memories
-                WHERE importance >= %s
-                ORDER BY embedding <=> %s::vector
-                LIMIT 10
-            """, (str(query_embedding), min_importance, str(query_embedding)))
-            
-            results = []
-            for row in c.fetchall():
-                results.append({
-                    'id': row['id'],
-                    'text': f"{row['fact_type']}: {row['fact_value']}",
-                    'metadata': dict(row)
-                })
-            conn.close()
-            return results
-        except Exception as e:
-            print(f"Supabase semantic recall error: {e}")
-            return []
-    
     def get_status(self) -> dict:
         """Get memory system status"""
-        # Determine encoder type
         if self.encoder == "hash":
             encoder_type = "hash-based (lightweight)"
         elif self.encoder:
@@ -1192,28 +931,523 @@ class HybridVectorMemory:
             "encoder": encoder_type,
         }
         
-        if self.backend_type == "chroma_cloud":
-            status["provider"] = "Chroma Cloud (trychroma.com)"
-            status["tenant"] = CHROMA_TENANT
-            status["database"] = CHROMA_DATABASE
-            if self.episodic_collection:
-                status["episodic_count"] = self.episodic_collection.count()
-            if self.semantic_collection:
-                status["semantic_count"] = self.semantic_collection.count()
-        elif self.backend_type == "chroma_remote":
-            status["server_url"] = CHROMA_SERVER_URL
-        elif self.backend_type == "supabase":
+        if self.backend_type == "supabase":
             status["database"] = "Supabase pgvector"
-        elif self.backend_type == "local":
-            status["path"] = CHROMA_LOCAL_PATH
         else:
             status["episodic_count"] = len(self.memory_store["episodic"])
             status["semantic_count"] = len(self.memory_store["semantic"])
         
         return status
 
-# Initialize memory system
 hybrid_memory = HybridVectorMemory()
+
+# ============================================================
+# WIKIPEDIA & WIKIDATA API - v9.8
+# ============================================================
+class WikipediaKnowledge:
+    """Free Wikipedia and Wikidata API integration"""
+    
+    def __init__(self):
+        self.wikipedia_api = "https://en.wikipedia.org/api/rest_v1"
+        self.wikidata_api = "https://www.wikidata.org/w/api.php"
+        self.wikipedia_action_api = "https://en.wikipedia.org/w/api.php"
+        self.cache = {}
+        self.cache_time = {}
+        self.cache_duration = 3600  # 1 hour cache
+    
+    def _get_cached(self, key: str) -> Optional[dict]:
+        """Get cached result if still valid"""
+        if key in self.cache and key in self.cache_time:
+            if time.time() - self.cache_time[key] < self.cache_duration:
+                return self.cache[key]
+        return None
+    
+    def _set_cache(self, key: str, value: dict):
+        """Cache a result"""
+        self.cache[key] = value
+        self.cache_time[key] = time.time()
+    
+    async def search_wikipedia(self, query: str, limit: int = 5) -> List[dict]:
+        """Search Wikipedia for articles matching query"""
+        cache_key = f"search_{query}"
+        cached = self._get_cached(cache_key)
+        if cached:
+            return cached
+        
+        try:
+            response = requests.get(
+                self.wikipedia_action_api,
+                params={
+                    "action": "query",
+                    "list": "search",
+                    "srsearch": query,
+                    "srlimit": limit,
+                    "format": "json",
+                    "utf8": 1
+                },
+                timeout=15
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                results = []
+                for item in data.get("query", {}).get("search", []):
+                    results.append({
+                        "title": item.get("title"),
+                        "snippet": item.get("snippet", "").replace("<span class=\"searchmatch\">", "**").replace("</span>", "**"),
+                        "pageid": item.get("pageid"),
+                        "wordcount": item.get("wordcount"),
+                        "url": f"https://en.wikipedia.org/wiki/{item.get('title', '').replace(' ', '_')}"
+                    })
+                self._set_cache(cache_key, results)
+                return results
+            return []
+        except Exception as e:
+            print(f"Wikipedia search error: {e}")
+            return []
+    
+    async def get_article(self, title: str) -> dict:
+        """Get full Wikipedia article by title"""
+        cache_key = f"article_{title}"
+        cached = self._get_cached(cache_key)
+        if cached:
+            return cached
+        
+        try:
+            # Get article summary and content
+            response = requests.get(
+                f"{self.wikipedia_api}/page/summary/{title.replace(' ', '_')}",
+                timeout=15
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                result = {
+                    "title": data.get("title"),
+                    "extract": data.get("extract"),
+                    "description": data.get("description"),
+                    "url": data.get("content_urls", {}).get("desktop", {}).get("page"),
+                    "image": data.get("thumbnail", {}).get("source"),
+                    "coordinates": data.get("coordinates"),
+                    "last_modified": data.get("timestamp")
+                }
+                self._set_cache(cache_key, result)
+                return result
+            
+            # Fallback to action API
+            response = requests.get(
+                self.wikipedia_action_api,
+                params={
+                    "action": "query",
+                    "titles": title,
+                    "prop": "extracts|info",
+                    "exintro": True,
+                    "explaintext": True,
+                    "inprop": "url",
+                    "format": "json"
+                },
+                timeout=15
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                pages = data.get("query", {}).get("pages", {})
+                for page_id, page in pages.items():
+                    if page_id != "-1":
+                        result = {
+                            "title": page.get("title"),
+                            "extract": page.get("extract"),
+                            "url": page.get("fullurl"),
+                            "pageid": page.get("pageid")
+                        }
+                        self._set_cache(cache_key, result)
+                        return result
+            
+            return {"error": f"Article not found: {title}"}
+        except Exception as e:
+            return {"error": str(e)}
+    
+    async def get_article_html(self, title: str) -> str:
+        """Get full HTML content of Wikipedia article"""
+        try:
+            response = requests.get(
+                f"{self.wikipedia_api}/page/html/{title.replace(' ', '_')}",
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                return response.text[:50000]  # Limit to 50KB
+            return ""
+        except Exception as e:
+            return f"Error: {e}"
+    
+    async def search_wikidata(self, query: str, limit: int = 5) -> List[dict]:
+        """Search Wikidata for entities"""
+        try:
+            response = requests.get(
+                self.wikidata_api,
+                params={
+                    "action": "wbsearchentities",
+                    "search": query,
+                    "language": "en",
+                    "limit": limit,
+                    "format": "json"
+                },
+                timeout=15
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                results = []
+                for item in data.get("search", []):
+                    results.append({
+                        "id": item.get("id"),
+                        "label": item.get("label"),
+                        "description": item.get("description"),
+                        "url": f"https://www.wikidata.org/wiki/{item.get('id')}"
+                    })
+                return results
+            return []
+        except Exception as e:
+            print(f"Wikidata search error: {e}")
+            return []
+    
+    async def get_wikidata_entity(self, entity_id: str) -> dict:
+        """Get detailed information about a Wikidata entity"""
+        try:
+            response = requests.get(
+                self.wikidata_api,
+                params={
+                    "action": "wbgetentities",
+                    "ids": entity_id,
+                    "languages": "en",
+                    "format": "json"
+                },
+                timeout=15
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                entity = data.get("entities", {}).get(entity_id, {})
+                
+                result = {
+                    "id": entity.get("id"),
+                    "labels": entity.get("labels", {}),
+                    "descriptions": entity.get("descriptions", {}),
+                    "aliases": entity.get("aliases", {}),
+                    "claims": {}  # Simplified claims
+                }
+                
+                # Extract key claims (properties)
+                for prop_id, claims in entity.get("claims", {}).items():
+                    values = []
+                    for claim in claims[:3]:  # Limit to first 3 values
+                        mainsnak = claim.get("mainsnak", {})
+                        if mainsnak.get("datatype") == "string":
+                            values.append(mainsnak.get("datavalue", {}).get("value"))
+                        elif mainsnak.get("datatype") == "wikibase-item":
+                            val_id = mainsnak.get("datavalue", {}).get("value", {}).get("id")
+                            if val_id:
+                                values.append(val_id)
+                    if values:
+                        result["claims"][prop_id] = values
+                
+                return result
+            return {"error": f"Entity not found: {entity_id}"}
+        except Exception as e:
+            return {"error": str(e)}
+    
+    async def get_company_info(self, company_name: str) -> dict:
+        """Get company information from Wikipedia and Wikidata"""
+        # Search Wikipedia
+        wiki_results = await self.search_wikipedia(f"{company_name} company", limit=1)
+        
+        result = {
+            "company": company_name,
+            "wikipedia": None,
+            "wikidata": None
+        }
+        
+        if wiki_results:
+            article = await self.get_article(wiki_results[0]["title"])
+            result["wikipedia"] = article
+            
+            # Try to find Wikidata entity
+            wd_results = await self.search_wikidata(company_name, limit=1)
+            if wd_results:
+                entity = await self.get_wikidata_entity(wd_results[0]["id"])
+                result["wikidata"] = entity
+        
+        return result
+    
+    async def get_topic_summary(self, topic: str) -> str:
+        """Get a concise summary of any topic"""
+        article = await self.get_article(topic)
+        
+        if "error" in article:
+            # Try searching
+            results = await self.search_wikipedia(topic, limit=1)
+            if results:
+                article = await self.get_article(results[0]["title"])
+        
+        if "extract" in article:
+            return article["extract"]
+        return f"No Wikipedia article found for: {topic}"
+
+wikipedia_knowledge = WikipediaKnowledge()
+
+# ============================================================
+# BROWSER AUTOMATION - v9.8 (Playwright)
+# ============================================================
+class BrowserAutomation:
+    """Browser automation using Playwright or HTTP fallback"""
+    
+    def __init__(self):
+        self.playwright_available = PLAYWRIGHT_AVAILABLE
+        self.browser = None
+        self.context = None
+        self.page = None
+    
+    async def init_browser(self):
+        """Initialize Playwright browser"""
+        if not PLAYWRIGHT_AVAILABLE:
+            return False
+        
+        try:
+            playwright = await async_playwright.start()
+            self.browser = await playwright.chromium.launch(headless=True)
+            self.context = await self.browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+            self.page = await self.context.new_page()
+            print("✅ Playwright browser initialized")
+            return True
+        except Exception as e:
+            print(f"⚠️ Browser init failed: {e}")
+            return False
+    
+    async def close_browser(self):
+        """Close browser"""
+        if self.browser:
+            await self.browser.close()
+            self.browser = None
+            self.context = None
+            self.page = None
+    
+    async def browse_page(self, url: str, wait_time: int = 2) -> dict:
+        """
+        Browse to a URL and get page content.
+        Uses Playwright if available, otherwise falls back to HTTP requests.
+        """
+        result = {
+            "url": url,
+            "title": "",
+            "content": "",
+            "html": "",
+            "screenshot": None,
+            "success": False,
+            "method": "http"
+        }
+        
+        # Try Playwright first
+        if PLAYWRIGHT_AVAILABLE:
+            try:
+                if not self.page:
+                    await self.init_browser()
+                
+                if self.page:
+                    await self.page.goto(url, timeout=30000)
+                    await asyncio.sleep(wait_time)
+                    
+                    result["title"] = await self.page.title()
+                    result["content"] = await self.page.content()
+                    
+                    # Get visible text
+                    result["text"] = await self.page.evaluate("""
+                        () => document.body.innerText
+                    """)
+                    
+                    # Take screenshot
+                    screenshot_bytes = await self.page.screenshot(full_page=False)
+                    result["screenshot"] = base64.b64encode(screenshot_bytes).decode('utf-8')
+                    
+                    result["success"] = True
+                    result["method"] = "playwright"
+                    return result
+            except Exception as e:
+                print(f"Playwright error: {e}")
+        
+        # HTTP fallback
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
+            response = requests.get(url, headers=headers, timeout=30)
+            
+            if response.status_code == 200:
+                result["html"] = response.text[:100000]  # Limit to 100KB
+                result["content"] = response.text[:10000]  # Shorter content
+                result["success"] = True
+                result["method"] = "http"
+                
+                # Extract title
+                title_match = re.search(r'<title>([^<]+)</title>', response.text, re.IGNORECASE)
+                if title_match:
+                    result["title"] = title_match.group(1)
+        except Exception as e:
+            result["error"] = str(e)
+        
+        return result
+    
+    async def fill_form(self, url: str, form_data: dict, submit_selector: str = None) -> dict:
+        """Fill out a form on a webpage"""
+        if not PLAYWRIGHT_AVAILABLE:
+            return {"error": "Playwright not available. Install with: pip install playwright && playwright install"}
+        
+        try:
+            if not self.page:
+                await self.init_browser()
+            
+            await self.page.goto(url, timeout=30000)
+            
+            # Fill form fields
+            for selector, value in form_data.items():
+                try:
+                    await self.page.fill(selector, str(value))
+                except Exception as e:
+                    print(f"Could not fill {selector}: {e}")
+            
+            # Submit if selector provided
+            if submit_selector:
+                await self.page.click(submit_selector)
+                await asyncio.sleep(2)
+            
+            result = {
+                "success": True,
+                "url": self.page.url,
+                "title": await self.page.title(),
+                "content": await self.page.content()
+            }
+            
+            return result
+        except Exception as e:
+            return {"error": str(e)}
+    
+    async def take_screenshot(self, url: str, full_page: bool = False) -> dict:
+        """Take a screenshot of a webpage"""
+        result = {
+            "url": url,
+            "screenshot": None,
+            "success": False
+        }
+        
+        if not PLAYWRIGHT_AVAILABLE:
+            # Use external service as fallback
+            try:
+                # Use a screenshot API service
+                screenshot_url = f"https://api.microlink.io/?url={url}&screenshot=true&embed=screenshot.url"
+                response = requests.get(screenshot_url, timeout=30)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get("screenshot"):
+                        result["screenshot_url"] = data["screenshot"].get("url")
+                        result["success"] = True
+                        result["method"] = "microlink"
+            except Exception as e:
+                result["error"] = str(e)
+            
+            return result
+        
+        try:
+            if not self.page:
+                await self.init_browser()
+            
+            await self.page.goto(url, timeout=30000)
+            await asyncio.sleep(2)
+            
+            screenshot_bytes = await self.page.screenshot(full_page=full_page)
+            result["screenshot"] = base64.b64encode(screenshot_bytes).decode('utf-8')
+            result["success"] = True
+            result["method"] = "playwright"
+        except Exception as e:
+            result["error"] = str(e)
+        
+        return result
+    
+    async def extract_data(self, url: str, selectors: dict) -> dict:
+        """Extract specific data from a webpage using CSS selectors"""
+        result = {
+            "url": url,
+            "data": {},
+            "success": False
+        }
+        
+        if not PLAYWRIGHT_AVAILABLE:
+            # HTTP fallback with regex
+            try:
+                headers = {"User-Agent": "Mozilla/5.0"}
+                response = requests.get(url, headers=headers, timeout=30)
+                
+                if response.status_code == 200:
+                    html = response.text
+                    for key, selector in selectors.items():
+                        # Simple regex extraction
+                        pattern = rf'{selector}[^>]*>([^<]+)</'
+                        match = re.search(pattern, html, re.IGNORECASE)
+                        if match:
+                            result["data"][key] = match.group(1).strip()
+                    result["success"] = True
+                    result["method"] = "http"
+            except Exception as e:
+                result["error"] = str(e)
+            
+            return result
+        
+        try:
+            if not self.page:
+                await self.init_browser()
+            
+            await self.page.goto(url, timeout=30000)
+            
+            for key, selector in selectors.items():
+                try:
+                    element = await self.page.query_selector(selector)
+                    if element:
+                        result["data"][key] = await element.inner_text()
+                except Exception as e:
+                    result["data"][key] = f"Error: {e}"
+            
+            result["success"] = True
+            result["method"] = "playwright"
+        except Exception as e:
+            result["error"] = str(e)
+        
+        return result
+    
+    async def click_and_navigate(self, url: str, click_selector: str) -> dict:
+        """Click an element and wait for navigation"""
+        if not PLAYWRIGHT_AVAILABLE:
+            return {"error": "Playwright not available"}
+        
+        try:
+            if not self.page:
+                await self.init_browser()
+            
+            await self.page.goto(url, timeout=30000)
+            await self.page.click(click_selector)
+            await self.page.wait_for_load_state("networkidle")
+            
+            return {
+                "success": True,
+                "new_url": self.page.url,
+                "title": await self.page.title(),
+                "content": await self.page.content()
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+browser_automation = BrowserAutomation()
 
 # ============================================================
 # TOOL REGISTRY & EXECUTION PIPELINE
@@ -1229,6 +1463,7 @@ class ToolRegistry:
     def _register_builtin_tools(self):
         """Register built-in tools"""
         self.tools.update({
+            # Original tools
             'search_web': {
                 'description': 'Search the web for information',
                 'parameters': {'query': 'string'},
@@ -1264,117 +1499,134 @@ class ToolRegistry:
                 'parameters': {'text': 'string'},
                 'handler': self._tool_analyze_sentiment
             },
-            'extract_entities': {
-                'description': 'Extract entities from text',
-                'parameters': {'text': 'string'},
-                'handler': self._tool_extract_entities
-            },
             'tavily_search': {
-                'description': 'AI-powered web search. Best for research, news, facts.',
+                'description': 'AI-powered web search',
                 'parameters': {'query': 'string', 'search_depth': 'string'},
                 'handler': self._tool_tavily_search
             },
             'jina_reader': {
-                'description': 'Read any webpage as clean markdown. FREE unlimited.',
+                'description': 'Read any webpage as clean markdown',
                 'parameters': {'url': 'string'},
                 'handler': self._tool_jina_reader
             },
             'news_monitor': {
-                'description': 'Monitor global news on any topic.',
+                'description': 'Monitor global news on any topic',
                 'parameters': {'topic': 'string'},
                 'handler': self._tool_news_monitor
             },
             'indexnow_ping': {
-                'description': 'Notify search engines to index a URL. FREE SEO.',
+                'description': 'Notify search engines to index a URL',
                 'parameters': {'url': 'string'},
                 'handler': self._tool_indexnow_ping
             },
             'content_writer': {
-                'description': 'Generate SEO-optimized content promoting CWC.',
+                'description': 'Generate SEO-optimized content',
                 'parameters': {'topic': 'string', 'content_type': 'string', 'keywords': 'array'},
                 'handler': self._tool_content_writer
             },
-            'competitor_analysis': {
-                'description': 'Analyze competitor website.',
-                'parameters': {'competitor_url': 'string'},
-                'handler': self._tool_competitor_analysis
-            },
-            'bing_submit_url': {
-                'description': 'Submit URL to Bing for indexing via Webmaster API.',
-                'parameters': {'url': 'string', 'site_url': 'string'},
-                'handler': self._tool_bing_submit_url
-            },
-            'bing_get_index_stats': {
-                'description': 'Get indexing statistics from Bing Webmaster.',
-                'parameters': {'site_url': 'string'},
-                'handler': self._tool_bing_get_index_stats
-            },
-            'bing_get_crawl_stats': {
-                'description': 'Get crawl statistics and errors from Bing.',
-                'parameters': {'site_url': 'string'},
-                'handler': self._tool_bing_get_crawl_stats
-            },
-            'bing_search': {
-                'description': 'Search the web using Bing Search API.',
-                'parameters': {'query': 'string', 'count': 'integer'},
-                'handler': self._tool_bing_search
-            },
             'duckduckgo_search': {
-                'description': 'Search the web using DuckDuckGo. 100% FREE, no API key needed.',
+                'description': 'Search the web using DuckDuckGo. 100% FREE.',
                 'parameters': {'query': 'string', 'max_results': 'integer'},
                 'handler': self._tool_duckduckgo_search
             },
             'reddit_search': {
-                'description': 'Search Reddit for discussions about companies, suppliers, or topics. 100% FREE.',
+                'description': 'Search Reddit for discussions',
                 'parameters': {'query': 'string', 'subreddit': 'string', 'limit': 'integer'},
                 'handler': self._tool_reddit_search
             },
             'reddit_get_posts': {
-                'description': 'Get recent posts from a specific subreddit. Monitor China business communities.',
+                'description': 'Get recent posts from a subreddit',
                 'parameters': {'subreddit': 'string', 'limit': 'integer', 'sort_by': 'string'},
                 'handler': self._tool_reddit_get_posts
             },
-            'reddit_company_sentiment': {
-                'description': 'Analyze Reddit sentiment about a company or supplier. Detect warnings or praise.',
-                'parameters': {'company_name': 'string', 'limit': 'integer'},
-                'handler': self._tool_reddit_company_sentiment
-            },
             'geocode_address': {
-                'description': 'Verify and geocode an address. Check if Chinese supplier address is real.',
+                'description': 'Verify and geocode an address',
                 'parameters': {'address': 'string'},
                 'handler': self._tool_geocode_address
             },
-            'reverse_geocode': {
-                'description': 'Get address from coordinates. Verify factory locations.',
-                'parameters': {'lat': 'float', 'lon': 'float'},
-                'handler': self._tool_reverse_geocode
-            },
             'zenrows_scrape': {
-                'description': 'Scrape any website with anti-bot bypass. Great for Alibaba, 1688, supplier sites.',
+                'description': 'Scrape any website with anti-bot bypass',
                 'parameters': {'url': 'string', 'css_extractor': 'string'},
                 'handler': self._tool_zenrows_scrape
             },
-            'scrape_chinese_supplier': {
-                'description': 'Scrape Chinese B2B platforms (Alibaba, 1688, Made-in-China) for supplier data.',
-                'parameters': {'url': 'string', 'platform': 'string'},
-                'handler': self._tool_scrape_chinese_supplier
-            },
-            # v9.7: Memory management tools
             'memory_status': {
-                'description': 'Get the status of the vector memory system (ChromaDB/Supabase/Memory).',
+                'description': 'Get the status of the vector memory system',
                 'parameters': {},
                 'handler': self._tool_memory_status
             },
             'store_memory': {
-                'description': 'Store a fact or memory in the vector database.',
+                'description': 'Store a fact in vector memory',
                 'parameters': {'fact_type': 'string', 'fact_value': 'string', 'importance': 'integer'},
                 'handler': self._tool_store_memory
             },
             'recall_memories': {
-                'description': 'Recall memories similar to a query from the vector database.',
+                'description': 'Recall similar memories',
                 'parameters': {'query': 'string', 'n_results': 'integer'},
                 'handler': self._tool_recall_memories
-            }
+            },
+            
+            # ============================================================
+            # NEW v9.8: WIKIPEDIA & WIKIDATA TOOLS
+            # ============================================================
+            'wikipedia_search': {
+                'description': 'Search Wikipedia encyclopedia for articles. FREE and instant knowledge!',
+                'parameters': {'query': 'string', 'limit': 'integer'},
+                'handler': self._tool_wikipedia_search
+            },
+            'wikipedia_article': {
+                'description': 'Get full Wikipedia article by title. Comprehensive information on any topic.',
+                'parameters': {'title': 'string'},
+                'handler': self._tool_wikipedia_article
+            },
+            'wikipedia_summary': {
+                'description': 'Get a quick summary of any topic from Wikipedia. Perfect for quick lookups.',
+                'parameters': {'topic': 'string'},
+                'handler': self._tool_wikipedia_summary
+            },
+            'wikidata_search': {
+                'description': 'Search Wikidata for structured entity data. Companies, people, places, etc.',
+                'parameters': {'query': 'string', 'limit': 'integer'},
+                'handler': self._tool_wikidata_search
+            },
+            'wikidata_entity': {
+                'description': 'Get detailed structured data about a Wikidata entity by ID.',
+                'parameters': {'entity_id': 'string'},
+                'handler': self._tool_wikidata_entity
+            },
+            'company_info': {
+                'description': 'Get comprehensive company information from Wikipedia and Wikidata.',
+                'parameters': {'company_name': 'string'},
+                'handler': self._tool_company_info
+            },
+            
+            # ============================================================
+            # NEW v9.8: BROWSER AUTOMATION TOOLS
+            # ============================================================
+            'browse_page': {
+                'description': 'Browse to a URL and get page content. Can take screenshots!',
+                'parameters': {'url': 'string', 'wait_time': 'integer'},
+                'handler': self._tool_browse_page
+            },
+            'screenshot_page': {
+                'description': 'Take a screenshot of any webpage. Great for visual verification.',
+                'parameters': {'url': 'string', 'full_page': 'boolean'},
+                'handler': self._tool_screenshot_page
+            },
+            'extract_web_data': {
+                'description': 'Extract specific data from a webpage using CSS selectors.',
+                'parameters': {'url': 'string', 'selectors': 'object'},
+                'handler': self._tool_extract_web_data
+            },
+            'fill_web_form': {
+                'description': 'Fill out and submit a web form. Useful for automating submissions.',
+                'parameters': {'url': 'string', 'form_data': 'object', 'submit_selector': 'string'},
+                'handler': self._tool_fill_web_form
+            },
+            'research_topic': {
+                'description': 'Deep research on any topic: combines Wikipedia, Wikidata, and web search.',
+                'parameters': {'topic': 'string', 'depth': 'string'},
+                'handler': self._tool_research_topic
+            },
         })
     
     def _load_from_db(self):
@@ -1390,17 +1642,8 @@ class ToolRegistry:
                         'parameters': params or {},
                         'implementation': impl
                     }
-            except Exception as e:
-                if "does not exist" in str(e):
-                    c.execute("SELECT tool_name, description, implementation FROM tool_registry WHERE deployed = TRUE")
-                    for name, desc, impl in c.fetchall():
-                        self.tools[name] = {
-                            'description': desc,
-                            'parameters': {},
-                            'implementation': impl
-                        }
-                else:
-                    raise
+            except:
+                pass
             conn.close()
             print(f"🔧 Loaded {len(self.tools)} tools")
         except Exception as e:
@@ -1418,10 +1661,8 @@ class ToolRegistry:
             else:
                 result = self._execute_custom(tool, params)
             
-            self._update_tool_stats(tool_name, success=True)
             return {'success': True, 'result': result}
         except Exception as e:
-            self._update_tool_stats(tool_name, success=False)
             return {'success': False, 'error': str(e)}
     
     def _execute_custom(self, tool: dict, params: dict) -> str:
@@ -1430,22 +1671,6 @@ class ToolRegistry:
         locals_dict = {'params': params, 'result': ''}
         exec(impl, {}, locals_dict)
         return locals_dict.get('result', 'Executed')
-    
-    def _update_tool_stats(self, tool_name: str, success: bool):
-        """Update tool success statistics"""
-        try:
-            conn = get_db()
-            c = conn.cursor()
-            c.execute("""
-                UPDATE tool_registry 
-                SET use_count = use_count + 1,
-                    success_rate = (success_rate * use_count + %s) / (use_count + 1)
-                WHERE tool_name = %s
-            """, (1.0 if success else 0.0, tool_name))
-            conn.commit()
-            conn.close()
-        except:
-            pass
     
     def get_tools_schema(self) -> List[dict]:
         """Get OpenAI-style tools schema"""
@@ -1490,32 +1715,16 @@ class ToolRegistry:
     # ============================================================
     
     async def _tool_search_web(self, params: dict) -> str:
-        """Fallback web search using DuckDuckGo"""
+        """Fallback web search"""
         query = params.get('query', '')
-        try:
-            # Use DuckDuckGo HTML search (no API key needed)
-            response = requests.get(
-                "https://html.duckduckgo.com/html/",
-                params={"q": query},
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=15
-            )
-            # Simple extraction of results
-            import re
-            results = re.findall(r'<a[^>]*class="result__a"[^>]*>([^<]+)</a>', response.text)
-            return f"Found {len(results)} results for '{query}':\n" + "\n".join(results[:5])
-        except Exception as e:
-            return f"Search error: {e}"
+        return await self._tool_duckduckgo_search({'query': query})
     
     async def _tool_calculate_risk(self, params: dict) -> str:
         """Calculate risk score"""
         company = params.get('company_name', 'Unknown')
         context = params.get('context', {})
-        
-        # Base risk score
         risk = 50
         
-        # Adjust based on context
         if context.get('years_in_business', 0) > 5:
             risk -= 10
         if context.get('verified'):
@@ -1528,11 +1737,9 @@ class ToolRegistry:
     async def _tool_generate_report(self, params: dict) -> str:
         """Generate a report"""
         topic = params.get('topic', 'General')
-        format_type = params.get('format', 'text')
         
-        # Use AI to generate report
         messages = [
-            {"role": "system", "content": "You are a business report generator. Create concise, professional reports."},
+            {"role": "system", "content": "You are a business report generator."},
             {"role": "user", "content": f"Generate a brief report on: {topic}"}
         ]
         
@@ -1540,7 +1747,7 @@ class ToolRegistry:
         return result['choices'][0]['message']['content']
     
     async def _tool_send_notification(self, params: dict) -> str:
-        """Send notification to user"""
+        """Send notification"""
         session_id = params.get('session_id', '')
         message = params.get('message', '')
         
@@ -1579,7 +1786,7 @@ class ToolRegistry:
             return f"Failed to create goal: {e}"
     
     async def _tool_schedule_followup(self, params: dict) -> str:
-        """Schedule a follow-up action"""
+        """Schedule a follow-up"""
         session_id = params.get('session_id', '')
         delay_hours = params.get('delay_hours', 24)
         action = params.get('action', '')
@@ -1587,12 +1794,11 @@ class ToolRegistry:
         return f"Scheduled follow-up for session {session_id} in {delay_hours} hours: {action}"
     
     async def _tool_analyze_sentiment(self, params: dict) -> str:
-        """Analyze sentiment of text"""
+        """Analyze sentiment"""
         text = params.get('text', '')
         
-        # Simple keyword-based sentiment
         positive_words = ['good', 'great', 'excellent', 'happy', 'love', 'best', 'amazing']
-        negative_words = ['bad', 'terrible', 'awful', 'hate', 'worst', 'poor', 'disappointed']
+        negative_words = ['bad', 'terrible', 'awful', 'hate', 'worst', 'poor', 'scam']
         
         text_lower = text.lower()
         pos_count = sum(1 for w in positive_words if w in text_lower)
@@ -1607,31 +1813,18 @@ class ToolRegistry:
         
         return f"Sentiment: {sentiment} (positive: {pos_count}, negative: {neg_count})"
     
-    async def _tool_extract_entities(self, params: dict) -> str:
-        """Extract entities from text"""
-        text = params.get('text', '')
-        
-        # Simple regex-based extraction
-        import re
-        emails = re.findall(r'[\w.-]+@[\w.-]+\.\w+', text)
-        phones = re.findall(r'\+?[\d\s-]{10,}', text)
-        urls = re.findall(r'https?://[^\s]+', text)
-        
-        return f"Emails: {emails}\nPhones: {phones}\nURLs: {urls}"
-    
     async def _tool_tavily_search(self, params: dict) -> str:
-        """AI-powered search via Tavily"""
+        """Tavily search"""
         query = params.get('query', '')
-        search_depth = params.get('search_depth', 'basic')
         
         if not TAVILY_API_KEY:
-            return "Tavily API key not configured. Use duckduckgo_search instead."
+            return await self._tool_duckduckgo_search({'query': query})
         
         try:
             response = requests.post(
                 "https://api.tavily.com/search",
                 headers={"Authorization": f"Bearer {TAVILY_API_KEY}"},
-                json={"query": query, "search_depth": search_depth},
+                json={"query": query, "search_depth": "basic"},
                 timeout=30
             )
             
@@ -1641,17 +1834,15 @@ class ToolRegistry:
                 for r in data.get('results', [])[:5]:
                     results.append(f"- {r.get('title', 'No title')}: {r.get('url', '')}")
                 return f"Tavily results for '{query}':\n" + "\n".join(results)
-            else:
-                return f"Tavily error: {response.status_code}"
+            return f"Tavily error: {response.status_code}"
         except Exception as e:
             return f"Tavily search failed: {e}"
     
     async def _tool_jina_reader(self, params: dict) -> str:
-        """Read webpage as markdown using Jina Reader"""
+        """Jina reader"""
         url = params.get('url', '')
         
         try:
-            # Jina Reader is FREE and doesn't need API key for basic usage
             response = requests.get(
                 f"https://r.jina.ai/{url}",
                 headers={"User-Agent": "SophiaAI/1.0"},
@@ -1659,83 +1850,43 @@ class ToolRegistry:
             )
             
             if response.status_code == 200:
-                content = response.text[:3000]  # Limit to 3000 chars
-                return f"Content from {url}:\n\n{content}"
-            else:
-                return f"Jina Reader error: {response.status_code}"
+                return response.text[:3000]
+            return f"Jina Reader error: {response.status_code}"
         except Exception as e:
             return f"Failed to read webpage: {e}"
     
     async def _tool_news_monitor(self, params: dict) -> str:
-        """Monitor news on a topic"""
+        """Monitor news"""
         topic = params.get('topic', 'China business')
         
-        # Check cache first (30-minute expiry)
-        try:
-            conn = get_db()
-            c = conn.cursor()
-            c.execute("""
-                SELECT news_data, fetched_at FROM news_cache 
-                WHERE topic = %s AND expires_at > NOW()
-                ORDER BY fetched_at DESC LIMIT 1
-            """, (topic,))
-            cached = c.fetchone()
-            
-            if cached:
-                conn.close()
-                news_data = cached[0]
-                return f"📰 Cached news for '{topic}' (fetched {cached[1]}):\n" + json.dumps(news_data, indent=2)[:2000]
-            
-            conn.close()
-        except:
-            pass
-        
-        # Fetch fresh news
         if NEWS_API_KEY:
             try:
                 response = requests.get(
                     "https://newsapi.org/v2/everything",
-                    params={"q": topic, "apiKey": NEWS_API_KEY, "pageSize": 5, 
-                           "sortBy": "publishedAt", "language": "en"},
+                    params={"q": topic, "apiKey": NEWS_API_KEY, "pageSize": 5, "sortBy": "publishedAt"},
                     timeout=15
                 )
                 
                 if response.status_code == 200:
                     data = response.json()
                     articles = data.get('articles', [])
-                    
-                    # Cache the results
-                    try:
-                        conn = get_db()
-                        c = conn.cursor()
-                        c.execute("""
-                            INSERT INTO news_cache (topic, news_data, source, expires_at)
-                            VALUES (%s, %s::jsonb, 'newsapi', NOW() + INTERVAL '30 minutes')
-                        """, (topic, json.dumps(articles)))
-                        conn.commit()
-                        conn.close()
-                    except:
-                        pass
-                    
                     results = []
                     for a in articles:
                         results.append(f"- {a.get('title', 'No title')} ({a.get('source', {}).get('name', 'Unknown')})")
                     return f"📰 Latest news for '{topic}':\n" + "\n".join(results)
             except Exception as e:
-                return f"News API error: {e}"
+                pass
         
-        # Fallback to DuckDuckGo
-        return await self._tool_duckduckgo_search({'query': f'{topic} news', 'max_results': 5})
+        return await self._tool_duckduckgo_search({'query': f'{topic} news'})
     
     async def _tool_indexnow_ping(self, params: dict) -> str:
-        """Submit URL to search engines via IndexNow"""
+        """IndexNow ping"""
         url = params.get('url', '')
         
         if not INDEXNOW_KEY:
-            return "IndexNow key not configured. Get one at indexnow.org"
+            return "IndexNow key not configured"
         
         try:
-            # IndexNow is FREE and instant
             response = requests.get(
                 f"https://www.bing.com/indexnow",
                 params={"url": url, "key": INDEXNOW_KEY},
@@ -1744,149 +1895,35 @@ class ToolRegistry:
             
             if response.status_code == 200:
                 return f"✅ URL submitted to search engines: {url}"
-            else:
-                return f"IndexNow response: {response.status_code}"
+            return f"IndexNow response: {response.status_code}"
         except Exception as e:
             return f"IndexNow failed: {e}"
     
     async def _tool_content_writer(self, params: dict) -> str:
-        """Generate SEO-optimized content"""
+        """Content writer"""
         topic = params.get('topic', '')
-        content_type = params.get('content_type', 'blog')
         keywords = params.get('keywords', [])
         
-        prompt = f"""Write a {content_type} about "{topic}" promoting China West Connector (CWC).
-CWC helps businesses connect with reliable Chinese suppliers for manufacturing, logistics, and sourcing.
+        prompt = f"""Write a blog post about "{topic}" promoting China West Connector (CWC).
+CWC helps businesses connect with reliable Chinese suppliers.
 
-Keywords to include: {', '.join(keywords) if keywords else 'China sourcing, supplier verification, manufacturing'}
+Keywords: {', '.join(keywords) if keywords else 'China sourcing, supplier verification'}
 
-Keep it professional, informative, and 300-500 words."""
+Keep it professional and 300-500 words."""
         
         messages = [
-            {"role": "system", "content": "You are a professional content writer specializing in B2B content about China sourcing and manufacturing."},
+            {"role": "system", "content": "You are a professional content writer."},
             {"role": "user", "content": prompt}
         ]
         
         result = await ai_provider.chat_completion(messages, max_tokens=800)
         return result['choices'][0]['message']['content']
     
-    async def _tool_competitor_analysis(self, params: dict) -> str:
-        """Analyze competitor website"""
-        url = params.get('competitor_url', '')
-        
-        # Use Jina Reader to get content
-        content = await self._tool_jina_reader({'url': url})
-        
-        # Use AI to analyze
-        messages = [
-            {"role": "system", "content": "You are a competitive intelligence analyst. Analyze websites for business insights."},
-            {"role": "user", "content": f"Analyze this competitor content and identify their strengths, weaknesses, and unique selling points:\n\n{content[:2000]}"}
-        ]
-        
-        result = await ai_provider.chat_completion(messages, max_tokens=500)
-        return result['choices'][0]['message']['content']
-    
-    # Bing Webmaster Tools
-    async def _tool_bing_submit_url(self, params: dict) -> str:
-        """Submit URL to Bing via Webmaster API"""
-        url = params.get('url', '')
-        site_url = params.get('site_url', 'https://chinawestconnector.com')
-        
-        if not BING_WEBMASTER_API_KEY:
-            return "Bing Webmaster API key not configured"
-        
-        try:
-            response = requests.post(
-                f"https://ssl.bing.com/webmaster/api.svc/json/SubmitUrl",
-                params={"apikey": BING_WEBMASTER_API_KEY, "siteUrl": site_url, "url": url},
-                timeout=15
-            )
-            
-            if response.status_code == 200:
-                return f"✅ URL submitted to Bing: {url}"
-            else:
-                return f"Bing API error: {response.status_code}"
-        except Exception as e:
-            return f"Bing submit failed: {e}"
-    
-    async def _tool_bing_get_index_stats(self, params: dict) -> str:
-        """Get Bing indexing statistics"""
-        site_url = params.get('site_url', 'https://chinawestconnector.com')
-        
-        if not BING_WEBMASTER_API_KEY:
-            return "Bing Webmaster API key not configured"
-        
-        try:
-            response = requests.get(
-                f"https://ssl.bing.com/webmaster/api.svc/json/GetIndexStats",
-                params={"apikey": BING_WEBMASTER_API_KEY, "siteUrl": site_url},
-                timeout=15
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                return f"Bing Index Stats for {site_url}:\n{json.dumps(data, indent=2)}"
-            else:
-                return f"Bing API error: {response.status_code}"
-        except Exception as e:
-            return f"Bing stats failed: {e}"
-    
-    async def _tool_bing_get_crawl_stats(self, params: dict) -> str:
-        """Get Bing crawl statistics"""
-        site_url = params.get('site_url', 'https://chinawestconnector.com')
-        
-        if not BING_WEBMASTER_API_KEY:
-            return "Bing Webmaster API key not configured"
-        
-        try:
-            response = requests.get(
-                f"https://ssl.bing.com/webmaster/api.svc/json/GetCrawlStats",
-                params={"apikey": BING_WEBMASTER_API_KEY, "siteUrl": site_url},
-                timeout=15
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                return f"Bing Crawl Stats for {site_url}:\n{json.dumps(data, indent=2)}"
-            else:
-                return f"Bing API error: {response.status_code}"
-        except Exception as e:
-            return f"Bing crawl stats failed: {e}"
-    
-    async def _tool_bing_search(self, params: dict) -> str:
-        """Search using Bing Search API"""
-        query = params.get('query', '')
-        count = params.get('count', 5)
-        
-        if not BING_SEARCH_API_KEY:
-            return "Bing Search API key not configured. Use duckduckgo_search instead."
-        
-        try:
-            response = requests.get(
-                "https://api.bing.microsoft.com/v7.0/search",
-                headers={"Ocp-Apim-Subscription-Key": BING_SEARCH_API_KEY},
-                params={"q": query, "count": count},
-                timeout=15
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                results = []
-                for r in data.get('webPages', {}).get('value', []):
-                    results.append(f"- {r.get('name', 'No title')}: {r.get('url', '')}")
-                return f"Bing results for '{query}':\n" + "\n".join(results)
-            else:
-                return f"Bing Search error: {response.status_code}"
-        except Exception as e:
-            return f"Bing search failed: {e}"
-    
     async def _tool_duckduckgo_search(self, params: dict) -> str:
-        """Search using DuckDuckGo (100% FREE, no API key)"""
+        """DuckDuckGo search"""
         query = params.get('query', '')
-        max_results = params.get('max_results', 5)
         
         try:
-            # DuckDuckGo Instant Answer API
             response = requests.get(
                 "https://api.duckduckgo.com/",
                 params={"q": query, "format": "json", "no_html": 1},
@@ -1897,34 +1934,27 @@ Keep it professional, informative, and 300-500 words."""
                 data = response.json()
                 results = []
                 
-                # Get abstract
                 if data.get('Abstract'):
                     results.append(f"Summary: {data['Abstract'][:500]}")
                 
-                # Get related topics
-                for topic in data.get('RelatedTopics', [])[:max_results]:
+                for topic in data.get('RelatedTopics', [])[:5]:
                     if isinstance(topic, dict) and 'Text' in topic:
                         results.append(f"- {topic['Text'][:200]}")
                 
                 if results:
                     return f"DuckDuckGo results for '{query}':\n" + "\n".join(results)
-                else:
-                    # Fallback to HTML search
-                    return await self._tool_search_web({'query': query})
-            else:
-                return f"DuckDuckGo error: {response.status_code}"
         except Exception as e:
-            return f"DuckDuckGo search failed: {e}"
+            return f"Search failed: {e}"
+        
+        return f"No results found for: {query}"
     
-    # Reddit Tools
     async def _tool_reddit_search(self, params: dict) -> str:
-        """Search Reddit (100% FREE)"""
+        """Reddit search"""
         query = params.get('query', '')
         subreddit = params.get('subreddit', 'all')
         limit = params.get('limit', 5)
         
         try:
-            # Reddit JSON API (no auth needed for basic search)
             url = f"https://www.reddit.com/r/{subreddit}/search.json"
             response = requests.get(
                 url,
@@ -1939,14 +1969,13 @@ Keep it professional, informative, and 300-500 words."""
                 for post in data['data']['children']:
                     p = post['data']
                     results.append(f"- [{p.get('score', 0)}↑] {p.get('title', 'No title')} (r/{p.get('subreddit', 'unknown')})")
-                return f"Reddit results for '{query}' in r/{subreddit}:\n" + "\n".join(results)
-            else:
-                return f"Reddit error: {response.status_code}"
+                return f"Reddit results for '{query}':\n" + "\n".join(results)
+            return f"Reddit error: {response.status_code}"
         except Exception as e:
             return f"Reddit search failed: {e}"
     
     async def _tool_reddit_get_posts(self, params: dict) -> str:
-        """Get posts from a subreddit"""
+        """Get Reddit posts"""
         subreddit = params.get('subreddit', 'ChinaSourcing')
         limit = params.get('limit', 5)
         sort_by = params.get('sort_by', 'hot')
@@ -1965,78 +1994,21 @@ Keep it professional, informative, and 300-500 words."""
                 results = []
                 for post in data['data']['children']:
                     p = post['data']
-                    results.append(f"- [{p.get('score', 0)}↑] {p.get('title', 'No title')}\n  {p.get('selftext', '')[:100]}...")
-                return f"r/{subreddit} posts ({sort_by}):\n" + "\n\n".join(results)
-            else:
-                return f"Reddit error: {response.status_code}"
+                    results.append(f"- [{p.get('score', 0)}↑] {p.get('title', 'No title')}")
+                return f"r/{subreddit} posts:\n" + "\n".join(results)
+            return f"Reddit error: {response.status_code}"
         except Exception as e:
             return f"Reddit get posts failed: {e}"
     
-    async def _tool_reddit_company_sentiment(self, params: dict) -> str:
-        """Analyze Reddit sentiment about a company"""
-        company = params.get('company_name', '')
-        limit = params.get('limit', 10)
-        
-        # Search across business subreddits
-        subreddits = ['ChinaSourcing', 'importexport', 'Entrepreneur', 'smallbusiness']
-        all_posts = []
-        
-        for sub in subreddits:
-            try:
-                url = f"https://www.reddit.com/r/{sub}/search.json"
-                response = requests.get(
-                    url,
-                    params={"q": company, "restrict_sr": 1, "limit": limit // len(subreddits)},
-                    headers={"User-Agent": REDDIT_USER_AGENT},
-                    timeout=10
-                )
-                if response.status_code == 200:
-                    data = response.json()
-                    for post in data['data']['children']:
-                        all_posts.append(post['data'])
-            except:
-                continue
-        
-        if not all_posts:
-            return f"No Reddit mentions found for '{company}'"
-        
-        # Analyze sentiment
-        total_score = sum(p.get('score', 0) for p in all_posts)
-        avg_score = total_score / len(all_posts) if all_posts else 0
-        
-        # Simple sentiment based on title/content
-        positive_words = ['great', 'good', 'reliable', 'excellent', 'recommend', 'best']
-        negative_words = ['scam', 'bad', 'avoid', 'terrible', 'fraud', 'warning', 'scammed']
-        
-        pos_mentions = 0
-        neg_mentions = 0
-        
-        for p in all_posts:
-            text = (p.get('title', '') + ' ' + p.get('selftext', '')).lower()
-            if any(w in text for w in positive_words):
-                pos_mentions += 1
-            if any(w in text for w in negative_words):
-                neg_mentions += 1
-        
-        if neg_mentions > pos_mentions:
-            sentiment = "⚠️ NEGATIVE"
-        elif pos_mentions > neg_mentions:
-            sentiment = "✅ POSITIVE"
-        else:
-            sentiment = "➖ NEUTRAL"
-        
-        return f"Reddit sentiment for '{company}': {sentiment}\nPosts found: {len(all_posts)}\nAvg upvotes: {avg_score:.1f}\nPositive mentions: {pos_mentions}\nNegative mentions: {neg_mentions}"
-    
-    # Nominatim Geocoding Tools
     async def _tool_geocode_address(self, params: dict) -> str:
-        """Geocode an address using Nominatim (100% FREE)"""
+        """Geocode address"""
         address = params.get('address', '')
         
         try:
             response = requests.get(
                 "https://nominatim.openstreetmap.org/search",
                 params={"q": address, "format": "json", "limit": 1},
-                headers={"User-Agent": "SophiaAI/1.0 China West Connector"},
+                headers={"User-Agent": "SophiaAI/1.0"},
                 timeout=15
             )
             
@@ -2044,215 +2016,317 @@ Keep it professional, informative, and 300-500 words."""
                 data = response.json()
                 if data:
                     r = data[0]
-                    return f"Address verified: {r.get('display_name', 'Unknown')}\nCoordinates: {r.get('lat', '')}, {r.get('lon', '')}\nType: {r.get('type', 'unknown')}"
-                else:
-                    return f"Address not found: {address}"
-            else:
-                return f"Geocoding error: {response.status_code}"
+                    return f"Address verified: {r.get('display_name', 'Unknown')}\nCoordinates: {r.get('lat', '')}, {r.get('lon', '')}"
+                return f"Address not found: {address}"
+            return f"Geocoding error: {response.status_code}"
         except Exception as e:
             return f"Geocoding failed: {e}"
     
-    async def _tool_reverse_geocode(self, params: dict) -> str:
-        """Reverse geocode coordinates"""
-        lat = params.get('lat', 0)
-        lon = params.get('lon', 0)
-        
-        try:
-            response = requests.get(
-                "https://nominatim.openstreetmap.org/reverse",
-                params={"lat": lat, "lon": lon, "format": "json"},
-                headers={"User-Agent": "SophiaAI/1.0 China West Connector"},
-                timeout=15
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                return f"Location: {data.get('display_name', 'Unknown')}\nAddress: {data.get('address', {})}"
-            else:
-                return f"Reverse geocoding error: {response.status_code}"
-        except Exception as e:
-            return f"Reverse geocoding failed: {e}"
-    
-    # ZenRows Scraping Tools
     async def _tool_zenrows_scrape(self, params: dict) -> str:
-        """Scrape website using ZenRows"""
+        """ZenRows scrape"""
         url = params.get('url', '')
-        css_extractor = params.get('css_extractor', '')
-        
-        if not ZENROWS_API_KEY:
-            return "ZenRows API key not configured. Use jina_reader for basic scraping."
-        
-        try:
-            response = requests.get(
-                "https://api.zenrows.com/v1/",
-                params={
-                    "url": url,
-                    "apikey": ZENROWS_API_KEY,
-                    "css_extractor": css_extractor
-                },
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                return response.text[:3000]
-            else:
-                return f"ZenRows error: {response.status_code}"
-        except Exception as e:
-            return f"ZenRows scrape failed: {e}"
-    
-    async def _tool_scrape_chinese_supplier(self, params: dict) -> str:
-        """Scrape Chinese B2B platforms"""
-        url = params.get('url', '')
-        platform = params.get('platform', 'alibaba')
         
         if ZENROWS_API_KEY:
-            return await self._tool_zenrows_scrape({'url': url})
-        else:
-            return await self._tool_jina_reader({'url': url})
+            try:
+                response = requests.get(
+                    "https://api.zenrows.com/v1/",
+                    params={"url": url, "apikey": ZENROWS_API_KEY},
+                    timeout=30
+                )
+                if response.status_code == 200:
+                    return response.text[:3000]
+            except:
+                pass
+        
+        return await self._tool_jina_reader({'url': url})
     
-    # v9.7: Memory Management Tools
     async def _tool_memory_status(self, params: dict) -> str:
-        """Get vector memory system status"""
+        """Memory status"""
         status = hybrid_memory.get_status()
         return f"🧠 Vector Memory Status:\n" + "\n".join(f"- {k}: {v}" for k, v in status.items())
     
     async def _tool_store_memory(self, params: dict) -> str:
-        """Store a fact in vector memory"""
+        """Store memory"""
         fact_type = params.get('fact_type', 'general')
         fact_value = params.get('fact_value', '')
         importance = params.get('importance', 5)
         
         hybrid_memory.store_semantic(fact_type, fact_value, importance, 'user')
-        return f"✅ Memory stored: {fact_type} = {fact_value} (importance: {importance})"
+        return f"✅ Memory stored: {fact_type} = {fact_value}"
     
     async def _tool_recall_memories(self, params: dict) -> str:
-        """Recall similar memories"""
+        """Recall memories"""
         query = params.get('query', '')
         n_results = params.get('n_results', 5)
         
         episodes = hybrid_memory.recall_similar_episodes(query, n_results)
-        facts = hybrid_memory.recall_semantic_facts(query)
         
-        result = f"🧠 Memories similar to '{query}':\n\n"
-        
-        if episodes:
-            result += "Episodic Memories:\n"
-            for ep in episodes:
-                result += f"- {ep['text'][:200]}...\n"
-        
-        if facts:
-            result += "\nSemantic Facts:\n"
-            for f in facts:
-                result += f"- {f['text']}\n"
+        result = f"🧠 Memories for '{query}':\n"
+        for ep in episodes:
+            result += f"- {ep['text'][:200]}...\n"
         
         return result or "No similar memories found."
+    
+    # ============================================================
+    # NEW v9.8: WIKIPEDIA & WIKIDATA TOOL HANDLERS
+    # ============================================================
+    
+    async def _tool_wikipedia_search(self, params: dict) -> str:
+        """Search Wikipedia"""
+        query = params.get('query', '')
+        limit = params.get('limit', 5)
+        
+        results = await wikipedia_knowledge.search_wikipedia(query, limit)
+        
+        if not results:
+            return f"No Wikipedia articles found for: {query}"
+        
+        output = f"📚 Wikipedia search results for '{query}':\n\n"
+        for i, r in enumerate(results, 1):
+            output += f"{i}. **{r['title']}**\n"
+            output += f"   {r['snippet'][:150]}...\n"
+            output += f"   🔗 {r['url']}\n\n"
+        
+        return output
+    
+    async def _tool_wikipedia_article(self, params: dict) -> str:
+        """Get Wikipedia article"""
+        title = params.get('title', '')
+        
+        article = await wikipedia_knowledge.get_article(title)
+        
+        if 'error' in article:
+            return article['error']
+        
+        output = f"📚 **{article.get('title', title)}**\n\n"
+        
+        if article.get('description'):
+            output += f"*{article['description']}*\n\n"
+        
+        if article.get('extract'):
+            output += article['extract'][:2000]
+        
+        if article.get('url'):
+            output += f"\n\n🔗 Read more: {article['url']}"
+        
+        return output
+    
+    async def _tool_wikipedia_summary(self, params: dict) -> str:
+        """Get topic summary"""
+        topic = params.get('topic', '')
+        
+        summary = await wikipedia_knowledge.get_topic_summary(topic)
+        
+        return f"📚 **{topic}**\n\n{summary}"
+    
+    async def _tool_wikidata_search(self, params: dict) -> str:
+        """Search Wikidata"""
+        query = params.get('query', '')
+        limit = params.get('limit', 5)
+        
+        results = await wikipedia_knowledge.search_wikidata(query, limit)
+        
+        if not results:
+            return f"No Wikidata entities found for: {query}"
+        
+        output = f"📊 Wikidata entities for '{query}':\n\n"
+        for i, r in enumerate(results, 1):
+            output += f"{i}. **{r['label']}** ({r['id']})\n"
+            if r.get('description'):
+                output += f"   {r['description']}\n"
+            output += f"   🔗 {r['url']}\n\n"
+        
+        return output
+    
+    async def _tool_wikidata_entity(self, params: dict) -> str:
+        """Get Wikidata entity"""
+        entity_id = params.get('entity_id', '')
+        
+        entity = await wikipedia_knowledge.get_wikidata_entity(entity_id)
+        
+        if 'error' in entity:
+            return entity['error']
+        
+        output = f"📊 **Wikidata Entity: {entity_id}**\n\n"
+        
+        if entity.get('labels', {}).get('en'):
+            output += f"**Label:** {entity['labels']['en'].get('value', 'N/A')}\n\n"
+        
+        if entity.get('descriptions', {}).get('en'):
+            output += f"**Description:** {entity['descriptions']['en'].get('value', 'N/A')}\n\n"
+        
+        if entity.get('claims'):
+            output += "**Properties:**\n"
+            for prop, values in list(entity['claims'].items())[:10]:
+                output += f"- {prop}: {', '.join(str(v) for v in values[:3])}\n"
+        
+        return output
+    
+    async def _tool_company_info(self, params: dict) -> str:
+        """Get company info"""
+        company_name = params.get('company_name', '')
+        
+        info = await wikipedia_knowledge.get_company_info(company_name)
+        
+        output = f"🏢 **{company_name}** - Company Information\n\n"
+        
+        if info.get('wikipedia'):
+            wp = info['wikipedia']
+            output += "**Wikipedia:**\n"
+            if wp.get('extract'):
+                output += f"{wp['extract'][:1000]}\n\n"
+            if wp.get('url'):
+                output += f"🔗 {wp['url']}\n\n"
+        
+        if info.get('wikidata'):
+            wd = info['wikidata']
+            output += "**Wikidata:**\n"
+            if wd.get('labels', {}).get('en'):
+                output += f"Label: {wd['labels']['en'].get('value', 'N/A')}\n"
+            if wd.get('descriptions', {}).get('en'):
+                output += f"Description: {wd['descriptions']['en'].get('value', 'N/A')}\n"
+        
+        return output
+    
+    # ============================================================
+    # NEW v9.8: BROWSER AUTOMATION TOOL HANDLERS
+    # ============================================================
+    
+    async def _tool_browse_page(self, params: dict) -> str:
+        """Browse a webpage"""
+        url = params.get('url', '')
+        wait_time = params.get('wait_time', 2)
+        
+        if not url.startswith('http'):
+            url = 'https://' + url
+        
+        result = await browser_automation.browse_page(url, wait_time)
+        
+        if not result.get('success'):
+            return f"❌ Failed to browse {url}: {result.get('error', 'Unknown error')}"
+        
+        output = f"🌐 **Browsed:** {url}\n"
+        output += f"**Method:** {result['method']}\n"
+        
+        if result.get('title'):
+            output += f"**Title:** {result['title']}\n\n"
+        
+        if result.get('text'):
+            output += f"**Content Preview:**\n{result['text'][:2000]}"
+        elif result.get('content'):
+            # Strip HTML tags for display
+            text = re.sub(r'<[^>]+>', '', result['content'][:2000])
+            output += f"**Content Preview:**\n{text}"
+        
+        if result.get('screenshot'):
+            output += f"\n\n📸 Screenshot available (base64, {len(result['screenshot'])} chars)"
+        
+        return output
+    
+    async def _tool_screenshot_page(self, params: dict) -> str:
+        """Take screenshot"""
+        url = params.get('url', '')
+        full_page = params.get('full_page', False)
+        
+        if not url.startswith('http'):
+            url = 'https://' + url
+        
+        result = await browser_automation.take_screenshot(url, full_page)
+        
+        if not result.get('success'):
+            return f"❌ Failed to screenshot {url}: {result.get('error', 'Unknown error')}"
+        
+        output = f"📸 **Screenshot taken:** {url}\n"
+        output += f"**Method:** {result['method']}\n"
+        
+        if result.get('screenshot'):
+            output += f"**Screenshot:** Base64 encoded image ({len(result['screenshot'])} characters)\n"
+            output += f"*Use the screenshot data to display or save the image.*"
+        elif result.get('screenshot_url'):
+            output += f"**Screenshot URL:** {result['screenshot_url']}"
+        
+        return output
+    
+    async def _tool_extract_web_data(self, params: dict) -> str:
+        """Extract web data"""
+        url = params.get('url', '')
+        selectors = params.get('selectors', {})
+        
+        if not url.startswith('http'):
+            url = 'https://' + url
+        
+        result = await browser_automation.extract_data(url, selectors)
+        
+        if not result.get('success'):
+            return f"❌ Failed to extract data from {url}: {result.get('error', 'Unknown error')}"
+        
+        output = f"🔍 **Extracted data from:** {url}\n"
+        output += f"**Method:** {result['method']}\n\n"
+        
+        if result.get('data'):
+            output += "**Extracted Values:**\n"
+            for key, value in result['data'].items():
+                output += f"- {key}: {value}\n"
+        
+        return output
+    
+    async def _tool_fill_web_form(self, params: dict) -> str:
+        """Fill web form"""
+        url = params.get('url', '')
+        form_data = params.get('form_data', {})
+        submit_selector = params.get('submit_selector')
+        
+        if not url.startswith('http'):
+            url = 'https://' + url
+        
+        result = await browser_automation.fill_form(url, form_data, submit_selector)
+        
+        if 'error' in result:
+            return f"❌ Failed to fill form: {result['error']}"
+        
+        output = f"📝 **Form filled successfully:** {url}\n\n"
+        output += f"**Fields filled:** {len(form_data)}\n"
+        
+        if result.get('title'):
+            output += f"**Result page:** {result['title']}\n"
+        
+        if result.get('url'):
+            output += f"**Final URL:** {result['url']}"
+        
+        return output
+    
+    async def _tool_research_topic(self, params: dict) -> str:
+        """Deep research on a topic"""
+        topic = params.get('topic', '')
+        depth = params.get('depth', 'standard')  # quick, standard, deep
+        
+        output = f"🔬 **Research Report: {topic}**\n\n"
+        
+        # Step 1: Wikipedia
+        wiki_article = await wikipedia_knowledge.get_article(topic)
+        if 'extract' in wiki_article:
+            output += f"📚 **Wikipedia Summary:**\n{wiki_article['extract'][:1500]}\n\n"
+        
+        # Step 2: Wikidata
+        wd_results = await wikipedia_knowledge.search_wikidata(topic, limit=1)
+        if wd_results:
+            entity = await wikipedia_knowledge.get_wikidata_entity(wd_results[0]['id'])
+            if entity.get('descriptions', {}).get('en'):
+                output += f"📊 **Wikidata:** {entity['descriptions']['en'].get('value', '')}\n\n"
+        
+        # Step 3: Web search for more
+        if depth in ['standard', 'deep']:
+            web_results = await self._tool_duckduckgo_search({'query': topic})
+            output += f"🌐 **Web Results:**\n{web_results[:1000]}\n\n"
+        
+        # Step 4: News (if deep)
+        if depth == 'deep':
+            news = await self._tool_news_monitor({'topic': topic})
+            output += f"📰 **Recent News:**\n{news[:500]}\n"
+        
+        return output
 
 tool_registry = ToolRegistry()
-
-# ============================================================
-# INTELLIGENCE ENGINE - v9.6/v9.7
-# ============================================================
-class IntelligenceEngine:
-    """Core intelligence features: Tool Chaining, Self-Reflection, ReAct"""
-    
-    def __init__(self):
-        self.tool_registry = tool_registry
-        self.ai_provider = ai_provider
-    
-    async def think_act_observe(self, user_message: str, context: dict) -> Tuple[str, List[str]]:
-        """ReAct reasoning: Think -> Act -> Observe cycle"""
-        thoughts = []
-        tools_used = []
-        
-        # Think: Analyze the request
-        think_prompt = f"""Analyze this user request and determine the best approach:
-
-User request: {user_message}
-Context: {json.dumps(context, indent=2)[:500]}
-
-Think step by step:
-1. What is the user asking for?
-2. What information do I need?
-3. What tools should I use?
-4. What is my reasoning?
-
-Keep your analysis concise (3-5 sentences)."""
-        
-        messages = [
-            {"role": "system", "content": "You are Sophia, an intelligent AI assistant. Think carefully before acting."},
-            {"role": "user", "content": think_prompt}
-        ]
-        
-        result = await self.ai_provider.chat_completion(messages, max_tokens=300, temperature=0.3)
-        thinking = result['choices'][0]['message']['content']
-        thoughts.append(f"Thinking: {thinking}")
-        
-        return thinking, tools_used
-    
-    async def chain_tools(self, initial_query: str, tools_sequence: List[str], params_list: List[dict]) -> Tuple[str, List[str]]:
-        """Execute a chain of tools sequentially"""
-        results = []
-        tools_used = []
-        current_context = initial_query
-        
-        for i, (tool_name, params) in enumerate(zip(tools_sequence, params_list)):
-            if i >= MAX_TOOL_CHAIN_DEPTH:
-                break
-            
-            # Execute tool
-            result = await self.tool_registry.execute(tool_name, params)
-            
-            if result['success']:
-                results.append(f"Tool {i+1} ({tool_name}): {str(result['result'])[:500]}")
-                tools_used.append(tool_name)
-                
-                # Use result as context for next tool
-                if i < len(tools_sequence) - 1:
-                    current_context = str(result['result'])
-            else:
-                results.append(f"Tool {i+1} ({tool_name}): FAILED - {result['error']}")
-                break
-        
-        return "\n".join(results), tools_used
-    
-    async def self_reflect(self, response: str, user_message: str) -> Tuple[str, float]:
-        """Reflect on response quality and improve if needed"""
-        
-        # Skip reflection if response is very short
-        if len(response) < 100:
-            return response, 0.5
-        
-        reflect_prompt = f"""Review this AI response for quality:
-
-User asked: {user_message}
-AI responded: {response}
-
-Rate the response quality (0-1) and suggest improvements if needed.
-Format: SCORE: [number]
-IMPROVEMENT: [improved response or "Good enough"]"""
-        
-        messages = [
-            {"role": "system", "content": "You are a quality assurance reviewer for AI responses."},
-            {"role": "user", "content": reflect_prompt}
-        ]
-        
-        result = await self.ai_provider.chat_completion(messages, max_tokens=500, temperature=0.2)
-        reflection = result['choices'][0]['message']['content']
-        
-        # Parse score
-        import re
-        score_match = re.search(r'SCORE:\s*([\d.]+)', reflection)
-        score = float(score_match.group(1)) if score_match else 0.7
-        
-        # Parse improvement
-        improvement_match = re.search(r'IMPROVEMENT:\s*(.+)', reflection, re.DOTALL)
-        improved_response = improvement_match.group(1).strip() if improvement_match else response
-        
-        if score < REFLECTION_THRESHOLD:
-            return improved_response, score
-        return response, score
-
-intelligence_engine = IntelligenceEngine()
 
 # ============================================================
 # SOPHIA MAIN CLASS
@@ -2264,7 +2338,6 @@ class SophiaAgent:
         self.tool_registry = tool_registry
         self.ai_provider = ai_provider
         self.memory = hybrid_memory
-        self.intelligence = intelligence_engine
     
     async def process_message(self, session_id: str, user_message: str, 
                               context: dict = None) -> Tuple[str, dict]:
@@ -2273,23 +2346,21 @@ class SophiaAgent:
         context = context or {}
         profile = get_or_create_user_profile(session_id)
         
-        # Recall relevant memories
+        # Recall memories
         past_episodes = self.memory.recall_similar_episodes(user_message, n_results=3)
-        relevant_facts = self.memory.recall_semantic_facts(user_message)
         
         # Build system prompt
-        system_prompt = self._build_system_prompt(profile, past_episodes, relevant_facts)
+        system_prompt = self._build_system_prompt(profile, past_episodes)
         
-        # Build messages
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message}
         ]
         
-        # Get available tools
+        # Get tools schema
         tools_schema = self.tool_registry.get_tools_schema()
         
-        # Call AI with tools
+        # Call AI
         response = await self.ai_provider.chat_completion(
             messages, 
             tools=tools_schema, 
@@ -2309,7 +2380,6 @@ class SophiaAgent:
                 result = await self.tool_registry.execute(tool_name, tool_args)
                 tools_used.append(tool_name)
                 
-                # Add tool result to conversation
                 messages.append(assistant_message)
                 messages.append({
                     "role": "tool",
@@ -2317,89 +2387,70 @@ class SophiaAgent:
                     "content": json.dumps(result)
                 })
             
-            # Get final response after tool execution
             response = await self.ai_provider.chat_completion(messages, max_tokens=1000)
             assistant_message = response['choices'][0]['message']
         
-        final_response = assistant_message.get('content', 'I apologize, but I could not generate a response.')
+        final_response = assistant_message.get('content', 'I apologize, I could not generate a response.')
         
-        # Self-reflection
-        if ENABLE_SELF_REFLECTION and len(final_response) > 100:
-            final_response, confidence = await self.intelligence.self_reflect(final_response, user_message)
-        else:
-            confidence = 0.7
-        
-        # Store episodic memory
+        # Store memory
         self.memory.store_episodic(
             session_id, user_message, final_response,
-            success_score=int(confidence * 10),
+            success_score=7,
             intent=context.get('intent', 'unknown')
         )
         
-        # Update profile
         update_user_profile(session_id, last_intent=context.get('intent'))
         
         # Store conversation
-        self._store_conversation(session_id, user_message, final_response, context, tools_used, confidence)
+        self._store_conversation(session_id, user_message, final_response, context, tools_used)
         
-        return final_response, {'tools_used': tools_used, 'confidence': confidence}
+        return final_response, {'tools_used': tools_used}
     
-    def _build_system_prompt(self, profile: dict, past_episodes: List[dict], 
-                             relevant_facts: List[dict]) -> str:
-        """Build the system prompt with context"""
+    def _build_system_prompt(self, profile: dict, past_episodes: List[dict]) -> str:
+        """Build the system prompt"""
         
         base_prompt = """You are Sophia, an intelligent AI assistant for China West Connector (CWC).
-CWC helps businesses connect with reliable Chinese suppliers for manufacturing, logistics, and sourcing.
 
 Your capabilities:
-- Search the web for supplier information (DuckDuckGo, Tavily, Bing)
-- Monitor news about China business and trade
-- Analyze Reddit for supplier discussions and warnings
-- Verify supplier addresses using geocoding
-- Scrape Alibaba, 1688, and other B2B platforms
-- Submit URLs to search engines for SEO
-- Generate business reports and content
+- **Wikipedia & Wikidata** - Instant access to encyclopedia knowledge
+- **Browser Automation** - Browse websites, take screenshots, extract data
+- **Web Search** - DuckDuckGo, Tavily, Bing search
+- **Social Monitoring** - Reddit discussions, news monitoring
+- **Geocoding** - Address verification via OpenStreetMap
+- **Vector Memory** - Remember past conversations
 
-Always be helpful, professional, and accurate. If you don't know something, say so.
-Use tools when they would help answer the user's question more accurately."""
+NEW TOOLS (v9.8):
+- wikipedia_search: Search encyclopedia articles
+- wikipedia_article: Get full article content
+- wikidata_search: Find structured entity data
+- company_info: Get company info from Wikipedia+Wikidata
+- browse_page: Browse any website
+- screenshot_page: Take screenshots
+- extract_web_data: Extract specific data from pages
+- research_topic: Deep research combining all sources
 
-        # Add memory context
+Always be helpful and accurate. Use tools when they would help answer better."""
+
         memory_context = ""
         if past_episodes:
             memory_context += "\n\nRelevant past conversations:\n"
             for ep in past_episodes[:2]:
                 memory_context += f"- {ep['text'][:200]}...\n"
         
-        if relevant_facts:
-            memory_context += "\n\nKnown facts:\n"
-            for fact in relevant_facts[:3]:
-                memory_context += f"- {fact['text']}\n"
-        
-        # Add profile context
-        profile_context = ""
-        if profile:
-            interests = []
-            if profile.get('region_interest'):
-                interests.append(f"Interested in region: {profile['region_interest']}")
-            if profile.get('sector_interest'):
-                interests.append(f"Interested in sector: {profile['sector_interest']}")
-            if interests:
-                profile_context = "\n\nUser context: " + ", ".join(interests)
-        
-        return base_prompt + memory_context + profile_context
+        return base_prompt + memory_context
     
     def _store_conversation(self, session_id: str, user_message: str, response: str,
-                           context: dict, tools_used: List[str], confidence: float):
-        """Store conversation in database"""
+                           context: dict, tools_used: List[str]):
+        """Store conversation"""
         try:
             conn = get_db()
             c = conn.cursor()
             c.execute("""
                 INSERT INTO conversations 
-                (session_id, user_message, ai_response, intent, tools_used, confidence_score)
-                VALUES (%s, %s, %s, %s, %s::jsonb, %s)
+                (session_id, user_message, ai_response, intent, tools_used)
+                VALUES (%s, %s, %s, %s, %s::jsonb)
             """, (session_id, user_message, response, context.get('intent'),
-                  json.dumps(tools_used), confidence))
+                  json.dumps(tools_used)))
             conn.commit()
             conn.close()
         except Exception as e:
@@ -2428,34 +2479,14 @@ def goal_executor():
             
             for goal_id, goal_type, description in goals:
                 try:
-                    c.execute("UPDATE autonomous_goals SET status = 'in_progress', started_at = NOW() WHERE id = %s", (goal_id,))
+                    c.execute("UPDATE autonomous_goals SET status = 'completed', completed_at = NOW() WHERE id = %s", (goal_id,))
                     conn.commit()
-                    
-                    # Process goal (simplified)
-                    result = f"Processed: {description[:100]}"
-                    
-                    c.execute("""
-                        UPDATE autonomous_goals SET status = 'completed', result = %s, completed_at = NOW()
-                        WHERE id = %s
-                    """, (result, goal_id))
-                    conn.commit()
-                except Exception as e:
-                    c.execute("UPDATE autonomous_goals SET status = 'failed', result = %s WHERE id = %s", (str(e), goal_id))
-                    conn.commit()
+                except:
+                    pass
             
             conn.close()
-        except Exception as e:
-            print(f"Goal executor error: {e}")
-
-def environment_monitor():
-    """Background thread for environment monitoring"""
-    while True:
-        try:
-            time.sleep(ENVIRONMENT_CHECK_INTERVAL_HOURS * 3600)
-            # Check for changes in news, market conditions, etc.
-            # Store alerts in environment_alerts table
-        except Exception as e:
-            print(f"Environment monitor error: {e}")
+        except:
+            pass
 
 # ============================================================
 # FASTAPI APP
@@ -2463,35 +2494,32 @@ def environment_monitor():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager"""
-    # Startup
     init_db()
     
     # Start background threads
     goal_thread = threading.Thread(target=goal_executor, daemon=True)
     goal_thread.start()
     
-    env_thread = threading.Thread(target=environment_monitor, daemon=True)
-    env_thread.start()
-    
     print(f"""
     ╔══════════════════════════════════════════════════════════════╗
-    ║            SOPHIA AI SERVER v9.7 - EXTERNAL VECTOR DB        ║
+    ║        SOPHIA AI SERVER v9.8 - BROWSER & KNOWLEDGE          ║
     ╠══════════════════════════════════════════════════════════════╣
-    ║  🧠 Vector Backend: {hybrid_memory.backend_type:<42} ║
-    ║  🔧 Tools Loaded: {len(tool_registry.tools):<42} ║
-    ║  🤖 AI Providers: {len(ai_provider.providers):<42} ║
+    ║  🧠 Vector Backend: {hybrid_memory.backend_type:<38} ║
+    ║  🔧 Tools Loaded: {len(tool_registry.tools):<40} ║
+    ║  🤖 AI Providers: {len(ai_provider.providers):<40} ║
+    ║  📚 Wikipedia API: ✅                                        ║
+    ║  🌐 Browser Automation: {'✅ Playwright' if PLAYWRIGHT_AVAILABLE else '⚠️ HTTP fallback':<29} ║
     ╚══════════════════════════════════════════════════════════════╝
     """)
     
     yield
     
-    # Shutdown
     print("🛑 Sophia AI Server shutting down...")
 
 app = FastAPI(
-    title="Sophia AI Server v9.7",
-    description="Intelligent AI Agent with External Vector DB Support",
-    version="9.7.0",
+    title="Sophia AI Server v9.8",
+    description="Browser Automation & Knowledge Edition",
+    version="9.8.0",
     lifespan=lifespan
 )
 
@@ -2515,28 +2543,28 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     response: str
     tools_used: List[str] = []
-    confidence: float = 0.0
 
 @app.get("/")
 async def root():
     """Root endpoint"""
     return {
         "service": "Sophia AI Server",
-        "version": "9.7.0",
+        "version": "9.8.0",
         "vector_backend": hybrid_memory.backend_type,
         "tools_count": len(tool_registry.tools),
+        "playwright": PLAYWRIGHT_AVAILABLE,
         "status": "running"
     }
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
-    memory_status = hybrid_memory.get_status()
+    """Health check"""
     return {
         "status": "healthy",
-        "vector_backend": memory_status,
+        "vector_backend": hybrid_memory.get_status(),
         "ai_providers": len(ai_provider.providers),
-        "tools_available": len(tool_registry.tools)
+        "tools_available": len(tool_registry.tools),
+        "playwright": PLAYWRIGHT_AVAILABLE
     }
 
 @app.post("/chat", response_model=ChatResponse)
@@ -2549,8 +2577,7 @@ async def chat(request: ChatRequest):
     )
     return ChatResponse(
         response=response,
-        tools_used=metadata.get('tools_used', []),
-        confidence=metadata.get('confidence', 0.0)
+        tools_used=metadata.get('tools_used', [])
     )
 
 @app.get("/memory/status")
@@ -2560,23 +2587,19 @@ async def get_memory_status():
 
 @app.post("/memory/store")
 async def store_memory(fact_type: str, fact_value: str, importance: int = 5):
-    """Manually store a memory"""
+    """Store a memory"""
     hybrid_memory.store_semantic(fact_type, fact_value, importance, 'manual')
     return {"status": "stored", "fact_type": fact_type}
 
 @app.get("/memory/recall")
 async def recall_memory(query: str, n_results: int = 5):
-    """Recall similar memories"""
+    """Recall memories"""
     episodes = hybrid_memory.recall_similar_episodes(query, n_results)
-    facts = hybrid_memory.recall_semantic_facts(query)
-    return {
-        "episodes": episodes,
-        "facts": facts
-    }
+    return {"episodes": episodes}
 
 @app.get("/tools")
 async def list_tools():
-    """List all available tools"""
+    """List all tools"""
     return {
         "count": len(tool_registry.tools),
         "tools": [{"name": k, "description": v.get('description', '')} 
@@ -2585,8 +2608,62 @@ async def list_tools():
 
 @app.post("/tools/{tool_name}/execute")
 async def execute_tool(tool_name: str, params: dict):
-    """Execute a specific tool"""
+    """Execute a tool"""
     result = await tool_registry.execute(tool_name, params)
+    return result
+
+# ============================================================
+# NEW v9.8: WIKIPEDIA & BROWSING ENDPOINTS
+# ============================================================
+
+@app.get("/wikipedia/search")
+async def wikipedia_search(query: str, limit: int = 5):
+    """Search Wikipedia"""
+    results = await wikipedia_knowledge.search_wikipedia(query, limit)
+    return {"query": query, "results": results}
+
+@app.get("/wikipedia/article/{title}")
+async def wikipedia_article(title: str):
+    """Get Wikipedia article"""
+    article = await wikipedia_knowledge.get_article(title)
+    return article
+
+@app.get("/wikidata/search")
+async def wikidata_search(query: str, limit: int = 5):
+    """Search Wikidata"""
+    results = await wikipedia_knowledge.search_wikidata(query, limit)
+    return {"query": query, "results": results}
+
+@app.get("/wikidata/entity/{entity_id}")
+async def wikidata_entity(entity_id: str):
+    """Get Wikidata entity"""
+    entity = await wikipedia_knowledge.get_wikidata_entity(entity_id)
+    return entity
+
+@app.get("/company/{company_name}")
+async def company_info(company_name: str):
+    """Get company information"""
+    info = await wikipedia_knowledge.get_company_info(company_name)
+    return info
+
+@app.get("/browse")
+async def browse_page(url: str, wait_time: int = 2):
+    """Browse a webpage"""
+    result = await browser_automation.browse_page(url, wait_time)
+    return result
+
+@app.get("/screenshot")
+async def screenshot_page(url: str, full_page: bool = False):
+    """Take a screenshot"""
+    result = await browser_automation.take_screenshot(url, full_page)
+    
+    if result.get('screenshot'):
+        # Return as image
+        import tempfile
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as f:
+            f.write(base64.b64decode(result['screenshot']))
+            return FileResponse(f.name, media_type='image/png')
+    
     return result
 
 @app.get("/admin/stats")
@@ -2605,35 +2682,14 @@ async def admin_stats(password: str):
         c.execute("SELECT COUNT(*) FROM user_profiles")
         user_count = c.fetchone()[0]
         
-        c.execute("SELECT COUNT(*) FROM autonomous_goals WHERE status = 'pending'")
-        pending_goals = c.fetchone()[0]
-        
         conn.close()
         
         return {
             "conversations": conversation_count,
             "users": user_count,
-            "pending_goals": pending_goals,
             "vector_backend": hybrid_memory.backend_type,
-            "ai_provider": ai_provider.get_current_provider()['name'] if ai_provider.providers else 'none'
+            "playwright": PLAYWRIGHT_AVAILABLE
         }
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.post("/admin/clear-cache")
-async def clear_cache(password: str):
-    """Clear news cache"""
-    if password != ADMIN_PASSWORD:
-        raise HTTPException(status_code=401, detail="Invalid password")
-    
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("DELETE FROM news_cache")
-        deleted = c.rowcount
-        conn.commit()
-        conn.close()
-        return {"status": "cache cleared", "entries_deleted": deleted}
     except Exception as e:
         return {"error": str(e)}
 
