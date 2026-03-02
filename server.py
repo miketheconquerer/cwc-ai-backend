@@ -1,21 +1,12 @@
 # ============================================================
-# SOPHIA AI v11 – STABLE AGENTIC EDITION (100% FREE)
-# Planner • Executor • Critic • Goal Reprioritization
+# SOPHIA AI v12 – REAL MEMORY AGENT (STABLE)
+# Planner • Executor • Critic • Memory • Brave + Wikipedia
 # ============================================================
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import requests
-import os
-import json
-import time
-import asyncio
-import psycopg2
-import psycopg2.extras
-import hashlib
-import math
-from collections import defaultdict
+import requests, os, json, asyncio, psycopg2, hashlib, math
 from datetime import datetime
 
 # ============================================================
@@ -25,6 +16,7 @@ from datetime import datetime
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 CLOUDFLARE_API_KEY = os.getenv("CLOUDFLARE_API_KEY", "")
 CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "")
+BRAVE_API_KEY = os.getenv("BRAVE_API_KEY", "")  # optional
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 REFLECTION_THRESHOLD = 0.7
@@ -60,26 +52,9 @@ def init_db():
         session_id TEXT,
         user_message TEXT,
         ai_response TEXT,
+        embedding TEXT,
         confidence FLOAT,
         created_at TIMESTAMP DEFAULT NOW()
-    )
-    """)
-
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS autonomous_goals (
-        id SERIAL PRIMARY KEY,
-        description TEXT,
-        priority INTEGER DEFAULT 5,
-        status TEXT DEFAULT 'pending',
-        created_at TIMESTAMP DEFAULT NOW()
-    )
-    """)
-
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS tool_stats (
-        tool_name TEXT PRIMARY KEY,
-        success_count INTEGER DEFAULT 0,
-        use_count INTEGER DEFAULT 0
     )
     """)
 
@@ -93,11 +68,9 @@ init_db()
 # ============================================================
 
 class FreeAIProvider:
-
     def __init__(self):
         self.providers = []
         self.current = 0
-
         if OPENROUTER_API_KEY:
             self.providers.append("openrouter")
         if CLOUDFLARE_API_KEY and CLOUDFLARE_ACCOUNT_ID:
@@ -107,9 +80,6 @@ class FreeAIProvider:
         self.current = (self.current + 1) % len(self.providers)
 
     async def chat(self, messages, temperature=0.3):
-        if not self.providers:
-            raise Exception("No AI provider configured")
-
         provider = self.providers[self.current]
 
         try:
@@ -128,20 +98,15 @@ class FreeAIProvider:
                     },
                     timeout=60
                 )
-                r.raise_for_status()
                 return r.json()["choices"][0]["message"]["content"]
 
-            elif provider == "cloudflare":
+            else:
                 r = requests.post(
                     f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/@cf/meta/llama-3.1-8b-instruct",
-                    headers={
-                        "Authorization": f"Bearer {CLOUDFLARE_API_KEY}",
-                        "Content-Type": "application/json"
-                    },
+                    headers={"Authorization": f"Bearer {CLOUDFLARE_API_KEY}"},
                     json={"messages": messages},
                     timeout=60
                 )
-                r.raise_for_status()
                 return r.json()["result"]["response"]
 
         except:
@@ -151,11 +116,10 @@ class FreeAIProvider:
 ai = FreeAIProvider()
 
 # ============================================================
-# MEMORY (LIGHTWEIGHT HASH EMBEDDING)
+# MEMORY ENGINE (COSINE SIMILARITY)
 # ============================================================
 
 class Memory:
-
     def encode(self, text):
         vec = []
         for i in range(128):
@@ -165,100 +129,106 @@ class Memory:
         norm = math.sqrt(sum(x*x for x in vec))
         return [x/norm for x in vec]
 
+    def cosine(self, a, b):
+        return sum(x*y for x, y in zip(a, b))
+
 memory = Memory()
 
+def retrieve_memory(session_id, query_vec, top_k=3):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT user_message, ai_response, embedding FROM conversations WHERE session_id=%s", (session_id,))
+    rows = c.fetchall()
+    conn.close()
+
+    scored = []
+    for u, a, emb in rows:
+        if emb:
+            vec = json.loads(emb)
+            sim = memory.cosine(query_vec, vec)
+            scored.append((sim, u, a))
+
+    scored.sort(reverse=True)
+    return scored[:top_k]
+
 # ============================================================
-# TOOL SYSTEM (SELF-LEARNING)
+# TOOLS
 # ============================================================
 
-async def tool_duckduckgo(query):
+async def wikipedia_tool(query):
     r = requests.get(
-        "https://api.duckduckgo.com/",
-        params={"q": query, "format": "json"},
-        timeout=15
+        f"https://en.wikipedia.org/api/rest_v1/page/summary/{query}",
+        timeout=10
+    )
+    if r.status_code == 200:
+        return r.json().get("extract", "No summary")
+    return "No result"
+
+async def brave_search(query):
+    if not BRAVE_API_KEY:
+        return "Brave API not configured"
+    r = requests.get(
+        "https://api.search.brave.com/res/v1/web/search",
+        headers={"X-Subscription-Token": BRAVE_API_KEY},
+        params={"q": query},
+        timeout=10
     )
     data = r.json()
-    return data.get("Abstract", "No result")
+    results = data.get("web", {}).get("results", [])
+    return results[0]["description"] if results else "No results"
 
 TOOLS = {
-    "search_web": tool_duckduckgo
+    "wikipedia": wikipedia_tool,
+    "brave_search": brave_search
 }
 
 async def execute_tool(name, param):
-    conn = get_db()
-    c = conn.cursor()
-
-    c.execute("INSERT INTO tool_stats (tool_name,use_count) VALUES (%s,1) ON CONFLICT (tool_name) DO UPDATE SET use_count = tool_stats.use_count + 1",
-              (name,))
-    conn.commit()
-
-    try:
-        result = await TOOLS[name](param)
-
-        c.execute("UPDATE tool_stats SET success_count = success_count + 1 WHERE tool_name=%s",
-                  (name,))
-        conn.commit()
-        conn.close()
-        return result
-    except:
-        conn.close()
-        return "Tool failed"
+    if name in TOOLS:
+        return await TOOLS[name](param)
+    return "Tool not found"
 
 # ============================================================
-# PLANNER → EXECUTOR → CRITIC
+# PLANNER (JSON SAFE)
 # ============================================================
 
 async def planner(user_input):
     prompt = f"""
-Break this into reasoning steps and decide if a tool is needed.
+Decide reasoning steps and if a tool is needed.
 
 User: {user_input}
 
 Return JSON:
-{{"needs_tool": true/false, "tool_name": "...", "tool_param": "...", "plan": "..."}}
+{{"needs_tool": true/false, "tool": "wikipedia|brave_search|none", "param": "...", "plan": "..."}}
 """
-    response = await ai.chat([{"role":"user","content":prompt}])
+    raw = await ai.chat([{"role":"user","content":prompt}])
+
     try:
-        return json.loads(response)
+        return json.loads(raw)
     except:
+        # JSON repair fallback
         return {"needs_tool": False, "plan": user_input}
+
+# ============================================================
+# CRITIC
+# ============================================================
 
 async def critic(user_input, answer):
     prompt = f"""
-Evaluate this answer.
+Evaluate quality from 0-1 and improve if needed.
 
-User question: {user_input}
-Answer: {answer}
+Q: {user_input}
+A: {answer}
 
-Return JSON:
-{{"confidence": 0-1, "improve": "better answer if needed"}}
+Return JSON: {{"confidence":0-1,"improve":"better version"}}
 """
-    response = await ai.chat([{"role":"user","content":prompt}])
+    raw = await ai.chat([{"role":"user","content":prompt}])
     try:
-        return json.loads(response)
+        return json.loads(raw)
     except:
         return {"confidence":0.8}
 
 # ============================================================
-# GOAL REPRIORITIZATION LOOP
-# ============================================================
-
-async def reprioritize_goals():
-    while True:
-        await asyncio.sleep(600)
-        conn = get_db()
-        c = conn.cursor()
-
-        c.execute("UPDATE autonomous_goals SET priority = priority + 1 WHERE status='pending'")
-        conn.commit()
-        conn.close()
-
-@app.on_event("startup")
-async def startup():
-    asyncio.create_task(reprioritize_goals())
-
-# ============================================================
-# CHAT ENDPOINT
+# CHAT
 # ============================================================
 
 class ChatRequest(BaseModel):
@@ -269,46 +239,50 @@ class ChatRequest(BaseModel):
 async def chat(req: ChatRequest):
 
     user_input = req.message
+    query_vec = memory.encode(user_input)
 
-    # 1️⃣ PLAN
+    # MEMORY RETRIEVAL
+    memories = retrieve_memory(req.session_id, query_vec)
+    memory_block = "\n".join([f"Past: {m[1]} -> {m[2]}" for m in memories])
+
+    # PLAN
     plan = await planner(user_input)
 
     tool_output = None
+    if plan.get("needs_tool") and plan.get("tool") in TOOLS:
+        tool_output = await execute_tool(plan["tool"], plan["param"])
 
-    # 2️⃣ EXECUTE TOOL IF NEEDED
-    if plan.get("needs_tool") and plan.get("tool_name") in TOOLS:
-        tool_output = await execute_tool(plan["tool_name"], plan["tool_param"])
+    context = f"""
+Relevant past memory:
+{memory_block}
 
-    # 3️⃣ FINAL ANSWER
-    context = f"{plan.get('plan','')}\nTool output: {tool_output}" if tool_output else plan.get("plan","")
+User request: {user_input}
+Tool output: {tool_output}
+"""
 
     answer = await ai.chat([
-        {"role":"system","content":"You are Sophia, a strategic China business AI advisor."},
+        {"role":"system","content":"You are Sophia, a strategic China business AI advisor with memory."},
         {"role":"user","content":context}
     ])
 
-    # 4️⃣ CRITIC
+    # CRITIC
     review = await critic(user_input, answer)
-    confidence = review.get("confidence",0.8)
-
+    confidence = review.get("confidence", 0.8)
     if confidence < REFLECTION_THRESHOLD:
-        answer = review.get("improve",answer)
+        answer = review.get("improve", answer)
 
-    # 5️⃣ STORE
+    # STORE MEMORY
     conn = get_db()
     c = conn.cursor()
     c.execute("""
-    INSERT INTO conversations (session_id,user_message,ai_response,confidence)
-    VALUES (%s,%s,%s,%s)
-    """,(req.session_id,user_input,answer,confidence))
+    INSERT INTO conversations (session_id,user_message,ai_response,embedding,confidence)
+    VALUES (%s,%s,%s,%s,%s)
+    """,(req.session_id,user_input,answer,json.dumps(query_vec),confidence))
     conn.commit()
     conn.close()
 
-    return {
-        "response": answer,
-        "confidence": confidence
-    }
+    return {"response": answer, "confidence": confidence}
 
 @app.get("/")
 def root():
-    return {"status":"Sophia v11 Agentic Running"}
+    return {"status":"Sophia v12 Memory Agent Running"}
