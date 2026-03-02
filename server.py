@@ -1,16 +1,19 @@
 """
 ================================================================================
-SOPHIA AI SERVER v9.8 - BROWSER AUTOMATION & KNOWLEDGE EDITION
+SOPHIA AI SERVER v10.0 - STABLE AGENTIC EDITION
 ================================================================================
 100% FREE AI with OpenRouter + Cloudflare
 
-NEW IN v9.8 - BROWSER AUTOMATION & KNOWLEDGE EXPANSION:
-🌐 Playwright Browser Automation - Browse web, fill forms, take screenshots
-📚 Wikipedia API - Instant access to encyclopedia knowledge
-📊 Wikidata API - Structured knowledge base queries
-🔍 Enhanced Research - Combine multiple knowledge sources
+NEW IN v10.0 - STABILITY & RELIABILITY:
+🤖 Upgraded model: llama-3.1-8b (better tool-calling vs 3b)
+🔧 Optional tool params: schema no longer forces all params as required
+🧭 Smart ReAct planning: only fires on complex queries (saves free quota)
+🧹 Session history pruning: stale sessions auto-evicted after 1 hour
+🔒 Admin password warning: alerts on insecure default at startup
 
 PREVIOUS FEATURES:
+✅ v9.9 - Multi-step agentic loop, parallel tools, conversation history
+✅ v9.8 - Playwright Browser Automation, Wikipedia/Wikidata APIs
 ✅ v9.7 - Supabase pgvector, Hash-based embeddings
 ✅ v9.6 - Tool Chaining, Self-Reflection, ReAct Reasoning
 ✅ Reddit API, Nominatim, ZenRows, Bing, DuckDuckGo, Tavily, NewsAPI
@@ -75,6 +78,8 @@ CLOUDFLARE_API_KEY = os.getenv("CLOUDFLARE_API_KEY", "")
 CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "")
 
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
+if ADMIN_PASSWORD == "admin123":
+    print("⚠️  WARNING: ADMIN_PASSWORD is using the insecure default 'admin123'. Set the ADMIN_PASSWORD env var!")
 
 # ============================================================
 # VECTOR DATABASE CONFIGURATION - v9.7
@@ -544,8 +549,8 @@ class FreeAIProvider:
                 'key': OPENROUTER_API_KEY,
                 'endpoint': 'https://openrouter.ai/api/v1/chat/completions',
                 'models': {
-                    'default': 'meta-llama/llama-3.2-3b-instruct:free',
-                    'smart': 'meta-llama/llama-3.2-3b-instruct:free',
+                    'default': 'meta-llama/llama-3.1-8b-instruct:free',
+                    'smart': 'meta-llama/llama-3.1-8b-instruct:free',
                     'fast': 'meta-llama/llama-3.2-3b-instruct:free'
                 },
                 'headers': {
@@ -1673,14 +1678,28 @@ class ToolRegistry:
         return locals_dict.get('result', 'Executed')
     
     def get_tools_schema(self) -> List[dict]:
-        """Get OpenAI-style tools schema"""
+        """Get OpenAI-style tools schema.
+        
+        Parameters with a default-like name (limit, wait_time, etc.) or
+        that are not the first/primary parameter are treated as optional.
+        Only the first parameter of each tool is marked required — the rest
+        are optional so the model isn't forced to fill every field.
+        """
+        # Parameters that are always optional regardless of position
+        OPTIONAL_PARAMS = {
+            'limit', 'wait_time', 'full_page', 'submit_selector',
+            'subreddit', 'sort_by', 'max_results', 'search_depth',
+            'css_extractor', 'n_results', 'depth', 'format',
+            'importance', 'context', 'priority', 'keywords'
+        }
+
         schema = []
         for name, tool in self.tools.items():
             params = tool.get('parameters', {})
             properties = {}
             required = []
-            
-            for pname, ptype in params.items():
+
+            for i, (pname, ptype) in enumerate(params.items()):
                 if isinstance(ptype, str):
                     json_type = 'string'
                     if 'integer' in ptype.lower() or 'int' in ptype.lower():
@@ -1694,8 +1713,10 @@ class ToolRegistry:
                     elif 'boolean' in ptype.lower() or 'bool' in ptype.lower():
                         json_type = 'boolean'
                     properties[pname] = {"type": json_type}
-                    required.append(pname)
-            
+                    # Mark required only if it's the primary param and not in optional set
+                    if i == 0 and pname not in OPTIONAL_PARAMS:
+                        required.append(pname)
+
             schema.append({
                 "type": "function",
                 "function": {
@@ -2335,10 +2356,25 @@ tool_registry = ToolRegistry()
 # In-memory conversation history per session (survives within process lifetime)
 _session_histories: Dict[str, List[dict]] = defaultdict(list)
 _session_histories_lock = threading.Lock()
+_session_last_seen: Dict[str, float] = {}   # session_id -> epoch time of last access
+SESSION_HISTORY_TTL_SECONDS = 3600          # evict sessions idle for >1 hour
 
 MAX_HISTORY_TURNS = 10          # keep last N user/assistant pairs
 MAX_AGENT_ITERATIONS = 6        # max tool-use rounds per message
 REFLECTION_MIN_TOOLS = 1        # reflect only if at least N tools were used
+
+
+def _prune_stale_sessions():
+    """Remove session histories that haven't been accessed for SESSION_HISTORY_TTL_SECONDS."""
+    now = time.time()
+    with _session_histories_lock:
+        stale = [sid for sid, ts in _session_last_seen.items()
+                 if now - ts > SESSION_HISTORY_TTL_SECONDS]
+        for sid in stale:
+            _session_histories.pop(sid, None)
+            _session_last_seen.pop(sid, None)
+    if stale:
+        print(f"🧹 Pruned {len(stale)} stale session(s) from history")
 
 
 class SophiaAgent:
@@ -2378,9 +2414,23 @@ class SophiaAgent:
         all_tools_used: List[str] = []
 
         # ------------------------------------------------------------------
-        # STEP 1 (optional): ReAct planning — ask the agent to think first
+        # STEP 1 (optional): ReAct planning — only for complex messages
         # ------------------------------------------------------------------
-        if ENABLE_REACT_REASONING and tools_schema:
+        # Avoid burning a free API call on simple greetings/short queries.
+        # Trigger planning when the message is a question, mentions research,
+        # or is long enough to likely need multiple steps.
+        _msg_lower = user_message.lower()
+        _needs_planning = (
+            len(user_message.split()) >= 8 or
+            any(w in _msg_lower for w in [
+                'research', 'find', 'search', 'analyze', 'analyse', 'compare',
+                'tell me about', 'what is', 'who is', 'how does', 'explain',
+                'report', 'summarize', 'summarise', 'investigate', 'look up',
+                'latest', 'recent', 'news', 'company', 'supplier'
+            ])
+        )
+
+        if ENABLE_REACT_REASONING and tools_schema and _needs_planning:
             plan_messages = messages + [{
                 "role": "user",
                 "content": (
@@ -2521,16 +2571,20 @@ class SophiaAgent:
     # ------------------------------------------------------------------
     def _get_history(self, session_id: str) -> List[dict]:
         with _session_histories_lock:
+            _session_last_seen[session_id] = time.time()
             return list(_session_histories[session_id])
 
     def _update_history(self, session_id: str, user_msg: str, assistant_msg: str):
         with _session_histories_lock:
+            _session_last_seen[session_id] = time.time()
             hist = _session_histories[session_id]
             hist.append({"role": "user", "content": user_msg})
             hist.append({"role": "assistant", "content": assistant_msg})
             # Trim to last N turns (2 messages per turn)
             if len(hist) > MAX_HISTORY_TURNS * 2:
                 _session_histories[session_id] = hist[-(MAX_HISTORY_TURNS * 2):]
+        # Prune stale sessions opportunistically (cheap check)
+        _prune_stale_sessions()
 
     # ------------------------------------------------------------------
     # SYSTEM PROMPT
@@ -2693,16 +2747,18 @@ async def lifespan(app: FastAPI):
     
     print(f"""
     ╔══════════════════════════════════════════════════════════════╗
-    ║        SOPHIA AI SERVER v9.9 - FULLY AGENTIC EDITION        ║
+    ║        SOPHIA AI SERVER v10.0 - STABLE AGENTIC EDITION      ║
     ╠══════════════════════════════════════════════════════════════╣
     ║  🧠 Vector Backend: {hybrid_memory.backend_type:<38} ║
     ║  🔧 Tools Loaded: {len(tool_registry.tools):<40} ║
+    ║  🤖 AI Model: llama-3.1-8b-instruct (upgraded)              ║
     ║  🤖 AI Providers: {len(ai_provider.providers):<40} ║
     ║  📚 Wikipedia API: ✅                                        ║
     ║  🌐 Browser Automation: {'✅ Playwright' if PLAYWRIGHT_AVAILABLE else '⚠️ HTTP fallback':<29} ║
     ║  ♾️  Agentic Loop: up to {MAX_AGENT_ITERATIONS} iterations                     ║
     ║  🪞 Self-Reflection: {'✅ enabled' if ENABLE_SELF_REFLECTION else '❌ disabled':<31} ║
-    ║  🧭 ReAct Reasoning: {'✅ enabled' if ENABLE_REACT_REASONING else '❌ disabled':<30} ║
+    ║  🧭 ReAct Reasoning: {'✅ smart-gated' if ENABLE_REACT_REASONING else '❌ disabled':<27} ║
+    ║  🧹 Session Pruning: 1hr TTL                                 ║
     ╚══════════════════════════════════════════════════════════════╝
     """)
     
@@ -2711,9 +2767,9 @@ async def lifespan(app: FastAPI):
     print("🛑 Sophia AI Server shutting down...")
 
 app = FastAPI(
-    title="Sophia AI Server v9.9",
-    description="Fully Agentic Edition",
-    version="9.9.0",
+    title="Sophia AI Server v10.0",
+    description="Stable Agentic Edition",
+    version="10.0.0",
     lifespan=lifespan
 )
 
@@ -2744,7 +2800,7 @@ async def root():
     """Root endpoint"""
     return {
         "service": "Sophia AI Server",
-        "version": "9.9.0",
+        "version": "10.0.0",
         "vector_backend": hybrid_memory.backend_type,
         "tools_count": len(tool_registry.tools),
         "playwright": PLAYWRIGHT_AVAILABLE,
