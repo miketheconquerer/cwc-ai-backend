@@ -1,4 +1,4 @@
-# Sophia AI Server Requirements
+# Sophia AI Server - Minimal for Render Free Tier (512MB RAM)
 
 # Web Framework
 fastapi
@@ -9,8 +9,8 @@ requests
 # Database
 psycopg2-binary
 
-# AI/ML - Compatible versions
+# Basic ML (lightweight)
 numpy<2.0
-sentence-transformers>=2.7.0
-chromadb==0.4.22
-scikit-learn==1.3.0
+
+# NO torch, NO sentence-transformers, NO chromadb
+# Using simple hash-based embeddings for Supabase pgvector

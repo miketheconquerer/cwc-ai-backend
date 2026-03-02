@@ -730,19 +730,49 @@ class HybridVectorMemory:
         self._init_backend(backend)
     
     def _init_encoder(self):
-        """Initialize the sentence encoder"""
-        if not SENTENCE_TRANSFORMERS_AVAILABLE:
-            print("⚠️ Sentence Transformers not available, embeddings disabled")
-            self.encoder = None
-            return
-            
-        try:
-            from sentence_transformers import SentenceTransformer
-            self.encoder = SentenceTransformer('all-MiniLM-L6-v2')
-            print("✅ Sentence encoder initialized (all-MiniLM-L6-v2)")
-        except Exception as e:
-            print(f"⚠️ Encoder init failed: {e}")
-            self.encoder = None
+        """Initialize the sentence encoder - with lightweight fallback"""
+        if SENTENCE_TRANSFORMERS_AVAILABLE:
+            try:
+                from sentence_transformers import SentenceTransformer
+                self.encoder = SentenceTransformer('all-MiniLM-L6-v2')
+                print("✅ Sentence encoder initialized (all-MiniLM-L6-v2)")
+                return
+            except Exception as e:
+                print(f"⚠️ Encoder init failed: {e}")
+        
+        # Lightweight fallback: Use hash-based embeddings (no heavy ML libraries!)
+        print("✅ Using lightweight hash-based embeddings (no ML libraries needed)")
+        self.encoder = "hash"  # Special marker for hash-based encoding
+    
+    def encode(self, text: str) -> List[float]:
+        """Encode text to embedding vector - with lightweight fallback"""
+        # If using real sentence-transformers
+        if self.encoder and self.encoder != "hash":
+            try:
+                return self.encoder.encode(text).tolist()
+            except:
+                pass
+        
+        # Lightweight hash-based embedding (deterministic, no ML needed)
+        # Creates a 384-dimensional vector from text hashes
+        import hashlib
+        import math
+        
+        embedding = []
+        for i in range(384):
+            # Create deterministic value from text + dimension
+            hash_input = f"{text}_{i}".encode('utf-8')
+            hash_val = hashlib.md5(hash_input).hexdigest()
+            # Convert to float between -1 and 1
+            val = (int(hash_val[:8], 16) / 0xFFFFFFFF) * 2 - 1
+            embedding.append(round(val, 6))
+        
+        # Normalize the vector
+        norm = math.sqrt(sum(x*x for x in embedding))
+        if norm > 0:
+            embedding = [x/norm for x in embedding]
+        
+        return embedding
     
     def _determine_backend(self) -> str:
         """Determine which backend to use based on config"""
@@ -906,12 +936,6 @@ class HybridVectorMemory:
         self.backend_type = "memory"
         self.initialized = True
         print("✅ In-memory vector storage initialized (ephemeral)")
-    
-    def encode(self, text: str) -> List[float]:
-        """Encode text to embedding vector"""
-        if self.encoder:
-            return self.encoder.encode(text).tolist()
-        return [0.0] * 384  # Fallback
     
     def store_episodic(self, session_id: str, user_msg: str, response: str, 
                        success_score: int, intent: str, metadata: dict = None):
@@ -1154,10 +1178,18 @@ class HybridVectorMemory:
     
     def get_status(self) -> dict:
         """Get memory system status"""
+        # Determine encoder type
+        if self.encoder == "hash":
+            encoder_type = "hash-based (lightweight)"
+        elif self.encoder:
+            encoder_type = "sentence-transformers (ML)"
+        else:
+            encoder_type = "none"
+        
         status = {
             "backend": self.backend_type,
             "initialized": self.initialized,
-            "encoder_available": self.encoder is not None,
+            "encoder": encoder_type,
         }
         
         if self.backend_type == "chroma_cloud":
