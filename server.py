@@ -1,11 +1,10 @@
 """
 ================================================================================
-SOPHIA AI SERVER v10.1 - ENHANCED AGENTIC EDITION
+SOPHIA AI SERVER v10.2 - CHINA BUSINESS & FEEDBACK LEARNING
 ================================================================================
-NEW IN v10.1:
-📰 Google News RSS fallback – real‑time, free news (no API key)
-🧠 Improved ReAct planning – smarter triggers & structured planning
-💬 User feedback endpoint – store ratings for future learning
+NEW IN v10.2:
+🇨🇳 China Business News tool – real‑time headlines via Google News RSS
+📝 Learning from feedback – uses user corrections to improve future answers
 ================================================================================
 """
 
@@ -404,9 +403,7 @@ def init_db():
         except Exception as e:
             print(f"⚠️ Vector indexes not created: {e}")
 
-        # ============================================================
-        # NEW v10.1: User feedback table
-        # ============================================================
+        # User feedback table (v10.1)
         c.execute("""
             CREATE TABLE IF NOT EXISTS user_feedback (
                 id SERIAL PRIMARY KEY,
@@ -1638,6 +1635,15 @@ class ToolRegistry:
                 'parameters': {'topic': 'string', 'depth': 'string'},
                 'handler': self._tool_research_topic
             },
+
+            # ============================================================
+            # NEW v10.2: China Business News tool
+            # ============================================================
+            'china_business_news': {
+                'description': 'Get the latest news about China business, suppliers, and economy – 100% free via Google News RSS.',
+                'parameters': {},
+                'handler': self._tool_china_business_news
+            },
         })
     
     def _load_from_db(self):
@@ -1684,13 +1690,7 @@ class ToolRegistry:
         return locals_dict.get('result', 'Executed')
     
     def get_tools_schema(self) -> List[dict]:
-        """Get OpenAI-style tools schema.
-        
-        Parameters with a default-like name (limit, wait_time, etc.) or
-        that are not the first/primary parameter are treated as optional.
-        Only the first parameter of each tool is marked required — the rest
-        are optional so the model isn't forced to fill every field.
-        """
+        """Get OpenAI-style tools schema."""
         # Parameters that are always optional regardless of position
         OPTIONAL_PARAMS = {
             'limit', 'wait_time', 'full_page', 'submit_selector',
@@ -1910,7 +1910,6 @@ class ToolRegistry:
         # Fallback to Google News RSS (100% free, real-time)
         if FEEDPARSER_AVAILABLE:
             try:
-                # Encode query for RSS URL
                 import urllib.parse
                 query_encoded = urllib.parse.quote(topic)
                 feed_url = f"https://news.google.com/rss/search?q={query_encoded}&hl=en-US&gl=US&ceid=US:en"
@@ -1919,17 +1918,10 @@ class ToolRegistry:
                 if feed.entries and len(feed.entries) > 0:
                     results = []
                     for entry in feed.entries[:5]:
-                        # Extract publication date
                         published = entry.get('published', '')
-                        if published:
-                            # Try to parse and format nicely
-                            try:
-                                # Feedparser gives struct_time in published_parsed
-                                if hasattr(entry, 'published_parsed'):
-                                    published_dt = datetime(*entry.published_parsed[:6])
-                                    published = published_dt.strftime('%Y-%m-%d')
-                            except:
-                                pass
+                        if hasattr(entry, 'published_parsed'):
+                            published_dt = datetime(*entry.published_parsed[:6])
+                            published = published_dt.strftime('%Y-%m-%d')
                         title = entry.get('title', 'No title')
                         source = entry.get('source', {}).get('title', 'Google News')
                         link = entry.get('link', '')
@@ -2383,6 +2375,39 @@ Keep it professional and 300-500 words."""
         
         return output
 
+    # ============================================================
+    # NEW v10.2: China Business News tool handler
+    # ============================================================
+    async def _tool_china_business_news(self, params: dict) -> str:
+        """Get the latest China business news via Google News RSS (100% free)."""
+        if not FEEDPARSER_AVAILABLE:
+            return "⚠️ Feedparser not installed. Install with: pip install feedparser"
+        
+        import urllib.parse
+        query = "China business OR Chinese suppliers OR China economy"
+        query_encoded = urllib.parse.quote(query)
+        feed_url = f"https://news.google.com/rss/search?q={query_encoded}&hl=en-US&gl=US&ceid=US:en"
+        
+        try:
+            feed = feedparser.parse(feed_url)
+            if not feed.entries:
+                return "No recent China business news found."
+            
+            results = []
+            for entry in feed.entries[:5]:
+                published = entry.get('published', '')
+                if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                    published_dt = datetime(*entry.published_parsed[:6])
+                    published = published_dt.strftime('%Y-%m-%d')
+                title = entry.get('title', 'No title')
+                source = entry.get('source', {}).get('title', 'Google News')
+                link = entry.get('link', '')
+                results.append(f"- {title} ({source}) - {published}\n  {link}")
+            
+            return "🇨🇳 **China Business News** (latest):\n" + "\n".join(results)
+        except Exception as e:
+            return f"Error fetching China news: {e}"
+
 tool_registry = ToolRegistry()
 
 # ============================================================
@@ -2414,7 +2439,7 @@ def _prune_stale_sessions():
 
 
 class SophiaAgent:
-    """Main Sophia AI Agent - v10.1 Enhanced Agentic"""
+    """Main Sophia AI Agent - v10.2 China Business & Feedback Learning"""
     
     def __init__(self):
         self.tool_registry = tool_registry
@@ -2428,16 +2453,17 @@ class SophiaAgent:
                               context: dict = None) -> Tuple[str, dict]:
         """
         Fully agentic process:
-        1. Load conversation history + vector memories
-        2. Enhanced ReAct planning step (smart trigger + structured plan)
-        3. Multi-step tool loop (up to MAX_AGENT_ITERATIONS)
+        1. Load conversation history + vector memories + feedback examples
+        2. Enhanced ReAct planning step
+        3. Multi-step tool loop
         4. Self-reflection pass (optional)
         5. Persist everything
         """
         context = context or {}
         profile = get_or_create_user_profile(session_id)
         past_episodes = self.memory.recall_similar_episodes(user_message, n_results=3)
-        system_prompt = self._build_system_prompt(profile, past_episodes)
+        feedback_examples = self._get_feedback_examples(user_message, n_results=2)
+        system_prompt = self._build_system_prompt(profile, past_episodes, feedback_examples)
 
         # --- load persisted conversation history ---
         history = self._get_history(session_id)
@@ -2452,7 +2478,6 @@ class SophiaAgent:
         # ------------------------------------------------------------------
         # STEP 1: Enhanced ReAct planning
         # ------------------------------------------------------------------
-        # Improved trigger: longer messages, questions, research intent
         _msg_lower = user_message.lower()
         _words = user_message.split()
         _is_question = any(_msg_lower.startswith(q) for q in ['what', 'who', 'how', 'why', 'when', 'where', 'can you', 'could you'])
@@ -2489,7 +2514,6 @@ class SophiaAgent:
                 )
                 plan_text = plan_resp['choices'][0]['message'].get('content', '')
                 if plan_text:
-                    # Inject plan as a system note so the model can refer to it later
                     messages.append({
                         "role": "system",
                         "content": f"[Reasoning plan]:\n{plan_text}"
@@ -2514,12 +2538,10 @@ class SophiaAgent:
             assistant_message = response['choices'][0]['message']
             finish_reason = response['choices'][0].get('finish_reason', 'stop')
 
-            # No more tool calls — we have the final text
             if not assistant_message.get('tool_calls') or finish_reason == 'stop':
                 messages.append(assistant_message)
                 break
 
-            # Execute all tool calls in PARALLEL
             tool_calls = assistant_message['tool_calls']
             tool_tasks = []
             for tc in tool_calls:
@@ -2530,7 +2552,6 @@ class SophiaAgent:
                     tool_args = {}
                 tool_tasks.append((tc, tool_name, tool_args))
 
-            # Gather results concurrently
             async def _run_tool(tc, name, args):
                 result = await self.tool_registry.execute(name, args)
                 return tc, name, result
@@ -2540,7 +2561,6 @@ class SophiaAgent:
                 return_exceptions=True
             )
 
-            # Append assistant message with tool calls
             messages.append(assistant_message)
 
             for res in results:
@@ -2554,14 +2574,13 @@ class SophiaAgent:
                     "content": json.dumps(tool_result) if not isinstance(tool_result, str) else tool_result
                 })
 
-        # Extract final text response
         final_response = (
             messages[-1].get('content') if messages[-1].get('role') == 'assistant'
             else response['choices'][0]['message'].get('content', '')
         ) or 'I apologise, I could not generate a response.'
 
         # ------------------------------------------------------------------
-        # STEP 3 (optional): Self-reflection — improve quality if tools used
+        # STEP 3 (optional): Self-reflection
         # ------------------------------------------------------------------
         if ENABLE_SELF_REFLECTION and len(all_tools_used) >= REFLECTION_MIN_TOOLS:
             final_response = await self._reflect_and_improve(
@@ -2611,6 +2630,33 @@ class SophiaAgent:
         return draft
 
     # ------------------------------------------------------------------
+    # FEEDBACK LEARNING
+    # ------------------------------------------------------------------
+    def _get_feedback_examples(self, query: str, n_results: int = 2) -> List[dict]:
+        """
+        Retrieve recent low‑rated conversations with user comments.
+        In a production system you would also vector‑search; here we simply
+        return the most recent ones as a starting point.
+        """
+        try:
+            conn = get_db()
+            c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            c.execute("""
+                SELECT f.rating, f.comment, c.user_message, c.ai_response
+                FROM user_feedback f
+                JOIN conversations c ON f.conversation_id = c.id
+                WHERE f.rating <= 2 AND f.comment IS NOT NULL AND f.comment != ''
+                ORDER BY f.created_at DESC
+                LIMIT %s
+            """, (n_results,))
+            rows = c.fetchall()
+            conn.close()
+            return [dict(r) for r in rows]
+        except Exception as e:
+            print(f"Feedback retrieval error: {e}")
+            return []
+
+    # ------------------------------------------------------------------
     # CONVERSATION HISTORY HELPERS
     # ------------------------------------------------------------------
     def _get_history(self, session_id: str) -> List[dict]:
@@ -2624,16 +2670,14 @@ class SophiaAgent:
             hist = _session_histories[session_id]
             hist.append({"role": "user", "content": user_msg})
             hist.append({"role": "assistant", "content": assistant_msg})
-            # Trim to last N turns (2 messages per turn)
             if len(hist) > MAX_HISTORY_TURNS * 2:
                 _session_histories[session_id] = hist[-(MAX_HISTORY_TURNS * 2):]
-        # Prune stale sessions opportunistically (cheap check)
         _prune_stale_sessions()
 
     # ------------------------------------------------------------------
     # SYSTEM PROMPT
     # ------------------------------------------------------------------
-    def _build_system_prompt(self, profile: dict, past_episodes: List[dict]) -> str:
+    def _build_system_prompt(self, profile: dict, past_episodes: List[dict], feedback_examples: List[dict]) -> str:
         base_prompt = """You are Sophia, an intelligent AI assistant for China West Connector (CWC).
 
 You operate as a FULLY AGENTIC AI: you can reason step-by-step, call multiple tools in sequence, 
@@ -2659,6 +2703,11 @@ Tool-use guidelines:
             base_prompt += "\n\nRelevant past conversations:\n"
             for ep in past_episodes[:2]:
                 base_prompt += f"- {ep['text'][:200]}…\n"
+
+        if feedback_examples:
+            base_prompt += "\n\n📝 **Learning from user feedback:**\n"
+            for fb in feedback_examples:
+                base_prompt += f"- A similar question was previously answered poorly. Here is a corrected response that users preferred:\n  “{fb['comment'][:200]}”\n\n"
 
         if profile.get('name'):
             base_prompt += f"\n\nCurrent user: {profile['name']}"
@@ -2791,7 +2840,7 @@ async def lifespan(app: FastAPI):
     
     print(f"""
     ╔══════════════════════════════════════════════════════════════╗
-    ║        SOPHIA AI SERVER v10.1 - ENHANCED AGENTIC EDITION    ║
+    ║        SOPHIA AI SERVER v10.2 - CHINA BUSINESS EDITION      ║
     ╠══════════════════════════════════════════════════════════════╣
     ║  🧠 Vector Backend: {hybrid_memory.backend_type:<38} ║
     ║  🔧 Tools Loaded: {len(tool_registry.tools):<40} ║
@@ -2799,12 +2848,14 @@ async def lifespan(app: FastAPI):
     ║  🤖 AI Providers: {len(ai_provider.providers):<40} ║
     ║  📚 Wikipedia API: ✅                                        ║
     ║  📰 Google News RSS: {'✅' if FEEDPARSER_AVAILABLE else '⚠️ feedparser missing':<29} ║
+    ║  🇨🇳 China Business News: ✅ dedicated tool                   ║
+    ║  📝 Learning from Feedback: ✅ active                         ║
     ║  🌐 Browser Automation: {'✅ Playwright' if PLAYWRIGHT_AVAILABLE else '⚠️ HTTP fallback':<29} ║
     ║  ♾️  Agentic Loop: up to {MAX_AGENT_ITERATIONS} iterations                     ║
     ║  🪞 Self-Reflection: {'✅ enabled' if ENABLE_SELF_REFLECTION else '❌ disabled':<31} ║
     ║  🧭 ReAct Reasoning: {'✅ smart-gated' if ENABLE_REACT_REASONING else '❌ disabled':<27} ║
     ║  🧹 Session Pruning: 1hr TTL                                 ║
-    ║  💬 User Feedback: ✅ endpoint available                     ║
+    ║  💬 User Feedback: ✅ collecting & learning                   ║
     ╚══════════════════════════════════════════════════════════════╝
     """)
     
@@ -2813,9 +2864,9 @@ async def lifespan(app: FastAPI):
     print("🛑 Sophia AI Server shutting down...")
 
 app = FastAPI(
-    title="Sophia AI Server v10.1",
-    description="Enhanced Agentic Edition with Real‑time News & User Feedback",
-    version="10.1.0",
+    title="Sophia AI Server v10.2",
+    description="China Business Edition with Feedback Learning",
+    version="10.2.0",
     lifespan=lifespan
 )
 
@@ -2847,7 +2898,7 @@ async def root():
     """Root endpoint"""
     return {
         "service": "Sophia AI Server",
-        "version": "10.1.0",
+        "version": "10.2.0",
         "vector_backend": hybrid_memory.backend_type,
         "tools_count": len(tool_registry.tools),
         "playwright": PLAYWRIGHT_AVAILABLE,
@@ -3045,7 +3096,7 @@ async def screenshot_page(url: str, full_page: bool = False):
     return result
 
 # ============================================================
-# NEW v10.1: USER FEEDBACK ENDPOINT
+# USER FEEDBACK ENDPOINT (v10.1)
 # ============================================================
 
 class FeedbackRequest(BaseModel):
