@@ -1,28 +1,17 @@
 """
 ================================================================================
-SOPHIA AI SERVER v10.0 - STABLE AGENTIC EDITION
+SOPHIA AI SERVER v10.1 - ENHANCED AGENTIC EDITION
 ================================================================================
-100% FREE AI with OpenRouter + Cloudflare
-
-NEW IN v10.0 - STABILITY & RELIABILITY:
-🤖 Upgraded model: llama-3.1-8b (better tool-calling vs 3b)
-🔧 Optional tool params: schema no longer forces all params as required
-🧭 Smart ReAct planning: only fires on complex queries (saves free quota)
-🧹 Session history pruning: stale sessions auto-evicted after 1 hour
-🔒 Admin password warning: alerts on insecure default at startup
-
-PREVIOUS FEATURES:
-✅ v9.9 - Multi-step agentic loop, parallel tools, conversation history
-✅ v9.8 - Playwright Browser Automation, Wikipedia/Wikidata APIs
-✅ v9.7 - Supabase pgvector, Hash-based embeddings
-✅ v9.6 - Tool Chaining, Self-Reflection, ReAct Reasoning
-✅ Reddit API, Nominatim, ZenRows, Bing, DuckDuckGo, Tavily, NewsAPI
+NEW IN v10.1:
+📰 Google News RSS fallback – real‑time, free news (no API key)
+🧠 Improved ReAct planning – smarter triggers & structured planning
+💬 User feedback endpoint – store ratings for future learning
 ================================================================================
 """
 
 from fastapi import FastAPI, BackgroundTasks, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse, JSONResponse, FileResponse
+from fastapi.responses import PlainTextResponse, JSONResponse, FileResponse, StreamingResponse
 from pydantic import BaseModel
 import requests
 import os
@@ -42,6 +31,16 @@ from typing import List, Dict, Any, Optional, Tuple, Callable
 import uuid
 import traceback
 import base64
+import math
+
+# Optional: RSS feed parser for free news
+FEEDPARSER_AVAILABLE = False
+try:
+    import feedparser
+    FEEDPARSER_AVAILABLE = True
+    print("✅ feedparser available for Google News RSS")
+except ImportError:
+    print("⚠️ feedparser not installed. Install with: pip install feedparser")
 
 # Optional: Sentence Transformers for Embeddings
 SENTENCE_TRANSFORMERS_AVAILABLE = False
@@ -72,7 +71,6 @@ SENDER_EMAIL    = os.getenv("SENDER_EMAIL", "888nv666@gmail.com")
 RECIPIENT_EMAIL = "digkasm@proton.me"
 DATABASE_URL    = os.getenv("DATABASE_URL")
 
-# 100% FREE AI Providers
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 CLOUDFLARE_API_KEY = os.getenv("CLOUDFLARE_API_KEY", "")
 CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "")
@@ -82,7 +80,7 @@ if ADMIN_PASSWORD == "admin123":
     print("⚠️  WARNING: ADMIN_PASSWORD is using the insecure default 'admin123'. Set the ADMIN_PASSWORD env var!")
 
 # ============================================================
-# VECTOR DATABASE CONFIGURATION - v9.7
+# VECTOR DATABASE CONFIGURATION
 # ============================================================
 CHROMA_CLOUD_API_KEY = os.getenv("CHROMA_CLOUD_API_KEY", "")
 CHROMA_TENANT = os.getenv("CHROMA_TENANT", "default")
@@ -405,7 +403,22 @@ def init_db():
             print("✅ Vector indexes created")
         except Exception as e:
             print(f"⚠️ Vector indexes not created: {e}")
-        
+
+        # ============================================================
+        # NEW v10.1: User feedback table
+        # ============================================================
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS user_feedback (
+                id SERIAL PRIMARY KEY,
+                session_id VARCHAR(100),
+                conversation_id INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
+                rating INTEGER CHECK (rating >= 1 AND rating <= 5),
+                comment TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        print("✅ User feedback table created")
+
         conn.commit()
         conn.close()
         print("✅ Database tables initialized")
@@ -671,7 +684,7 @@ class FreeAIProvider:
 ai_provider = FreeAIProvider()
 
 # ============================================================
-# HYBRID VECTOR MEMORY SYSTEM - v9.7
+# HYBRID VECTOR MEMORY SYSTEM
 # ============================================================
 class HybridVectorMemory:
     """Hybrid memory system supporting multiple backends"""
@@ -712,7 +725,6 @@ class HybridVectorMemory:
             except:
                 pass
         
-        import math
         embedding = []
         for i in range(384):
             hash_input = f"{text}_{i}".encode('utf-8')
@@ -898,7 +910,6 @@ class HybridVectorMemory:
         if not memories:
             return []
         
-        import math
         similarities = []
         for mem in memories:
             sim = self._cosine_similarity(query_embedding, mem.get('embedding', [0.0]*384))
@@ -909,7 +920,6 @@ class HybridVectorMemory:
     
     def _cosine_similarity(self, a: List[float], b: List[float]) -> float:
         """Calculate cosine similarity between two vectors"""
-        import math
         if len(a) != len(b):
             return 0.0
         
@@ -947,7 +957,7 @@ class HybridVectorMemory:
 hybrid_memory = HybridVectorMemory()
 
 # ============================================================
-# WIKIPEDIA & WIKIDATA API - v9.8
+# WIKIPEDIA & WIKIDATA API
 # ============================================================
 class WikipediaKnowledge:
     """Free Wikipedia and Wikidata API integration"""
@@ -1202,7 +1212,7 @@ class WikipediaKnowledge:
 wikipedia_knowledge = WikipediaKnowledge()
 
 # ============================================================
-# BROWSER AUTOMATION - v9.8 (Playwright)
+# BROWSER AUTOMATION (Playwright)
 # ============================================================
 class BrowserAutomation:
     """Browser automation using Playwright or HTTP fallback"""
@@ -1570,9 +1580,7 @@ class ToolRegistry:
                 'handler': self._tool_recall_memories
             },
             
-            # ============================================================
-            # NEW v9.8: WIKIPEDIA & WIKIDATA TOOLS
-            # ============================================================
+            # Wikipedia & Wikidata tools
             'wikipedia_search': {
                 'description': 'Search Wikipedia encyclopedia for articles. FREE and instant knowledge!',
                 'parameters': {'query': 'string', 'limit': 'integer'},
@@ -1604,9 +1612,7 @@ class ToolRegistry:
                 'handler': self._tool_company_info
             },
             
-            # ============================================================
-            # NEW v9.8: BROWSER AUTOMATION TOOLS
-            # ============================================================
+            # Browser automation tools
             'browse_page': {
                 'description': 'Browse to a URL and get page content. Can take screenshots!',
                 'parameters': {'url': 'string', 'wait_time': 'integer'},
@@ -1877,9 +1883,10 @@ class ToolRegistry:
             return f"Failed to read webpage: {e}"
     
     async def _tool_news_monitor(self, params: dict) -> str:
-        """Monitor news"""
+        """Monitor global news on any topic – enhanced with Google News RSS fallback"""
         topic = params.get('topic', 'China business')
         
+        # Try NewsAPI first if key is available
         if NEWS_API_KEY:
             try:
                 response = requests.get(
@@ -1891,13 +1898,48 @@ class ToolRegistry:
                 if response.status_code == 200:
                     data = response.json()
                     articles = data.get('articles', [])
-                    results = []
-                    for a in articles:
-                        results.append(f"- {a.get('title', 'No title')} ({a.get('source', {}).get('name', 'Unknown')})")
-                    return f"📰 Latest news for '{topic}':\n" + "\n".join(results)
+                    if articles:
+                        results = []
+                        for a in articles:
+                            published = a.get('publishedAt', '')[:10]  # YYYY-MM-DD
+                            results.append(f"- {a.get('title', 'No title')} ({a.get('source', {}).get('name', 'Unknown')}) - {published}")
+                        return f"📰 Latest news for '{topic}':\n" + "\n".join(results)
             except Exception as e:
-                pass
+                print(f"NewsAPI error: {e}")
         
+        # Fallback to Google News RSS (100% free, real-time)
+        if FEEDPARSER_AVAILABLE:
+            try:
+                # Encode query for RSS URL
+                import urllib.parse
+                query_encoded = urllib.parse.quote(topic)
+                feed_url = f"https://news.google.com/rss/search?q={query_encoded}&hl=en-US&gl=US&ceid=US:en"
+                feed = feedparser.parse(feed_url)
+                
+                if feed.entries and len(feed.entries) > 0:
+                    results = []
+                    for entry in feed.entries[:5]:
+                        # Extract publication date
+                        published = entry.get('published', '')
+                        if published:
+                            # Try to parse and format nicely
+                            try:
+                                # Feedparser gives struct_time in published_parsed
+                                if hasattr(entry, 'published_parsed'):
+                                    published_dt = datetime(*entry.published_parsed[:6])
+                                    published = published_dt.strftime('%Y-%m-%d')
+                            except:
+                                pass
+                        title = entry.get('title', 'No title')
+                        source = entry.get('source', {}).get('title', 'Google News')
+                        link = entry.get('link', '')
+                        results.append(f"- {title} ({source}) - {published}\n  {link}")
+                    
+                    return f"📰 Real-time news for '{topic}' (via Google News):\n" + "\n".join(results)
+            except Exception as e:
+                print(f"Google News RSS error: {e}")
+        
+        # Ultimate fallback: DuckDuckGo
         return await self._tool_duckduckgo_search({'query': f'{topic} news'})
     
     async def _tool_indexnow_ping(self, params: dict) -> str:
@@ -2088,10 +2130,7 @@ Keep it professional and 300-500 words."""
         
         return result or "No similar memories found."
     
-    # ============================================================
-    # NEW v9.8: WIKIPEDIA & WIKIDATA TOOL HANDLERS
-    # ============================================================
-    
+    # Wikipedia & Wikidata tool handlers
     async def _tool_wikipedia_search(self, params: dict) -> str:
         """Search Wikipedia"""
         query = params.get('query', '')
@@ -2209,10 +2248,7 @@ Keep it professional and 300-500 words."""
         
         return output
     
-    # ============================================================
-    # NEW v9.8: BROWSER AUTOMATION TOOL HANDLERS
-    # ============================================================
-    
+    # Browser automation tool handlers
     async def _tool_browse_page(self, params: dict) -> str:
         """Browse a webpage"""
         url = params.get('url', '')
@@ -2350,7 +2386,7 @@ Keep it professional and 300-500 words."""
 tool_registry = ToolRegistry()
 
 # ============================================================
-# SOPHIA MAIN CLASS - v9.9 FULLY AGENTIC
+# SOPHIA MAIN CLASS - FULLY AGENTIC
 # ============================================================
 
 # In-memory conversation history per session (survives within process lifetime)
@@ -2378,7 +2414,7 @@ def _prune_stale_sessions():
 
 
 class SophiaAgent:
-    """Main Sophia AI Agent - v9.9 Fully Agentic"""
+    """Main Sophia AI Agent - v10.1 Enhanced Agentic"""
     
     def __init__(self):
         self.tool_registry = tool_registry
@@ -2393,7 +2429,7 @@ class SophiaAgent:
         """
         Fully agentic process:
         1. Load conversation history + vector memories
-        2. ReAct planning step (optional)
+        2. Enhanced ReAct planning step (smart trigger + structured plan)
         3. Multi-step tool loop (up to MAX_AGENT_ITERATIONS)
         4. Self-reflection pass (optional)
         5. Persist everything
@@ -2414,44 +2450,52 @@ class SophiaAgent:
         all_tools_used: List[str] = []
 
         # ------------------------------------------------------------------
-        # STEP 1 (optional): ReAct planning — only for complex messages
+        # STEP 1: Enhanced ReAct planning
         # ------------------------------------------------------------------
-        # Avoid burning a free API call on simple greetings/short queries.
-        # Trigger planning when the message is a question, mentions research,
-        # or is long enough to likely need multiple steps.
+        # Improved trigger: longer messages, questions, research intent
         _msg_lower = user_message.lower()
+        _words = user_message.split()
+        _is_question = any(_msg_lower.startswith(q) for q in ['what', 'who', 'how', 'why', 'when', 'where', 'can you', 'could you'])
+        _has_research_keywords = any(w in _msg_lower for w in [
+            'research', 'find', 'search', 'analyze', 'analyse', 'compare',
+            'tell me about', 'explain', 'report', 'summarize', 'summarise',
+            'investigate', 'look up', 'latest', 'recent', 'news', 'company',
+            'supplier', 'information', 'details', 'background'
+        ])
+        _is_long = len(_words) >= 6
+
         _needs_planning = (
-            len(user_message.split()) >= 8 or
-            any(w in _msg_lower for w in [
-                'research', 'find', 'search', 'analyze', 'analyse', 'compare',
-                'tell me about', 'what is', 'who is', 'how does', 'explain',
-                'report', 'summarize', 'summarise', 'investigate', 'look up',
-                'latest', 'recent', 'news', 'company', 'supplier'
-            ])
+            ENABLE_REACT_REASONING and
+            tools_schema and
+            (_is_question or _has_research_keywords or _is_long)
         )
 
-        if ENABLE_REACT_REASONING and tools_schema and _needs_planning:
+        if _needs_planning:
             plan_messages = messages + [{
                 "role": "user",
                 "content": (
-                    "Before answering, briefly think through: "
-                    "what information do I need, and which tools (if any) should I use? "
-                    "Reply with ONLY your reasoning, no final answer yet."
+                    "Before answering, please create a step‑by‑step plan. "
+                    "Think about what information you need and which tools (if any) would be useful. "
+                    "List the tools in the order you would use them, and explain why. "
+                    "Then, based on your plan, provide your final answer.\n\n"
+                    "Format your plan like this:\n"
+                    "PLAN:\n1. <tool name> – <reason>\n2. ...\n\n"
+                    "Then write your answer."
                 )
             }]
             try:
                 plan_resp = await self.ai_provider.chat_completion(
-                    plan_messages, max_tokens=300, temperature=0.2
+                    plan_messages, max_tokens=500, temperature=0.2
                 )
                 plan_text = plan_resp['choices'][0]['message'].get('content', '')
                 if plan_text:
-                    # Inject as a hidden reasoning note (system-role so it won't confuse tool calling)
+                    # Inject plan as a system note so the model can refer to it later
                     messages.append({
                         "role": "system",
-                        "content": f"[Agent reasoning plan]: {plan_text}"
+                        "content": f"[Reasoning plan]:\n{plan_text}"
                     })
-            except Exception:
-                pass  # planning is best-effort
+            except Exception as e:
+                print(f"⚠️ Planning failed: {e}")
 
         # ------------------------------------------------------------------
         # STEP 2: Agentic tool loop
@@ -2534,9 +2578,9 @@ class SophiaAgent:
             intent=context.get('intent', 'unknown')
         )
         update_user_profile(session_id, last_intent=context.get('intent'))
-        self._store_conversation(session_id, user_message, final_response, context, all_tools_used)
+        conversation_id = self._store_conversation(session_id, user_message, final_response, context, all_tools_used)
 
-        return final_response, {'tools_used': all_tools_used, 'iterations': iteration}
+        return final_response, {'tools_used': all_tools_used, 'iterations': iteration, 'conversation_id': conversation_id}
 
     # ------------------------------------------------------------------
     # SELF-REFLECTION
@@ -2627,7 +2671,8 @@ Tool-use guidelines:
     # PERSISTENCE
     # ------------------------------------------------------------------
     def _store_conversation(self, session_id: str, user_message: str, response: str,
-                            context: dict, tools_used: List[str]):
+                            context: dict, tools_used: List[str]) -> Optional[int]:
+        """Store conversation and return the new conversation ID."""
         try:
             conn = get_db()
             c = conn.cursor()
@@ -2635,12 +2680,16 @@ Tool-use guidelines:
                 INSERT INTO conversations 
                 (session_id, user_message, ai_response, intent, tools_used)
                 VALUES (%s, %s, %s, %s, %s::jsonb)
+                RETURNING id
             """, (session_id, user_message, response, context.get('intent'),
                   json.dumps(tools_used)))
+            conv_id = c.fetchone()[0]
             conn.commit()
             conn.close()
+            return conv_id
         except Exception as e:
             print(f"Conversation storage error: {e}")
+            return None
 
 
 sophia = SophiaAgent()
@@ -2649,12 +2698,7 @@ sophia = SophiaAgent()
 # BACKGROUND WORKERS
 # ============================================================
 def goal_executor():
-    """Background thread for autonomous goal execution.
-    
-    Pulls pending high-priority goals from the DB and executes them
-    by running them through the full Sophia agentic pipeline.
-    Results are persisted back to the goals table.
-    """
+    """Background thread for autonomous goal execution."""
     while True:
         try:
             time.sleep(GOAL_EXECUTION_INTERVAL_MINUTES * 60)
@@ -2747,18 +2791,20 @@ async def lifespan(app: FastAPI):
     
     print(f"""
     ╔══════════════════════════════════════════════════════════════╗
-    ║        SOPHIA AI SERVER v10.0 - STABLE AGENTIC EDITION      ║
+    ║        SOPHIA AI SERVER v10.1 - ENHANCED AGENTIC EDITION    ║
     ╠══════════════════════════════════════════════════════════════╣
     ║  🧠 Vector Backend: {hybrid_memory.backend_type:<38} ║
     ║  🔧 Tools Loaded: {len(tool_registry.tools):<40} ║
     ║  🤖 AI Model: llama-3.1-8b-instruct (upgraded)              ║
     ║  🤖 AI Providers: {len(ai_provider.providers):<40} ║
     ║  📚 Wikipedia API: ✅                                        ║
+    ║  📰 Google News RSS: {'✅' if FEEDPARSER_AVAILABLE else '⚠️ feedparser missing':<29} ║
     ║  🌐 Browser Automation: {'✅ Playwright' if PLAYWRIGHT_AVAILABLE else '⚠️ HTTP fallback':<29} ║
     ║  ♾️  Agentic Loop: up to {MAX_AGENT_ITERATIONS} iterations                     ║
     ║  🪞 Self-Reflection: {'✅ enabled' if ENABLE_SELF_REFLECTION else '❌ disabled':<31} ║
     ║  🧭 ReAct Reasoning: {'✅ smart-gated' if ENABLE_REACT_REASONING else '❌ disabled':<27} ║
     ║  🧹 Session Pruning: 1hr TTL                                 ║
+    ║  💬 User Feedback: ✅ endpoint available                     ║
     ╚══════════════════════════════════════════════════════════════╝
     """)
     
@@ -2767,9 +2813,9 @@ async def lifespan(app: FastAPI):
     print("🛑 Sophia AI Server shutting down...")
 
 app = FastAPI(
-    title="Sophia AI Server v10.0",
-    description="Stable Agentic Edition",
-    version="10.0.0",
+    title="Sophia AI Server v10.1",
+    description="Enhanced Agentic Edition with Real‑time News & User Feedback",
+    version="10.1.0",
     lifespan=lifespan
 )
 
@@ -2794,16 +2840,18 @@ class ChatResponse(BaseModel):
     response: str
     tools_used: List[str] = []
     iterations: int = 1
+    conversation_id: Optional[int] = None
 
 @app.get("/")
 async def root():
     """Root endpoint"""
     return {
         "service": "Sophia AI Server",
-        "version": "10.0.0",
+        "version": "10.1.0",
         "vector_backend": hybrid_memory.backend_type,
         "tools_count": len(tool_registry.tools),
         "playwright": PLAYWRIGHT_AVAILABLE,
+        "google_news_rss": FEEDPARSER_AVAILABLE,
         "status": "running"
     }
 
@@ -2829,18 +2877,15 @@ async def chat(request: ChatRequest):
     return ChatResponse(
         response=response,
         tools_used=metadata.get('tools_used', []),
-        iterations=metadata.get('iterations', 1)
+        iterations=metadata.get('iterations', 1),
+        conversation_id=metadata.get('conversation_id')
     )
 
 @app.post("/chat/stream")
 async def chat_stream(request: ChatRequest):
-    """Streaming chat endpoint — returns Server-Sent Events so the UI
-    can display the response token-by-token while agentic steps run."""
-    from fastapi.responses import StreamingResponse
-
+    """Streaming chat endpoint — returns Server-Sent Events"""
     async def event_generator():
         try:
-            # Run the full agentic pipeline
             response_text, metadata = await sophia.process_message(
                 request.session_id,
                 request.message,
@@ -2848,16 +2893,15 @@ async def chat_stream(request: ChatRequest):
             )
             tools_used = metadata.get('tools_used', [])
             iterations = metadata.get('iterations', 1)
+            conv_id = metadata.get('conversation_id')
 
-            # Stream the text in ~50-char chunks to simulate streaming
             chunk_size = 50
             for i in range(0, len(response_text), chunk_size):
                 chunk = response_text[i:i + chunk_size]
                 yield f"data: {json.dumps({'type': 'text', 'content': chunk})}\n\n"
                 await asyncio.sleep(0.02)
 
-            # Send metadata event
-            yield f"data: {json.dumps({'type': 'done', 'tools_used': tools_used, 'iterations': iterations})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'tools_used': tools_used, 'iterations': iterations, 'conversation_id': conv_id})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
@@ -2947,7 +2991,7 @@ async def execute_tool(tool_name: str, params: dict):
     return result
 
 # ============================================================
-# NEW v9.8: WIKIPEDIA & BROWSING ENDPOINTS
+# WIKIPEDIA & BROWSING ENDPOINTS
 # ============================================================
 
 @app.get("/wikipedia/search")
@@ -3000,6 +3044,34 @@ async def screenshot_page(url: str, full_page: bool = False):
     
     return result
 
+# ============================================================
+# NEW v10.1: USER FEEDBACK ENDPOINT
+# ============================================================
+
+class FeedbackRequest(BaseModel):
+    session_id: str
+    conversation_id: Optional[int] = None
+    rating: int  # 1-5
+    comment: Optional[str] = None
+
+@app.post("/feedback")
+async def submit_feedback(fb: FeedbackRequest):
+    """Submit user feedback on a conversation"""
+    if fb.rating < 1 or fb.rating > 5:
+        raise HTTPException(status_code=400, detail="Rating must be between 1 and 5")
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO user_feedback (session_id, conversation_id, rating, comment)
+            VALUES (%s, %s, %s, %s)
+        """, (fb.session_id, fb.conversation_id, fb.rating, fb.comment))
+        conn.commit()
+        conn.close()
+        return {"status": "thank you for your feedback!"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/admin/stats")
 async def admin_stats(password: str):
     """Get admin statistics"""
@@ -3016,11 +3088,15 @@ async def admin_stats(password: str):
         c.execute("SELECT COUNT(*) FROM user_profiles")
         user_count = c.fetchone()[0]
         
+        c.execute("SELECT AVG(rating) FROM user_feedback")
+        avg_rating = c.fetchone()[0]
+        
         conn.close()
         
         return {
             "conversations": conversation_count,
             "users": user_count,
+            "average_feedback": round(avg_rating, 2) if avg_rating else None,
             "vector_backend": hybrid_memory.backend_type,
             "playwright": PLAYWRIGHT_AVAILABLE
         }
