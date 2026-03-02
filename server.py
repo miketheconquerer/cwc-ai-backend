@@ -98,7 +98,12 @@ CHROMA_SERVER_URL = os.getenv("CHROMA_SERVER_URL", "")  # e.g., "http://your-chr
 CHROMA_SERVER_AUTH = os.getenv("CHROMA_SERVER_AUTH", "")  # Optional: Basic auth token
 
 # Option 3: Supabase pgvector (FREE 500MB!) - or reuse existing DATABASE_URL
-SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL", "") or DATABASE_URL  # Falls back to DATABASE_URL
+# Note: If SUPABASE_DB_URL contains "${" it means user entered a variable reference, ignore it
+_supabase_url = os.getenv("SUPABASE_DB_URL", "")
+if _supabase_url and "${" not in _supabase_url:
+    SUPABASE_DB_URL = _supabase_url
+else:
+    SUPABASE_DB_URL = DATABASE_URL  # Falls back to DATABASE_URL
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")  # For REST API (optional)
 
 # Option 4: Local/In-memory ChromaDB (default, ephemeral on Render)
