@@ -2329,119 +2329,251 @@ Keep it professional and 300-500 words."""
 tool_registry = ToolRegistry()
 
 # ============================================================
-# SOPHIA MAIN CLASS
+# SOPHIA MAIN CLASS - v9.9 FULLY AGENTIC
 # ============================================================
+
+# In-memory conversation history per session (survives within process lifetime)
+_session_histories: Dict[str, List[dict]] = defaultdict(list)
+_session_histories_lock = threading.Lock()
+
+MAX_HISTORY_TURNS = 10          # keep last N user/assistant pairs
+MAX_AGENT_ITERATIONS = 6        # max tool-use rounds per message
+REFLECTION_MIN_TOOLS = 1        # reflect only if at least N tools were used
+
+
 class SophiaAgent:
-    """Main Sophia AI Agent"""
+    """Main Sophia AI Agent - v9.9 Fully Agentic"""
     
     def __init__(self):
         self.tool_registry = tool_registry
         self.ai_provider = ai_provider
         self.memory = hybrid_memory
     
+    # ------------------------------------------------------------------
+    # PUBLIC ENTRY POINT
+    # ------------------------------------------------------------------
     async def process_message(self, session_id: str, user_message: str, 
                               context: dict = None) -> Tuple[str, dict]:
-        """Process user message and generate response"""
-        
+        """
+        Fully agentic process:
+        1. Load conversation history + vector memories
+        2. ReAct planning step (optional)
+        3. Multi-step tool loop (up to MAX_AGENT_ITERATIONS)
+        4. Self-reflection pass (optional)
+        5. Persist everything
+        """
         context = context or {}
         profile = get_or_create_user_profile(session_id)
-        
-        # Recall memories
         past_episodes = self.memory.recall_similar_episodes(user_message, n_results=3)
-        
-        # Build system prompt
         system_prompt = self._build_system_prompt(profile, past_episodes)
-        
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message}
-        ]
-        
-        # Get tools schema
+
+        # --- load persisted conversation history ---
+        history = self._get_history(session_id)
+
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.extend(history)
+        messages.append({"role": "user", "content": user_message})
+
         tools_schema = self.tool_registry.get_tools_schema()
-        
-        # Call AI
-        response = await self.ai_provider.chat_completion(
-            messages, 
-            tools=tools_schema, 
-            tool_choice="auto",
-            max_tokens=1000
-        )
-        
-        assistant_message = response['choices'][0]['message']
-        tools_used = []
-        
-        # Handle tool calls
-        if assistant_message.get('tool_calls'):
-            for tool_call in assistant_message['tool_calls']:
-                tool_name = tool_call['function']['name']
-                tool_args = json.loads(tool_call['function']['arguments'])
-                
-                result = await self.tool_registry.execute(tool_name, tool_args)
-                tools_used.append(tool_name)
-                
+        all_tools_used: List[str] = []
+
+        # ------------------------------------------------------------------
+        # STEP 1 (optional): ReAct planning — ask the agent to think first
+        # ------------------------------------------------------------------
+        if ENABLE_REACT_REASONING and tools_schema:
+            plan_messages = messages + [{
+                "role": "user",
+                "content": (
+                    "Before answering, briefly think through: "
+                    "what information do I need, and which tools (if any) should I use? "
+                    "Reply with ONLY your reasoning, no final answer yet."
+                )
+            }]
+            try:
+                plan_resp = await self.ai_provider.chat_completion(
+                    plan_messages, max_tokens=300, temperature=0.2
+                )
+                plan_text = plan_resp['choices'][0]['message'].get('content', '')
+                if plan_text:
+                    # Inject as a hidden reasoning note (system-role so it won't confuse tool calling)
+                    messages.append({
+                        "role": "system",
+                        "content": f"[Agent reasoning plan]: {plan_text}"
+                    })
+            except Exception:
+                pass  # planning is best-effort
+
+        # ------------------------------------------------------------------
+        # STEP 2: Agentic tool loop
+        # ------------------------------------------------------------------
+        iteration = 0
+        while iteration < MAX_AGENT_ITERATIONS:
+            iteration += 1
+
+            response = await self.ai_provider.chat_completion(
+                messages,
+                tools=tools_schema,
+                tool_choice="auto",
+                max_tokens=1000
+            )
+
+            assistant_message = response['choices'][0]['message']
+            finish_reason = response['choices'][0].get('finish_reason', 'stop')
+
+            # No more tool calls — we have the final text
+            if not assistant_message.get('tool_calls') or finish_reason == 'stop':
                 messages.append(assistant_message)
+                break
+
+            # Execute all tool calls in PARALLEL
+            tool_calls = assistant_message['tool_calls']
+            tool_tasks = []
+            for tc in tool_calls:
+                tool_name = tc['function']['name']
+                try:
+                    tool_args = json.loads(tc['function']['arguments'])
+                except Exception:
+                    tool_args = {}
+                tool_tasks.append((tc, tool_name, tool_args))
+
+            # Gather results concurrently
+            async def _run_tool(tc, name, args):
+                result = await self.tool_registry.execute(name, args)
+                return tc, name, result
+
+            results = await asyncio.gather(
+                *[_run_tool(tc, n, a) for tc, n, a in tool_tasks],
+                return_exceptions=True
+            )
+
+            # Append assistant message with tool calls
+            messages.append(assistant_message)
+
+            for res in results:
+                if isinstance(res, Exception):
+                    continue
+                tc, tool_name, tool_result = res
+                all_tools_used.append(tool_name)
                 messages.append({
                     "role": "tool",
-                    "tool_call_id": tool_call['id'],
-                    "content": json.dumps(result)
+                    "tool_call_id": tc['id'],
+                    "content": json.dumps(tool_result) if not isinstance(tool_result, str) else tool_result
                 })
-            
-            response = await self.ai_provider.chat_completion(messages, max_tokens=1000)
-            assistant_message = response['choices'][0]['message']
-        
-        final_response = assistant_message.get('content', 'I apologize, I could not generate a response.')
-        
-        # Store memory
+
+        # Extract final text response
+        final_response = (
+            messages[-1].get('content') if messages[-1].get('role') == 'assistant'
+            else response['choices'][0]['message'].get('content', '')
+        ) or 'I apologise, I could not generate a response.'
+
+        # ------------------------------------------------------------------
+        # STEP 3 (optional): Self-reflection — improve quality if tools used
+        # ------------------------------------------------------------------
+        if ENABLE_SELF_REFLECTION and len(all_tools_used) >= REFLECTION_MIN_TOOLS:
+            final_response = await self._reflect_and_improve(
+                messages, user_message, final_response
+            )
+
+        # ------------------------------------------------------------------
+        # STEP 4: Persist
+        # ------------------------------------------------------------------
+        self._update_history(session_id, user_message, final_response)
         self.memory.store_episodic(
             session_id, user_message, final_response,
             success_score=7,
             intent=context.get('intent', 'unknown')
         )
-        
         update_user_profile(session_id, last_intent=context.get('intent'))
-        
-        # Store conversation
-        self._store_conversation(session_id, user_message, final_response, context, tools_used)
-        
-        return final_response, {'tools_used': tools_used}
-    
+        self._store_conversation(session_id, user_message, final_response, context, all_tools_used)
+
+        return final_response, {'tools_used': all_tools_used, 'iterations': iteration}
+
+    # ------------------------------------------------------------------
+    # SELF-REFLECTION
+    # ------------------------------------------------------------------
+    async def _reflect_and_improve(self, messages: List[dict], 
+                                   user_message: str, draft: str) -> str:
+        """Ask the agent to critique its own draft and produce an improved version."""
+        try:
+            reflection_messages = messages + [
+                {
+                    "role": "user",
+                    "content": (
+                        f"Review your previous answer:\n\n{draft}\n\n"
+                        "Is it accurate, complete, and helpful? "
+                        "If you can meaningfully improve it, provide the improved version. "
+                        "Otherwise, repeat the original answer unchanged."
+                    )
+                }
+            ]
+            refl_resp = await self.ai_provider.chat_completion(
+                reflection_messages, max_tokens=1200, temperature=0.2
+            )
+            improved = refl_resp['choices'][0]['message'].get('content', '').strip()
+            if improved and len(improved) > 30:
+                return improved
+        except Exception as e:
+            print(f"⚠️ Reflection failed: {e}")
+        return draft
+
+    # ------------------------------------------------------------------
+    # CONVERSATION HISTORY HELPERS
+    # ------------------------------------------------------------------
+    def _get_history(self, session_id: str) -> List[dict]:
+        with _session_histories_lock:
+            return list(_session_histories[session_id])
+
+    def _update_history(self, session_id: str, user_msg: str, assistant_msg: str):
+        with _session_histories_lock:
+            hist = _session_histories[session_id]
+            hist.append({"role": "user", "content": user_msg})
+            hist.append({"role": "assistant", "content": assistant_msg})
+            # Trim to last N turns (2 messages per turn)
+            if len(hist) > MAX_HISTORY_TURNS * 2:
+                _session_histories[session_id] = hist[-(MAX_HISTORY_TURNS * 2):]
+
+    # ------------------------------------------------------------------
+    # SYSTEM PROMPT
+    # ------------------------------------------------------------------
     def _build_system_prompt(self, profile: dict, past_episodes: List[dict]) -> str:
-        """Build the system prompt"""
-        
         base_prompt = """You are Sophia, an intelligent AI assistant for China West Connector (CWC).
 
-Your capabilities:
-- **Wikipedia & Wikidata** - Instant access to encyclopedia knowledge
-- **Browser Automation** - Browse websites, take screenshots, extract data
-- **Web Search** - DuckDuckGo, Tavily, Bing search
-- **Social Monitoring** - Reddit discussions, news monitoring
-- **Geocoding** - Address verification via OpenStreetMap
-- **Vector Memory** - Remember past conversations
+You operate as a FULLY AGENTIC AI: you can reason step-by-step, call multiple tools in sequence, 
+reflect on your results, and refine your answers autonomously.
 
-NEW TOOLS (v9.8):
-- wikipedia_search: Search encyclopedia articles
-- wikipedia_article: Get full article content
-- wikidata_search: Find structured entity data
-- company_info: Get company info from Wikipedia+Wikidata
-- browse_page: Browse any website
-- screenshot_page: Take screenshots
-- extract_web_data: Extract specific data from pages
-- research_topic: Deep research combining all sources
+Core capabilities:
+- **Wikipedia & Wikidata** — Instant encyclopaedia knowledge
+- **Browser Automation** — Browse websites, take screenshots, extract data
+- **Web Search** — DuckDuckGo, Tavily, Bing
+- **Social Monitoring** — Reddit discussions, news monitoring
+- **Geocoding** — Address verification via OpenStreetMap
+- **Vector Memory** — Recall past conversations
+- **Research** — Deep multi-source topic research
 
-Always be helpful and accurate. Use tools when they would help answer better."""
+Tool-use guidelines:
+- Use tools proactively whenever they would improve accuracy or completeness.
+- Chain tools when needed: e.g. search → browse → summarise.
+- If a tool result is insufficient, try a different tool or query.
+- Always synthesise tool outputs into a clear, helpful final answer.
+- Never fabricate facts; prefer verified tool results over assumptions."""
 
-        memory_context = ""
         if past_episodes:
-            memory_context += "\n\nRelevant past conversations:\n"
+            base_prompt += "\n\nRelevant past conversations:\n"
             for ep in past_episodes[:2]:
-                memory_context += f"- {ep['text'][:200]}...\n"
-        
-        return base_prompt + memory_context
-    
+                base_prompt += f"- {ep['text'][:200]}…\n"
+
+        if profile.get('name'):
+            base_prompt += f"\n\nCurrent user: {profile['name']}"
+        if profile.get('company'):
+            base_prompt += f" ({profile['company']})"
+
+        return base_prompt
+
+    # ------------------------------------------------------------------
+    # PERSISTENCE
+    # ------------------------------------------------------------------
     def _store_conversation(self, session_id: str, user_message: str, response: str,
-                           context: dict, tools_used: List[str]):
-        """Store conversation"""
+                            context: dict, tools_used: List[str]):
         try:
             conn = get_db()
             c = conn.cursor()
@@ -2456,17 +2588,26 @@ Always be helpful and accurate. Use tools when they would help answer better."""
         except Exception as e:
             print(f"Conversation storage error: {e}")
 
+
 sophia = SophiaAgent()
 
 # ============================================================
 # BACKGROUND WORKERS
 # ============================================================
 def goal_executor():
-    """Background thread for autonomous goal execution"""
+    """Background thread for autonomous goal execution.
+    
+    Pulls pending high-priority goals from the DB and executes them
+    by running them through the full Sophia agentic pipeline.
+    Results are persisted back to the goals table.
+    """
     while True:
         try:
             time.sleep(GOAL_EXECUTION_INTERVAL_MINUTES * 60)
-            # Process pending goals
+
+            if not DATABASE_URL:
+                continue
+
             conn = get_db()
             c = conn.cursor()
             c.execute("""
@@ -2476,17 +2617,67 @@ def goal_executor():
                 LIMIT %s
             """, (MAX_CONCURRENT_GOALS,))
             goals = c.fetchall()
-            
+            conn.close()
+
             for goal_id, goal_type, description in goals:
                 try:
-                    c.execute("UPDATE autonomous_goals SET status = 'completed', completed_at = NOW() WHERE id = %s", (goal_id,))
-                    conn.commit()
-                except:
-                    pass
-            
-            conn.close()
-        except:
-            pass
+                    # Mark as in-progress
+                    conn2 = get_db()
+                    c2 = conn2.cursor()
+                    c2.execute(
+                        "UPDATE autonomous_goals SET status = 'in_progress', started_at = NOW() WHERE id = %s",
+                        (goal_id,)
+                    )
+                    conn2.commit()
+                    conn2.close()
+
+                    # Execute goal via the agent (run in a new event loop for the thread)
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    result, meta = loop.run_until_complete(
+                        sophia.process_message(
+                            session_id=f"autonomous_goal_{goal_id}",
+                            user_message=description,
+                            context={"intent": goal_type, "autonomous": True}
+                        )
+                    )
+                    loop.close()
+
+                    tools_used = meta.get('tools_used', [])
+                    summary = result[:2000] if result else "No result"
+
+                    conn3 = get_db()
+                    c3 = conn3.cursor()
+                    c3.execute("""
+                        UPDATE autonomous_goals 
+                        SET status = 'completed', completed_at = NOW(),
+                            result = %s,
+                            completed_subtasks = %s::jsonb
+                        WHERE id = %s
+                    """, (summary, json.dumps({"tools_used": tools_used}), goal_id))
+                    conn3.commit()
+                    conn3.close()
+
+                    print(f"✅ Goal {goal_id} ({goal_type}) completed. Tools: {tools_used}")
+
+                except Exception as e:
+                    print(f"⚠️ Goal {goal_id} failed: {e}")
+                    try:
+                        conn_err = get_db()
+                        c_err = conn_err.cursor()
+                        c_err.execute("""
+                            UPDATE autonomous_goals 
+                            SET status = 'failed', result = %s,
+                                retry_count = retry_count + 1
+                            WHERE id = %s
+                        """, (str(e)[:500], goal_id))
+                        conn_err.commit()
+                        conn_err.close()
+                    except Exception:
+                        pass
+
+        except Exception as outer:
+            print(f"⚠️ Goal executor error: {outer}")
 
 # ============================================================
 # FASTAPI APP
@@ -2502,13 +2693,16 @@ async def lifespan(app: FastAPI):
     
     print(f"""
     ╔══════════════════════════════════════════════════════════════╗
-    ║        SOPHIA AI SERVER v9.8 - BROWSER & KNOWLEDGE          ║
+    ║        SOPHIA AI SERVER v9.9 - FULLY AGENTIC EDITION        ║
     ╠══════════════════════════════════════════════════════════════╣
     ║  🧠 Vector Backend: {hybrid_memory.backend_type:<38} ║
     ║  🔧 Tools Loaded: {len(tool_registry.tools):<40} ║
     ║  🤖 AI Providers: {len(ai_provider.providers):<40} ║
     ║  📚 Wikipedia API: ✅                                        ║
     ║  🌐 Browser Automation: {'✅ Playwright' if PLAYWRIGHT_AVAILABLE else '⚠️ HTTP fallback':<29} ║
+    ║  ♾️  Agentic Loop: up to {MAX_AGENT_ITERATIONS} iterations                     ║
+    ║  🪞 Self-Reflection: {'✅ enabled' if ENABLE_SELF_REFLECTION else '❌ disabled':<31} ║
+    ║  🧭 ReAct Reasoning: {'✅ enabled' if ENABLE_REACT_REASONING else '❌ disabled':<30} ║
     ╚══════════════════════════════════════════════════════════════╝
     """)
     
@@ -2517,9 +2711,9 @@ async def lifespan(app: FastAPI):
     print("🛑 Sophia AI Server shutting down...")
 
 app = FastAPI(
-    title="Sophia AI Server v9.8",
-    description="Browser Automation & Knowledge Edition",
-    version="9.8.0",
+    title="Sophia AI Server v9.9",
+    description="Fully Agentic Edition",
+    version="9.9.0",
     lifespan=lifespan
 )
 
@@ -2543,13 +2737,14 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     response: str
     tools_used: List[str] = []
+    iterations: int = 1
 
 @app.get("/")
 async def root():
     """Root endpoint"""
     return {
         "service": "Sophia AI Server",
-        "version": "9.8.0",
+        "version": "9.9.0",
         "vector_backend": hybrid_memory.backend_type,
         "tools_count": len(tool_registry.tools),
         "playwright": PLAYWRIGHT_AVAILABLE,
@@ -2569,7 +2764,7 @@ async def health_check():
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    """Main chat endpoint"""
+    """Main chat endpoint — fully agentic multi-step reasoning"""
     response, metadata = await sophia.process_message(
         request.session_id,
         request.message,
@@ -2577,8 +2772,91 @@ async def chat(request: ChatRequest):
     )
     return ChatResponse(
         response=response,
-        tools_used=metadata.get('tools_used', [])
+        tools_used=metadata.get('tools_used', []),
+        iterations=metadata.get('iterations', 1)
     )
+
+@app.post("/chat/stream")
+async def chat_stream(request: ChatRequest):
+    """Streaming chat endpoint — returns Server-Sent Events so the UI
+    can display the response token-by-token while agentic steps run."""
+    from fastapi.responses import StreamingResponse
+
+    async def event_generator():
+        try:
+            # Run the full agentic pipeline
+            response_text, metadata = await sophia.process_message(
+                request.session_id,
+                request.message,
+                request.context
+            )
+            tools_used = metadata.get('tools_used', [])
+            iterations = metadata.get('iterations', 1)
+
+            # Stream the text in ~50-char chunks to simulate streaming
+            chunk_size = 50
+            for i in range(0, len(response_text), chunk_size):
+                chunk = response_text[i:i + chunk_size]
+                yield f"data: {json.dumps({'type': 'text', 'content': chunk})}\n\n"
+                await asyncio.sleep(0.02)
+
+            # Send metadata event
+            yield f"data: {json.dumps({'type': 'done', 'tools_used': tools_used, 'iterations': iterations})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+class GoalRequest(BaseModel):
+    session_id: str = "system"
+    goal_type: str
+    description: str
+    priority: int = 5
+
+@app.post("/goals")
+async def create_goal(req: GoalRequest):
+    """Create an autonomous goal for background execution"""
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO autonomous_goals (session_id, goal_type, goal_description, priority, status)
+            VALUES (%s, %s, %s, %s, 'pending')
+            RETURNING id
+        """, (req.session_id, req.goal_type, req.description, req.priority))
+        goal_id = c.fetchone()[0]
+        conn.commit()
+        conn.close()
+        return {"status": "created", "goal_id": goal_id, "priority": req.priority}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/goals")
+async def list_goals(status: Optional[str] = None, limit: int = 20):
+    """List autonomous goals"""
+    try:
+        conn = get_db()
+        c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        if status:
+            c.execute(
+                "SELECT * FROM autonomous_goals WHERE status = %s ORDER BY created_at DESC LIMIT %s",
+                (status, limit)
+            )
+        else:
+            c.execute("SELECT * FROM autonomous_goals ORDER BY created_at DESC LIMIT %s", (limit,))
+        goals = [dict(r) for r in c.fetchall()]
+        conn.close()
+        return {"goals": goals, "count": len(goals)}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.delete("/chat/history/{session_id}")
+async def clear_chat_history(session_id: str):
+    """Clear in-memory conversation history for a session"""
+    with _session_histories_lock:
+        _session_histories.pop(session_id, None)
+    return {"status": "cleared", "session_id": session_id}
 
 @app.get("/memory/status")
 async def get_memory_status():
