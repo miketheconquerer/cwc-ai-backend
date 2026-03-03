@@ -8,10 +8,11 @@ NEW IN v10.3:
 🏢 Enhanced Chinese Company Info – Chinese names & China flag in Wikidata
 📊 China Economic Indicators – GDP, PMI, trade from World Bank (free)
 🎯 Proactive China News Goals – auto‑creates monitoring goals for interested users
+➕ Added /api/china-news endpoint for widget (mediastack)
 ================================================================================
 """
 
-from fastapi import FastAPI, BackgroundTasks, Request, HTTPException
+from fastapi import FastAPI, BackgroundTasks, Request, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, JSONResponse, FileResponse, StreamingResponse
 from pydantic import BaseModel
@@ -3345,6 +3346,67 @@ async def submit_feedback(fb: FeedbackRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# ============================================================
+# NEW: China News Endpoint for Widget
+# ============================================================
+# Simple in-memory cache
+_news_cache = {}
+_news_cache_time = 0
+CACHE_DURATION = 300  # 5 minutes (adjust as needed)
+
+@app.get("/api/china-news")
+async def china_news(limit: int = Query(5, ge=1, le=10), force_refresh: bool = Query(False)):
+    """Returns latest China business news for the widget. Cached for 5 minutes."""
+    global _news_cache, _news_cache_time
+
+    # Return cached data if still fresh and not forced refresh
+    if not force_refresh and time.time() - _news_cache_time < CACHE_DURATION:
+        return _news_cache
+
+    api_key = os.getenv("MEDIASTACK_API_KEY")
+    if not api_key:
+        return {"error": "MEDIASTACK_API_KEY not configured", "articles": []}
+
+    # Build request – you can adjust keywords/categories
+    url = (
+        "http://api.mediastack.com/v1/news"
+        f"?access_key={api_key}"
+        "&keywords=China business OR Chinese suppliers OR China economy"
+        "&countries=cn"
+        "&languages=en"
+        "&categories=business"
+        f"&limit={limit}"
+        "&sort=published_desc"
+    )
+
+    try:
+        resp = requests.get(url, timeout=10)
+        data = resp.json()
+
+        if "error" in data:
+            return {"error": data["error"]["message"], "articles": []}
+
+        # Format response for widget
+        articles = []
+        for item in data.get("data", []):
+            articles.append({
+                "category": "Business",
+                "headline": item.get("title"),
+                "time": item.get("published_at", "")[:10],  # YYYY-MM-DD
+                "query": f"Tell me more about: {item.get('title')}"
+            })
+
+        result = {"articles": articles, "updated": datetime.now().isoformat()}
+        _news_cache = result
+        _news_cache_time = time.time()
+        return result
+
+    except Exception as e:
+        return {"error": str(e), "articles": []}
+
+# ============================================================
+# ADMIN STATS ENDPOINT
+# ============================================================
 @app.get("/admin/stats")
 async def admin_stats(password: str):
     """Get admin statistics"""
