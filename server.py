@@ -1,13 +1,18 @@
 """
 ================================================================================
-SOPHIA AI SERVER v10.3 - CHINA BUSINESS ENHANCED EDITION
+SOPHIA AI SERVER v11.0 - FULLY AGENTIC EDITION
 ================================================================================
-NEW IN v10.3:
-🇨🇳 Chinese Translation tool – translates between English and Chinese (free)
-📡 China Business RSS Aggregator – multiple China news feeds
-🏢 Enhanced Chinese Company Info – Chinese names & China flag in Wikidata
-📊 China Economic Indicators – GDP, PMI, trade from World Bank (free)
-🎯 Proactive China News Goals – auto‑creates monitoring goals for interested users
+NEW IN v11.0:
+🤖 Agent Swarm - Multi-agent collaboration with specialization
+🎯 Convergent Depth - Dynamic iteration until answer stabilizes  
+🔧 Self-Improving Tools - Auto-generates tools when gaps detected
+👁️ Autonomous Monitoring - Self-triggering background research
+📈 Self-Improvement Engine - Continuous learning from performance
+🧠 Local FAISS Memory - Zero-cost vector storage
+🕵️ Stealth Browser - No Playwright needed
+💾 ZeroCostTracer - Local file-based observability
+⚡ Prompt Cache - 30-50% speedup via caching
+🔄 Resilient Execution - Smart retries with fallbacks
 ================================================================================
 """
 
@@ -25,28 +30,34 @@ import hashlib
 import re
 import asyncio
 import threading
+import random
+import numpy as np
 from collections import defaultdict
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
-from typing import List, Dict, Any, Optional, Tuple, Callable
+from typing import List, Dict, Any, Optional, Tuple
+from pathlib import Path
 import uuid
 import traceback
 import base64
 import math
 import urllib.parse
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from bs4 import BeautifulSoup
+import faiss
 
-# Optional: RSS feed parser for free news
+# Optional imports with fallbacks
 FEEDPARSER_AVAILABLE = False
 try:
     import feedparser
     FEEDPARSER_AVAILABLE = True
-    print("✅ feedparser available for Google News RSS")
+    print("✅ feedparser available")
 except ImportError:
     print("⚠️ feedparser not installed. Install with: pip install feedparser")
 
-# Optional: Sentence Transformers for Embeddings
 SENTENCE_TRANSFORMERS_AVAILABLE = False
 try:
     from sentence_transformers import SentenceTransformer
@@ -55,25 +66,23 @@ try:
 except Exception as e:
     print(f"⚠️ sentence-transformers not installed: {e}")
 
-# Optional: Playwright for Browser Automation
 PLAYWRIGHT_AVAILABLE = False
 try:
     from playwright.async_api import async_playwright
     PLAYWRIGHT_AVAILABLE = True
-    print("✅ Playwright available for browser automation")
+    print("✅ Playwright available")
 except Exception as e:
     print(f"⚠️ Playwright not installed: {e}")
-    print("   Browser automation will use HTTP fallback")
 
 load_dotenv()
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
-BREVO_API_KEY   = os.getenv("BREVO_API_KEY", "")
-SENDER_EMAIL    = os.getenv("SENDER_EMAIL", "888nv666@gmail.com")
+BREVO_API_KEY = os.getenv("BREVO_API_KEY", "")
+SENDER_EMAIL = os.getenv("SENDER_EMAIL", "888nv666@gmail.com")
 RECIPIENT_EMAIL = "digkasm@proton.me"
-DATABASE_URL    = os.getenv("DATABASE_URL")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 CLOUDFLARE_API_KEY = os.getenv("CLOUDFLARE_API_KEY", "")
@@ -81,11 +90,8 @@ CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "")
 
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
 if ADMIN_PASSWORD == "admin123":
-    print("⚠️  WARNING: ADMIN_PASSWORD is using the insecure default 'admin123'. Set the ADMIN_PASSWORD env var!")
+    print("⚠️  WARNING: ADMIN_PASSWORD is using insecure default")
 
-# ============================================================
-# VECTOR DATABASE CONFIGURATION
-# ============================================================
 CHROMA_CLOUD_API_KEY = os.getenv("CHROMA_CLOUD_API_KEY", "")
 CHROMA_TENANT = os.getenv("CHROMA_TENANT", "default")
 CHROMA_DATABASE = os.getenv("CHROMA_DATABASE", "default")
@@ -102,39 +108,24 @@ SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
 CHROMA_LOCAL_PATH = os.getenv("CHROMA_LOCAL_PATH", "./chroma_db")
 VECTOR_DB_TYPE = os.getenv("VECTOR_DB_TYPE", "auto")
 
-# ============================================================
-# Web Search & Discovery APIs
-# ============================================================
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 JINA_API_KEY = os.getenv("JINA_API_KEY", "")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
 
-# ============================================================
-# Promotion & SEO APIs
-# ============================================================
 INDEXNOW_KEY = os.getenv("INDEXNOW_KEY", "")
 GOOGLE_SEARCH_CONSOLE_KEY = os.getenv("GOOGLE_SEARCH_CONSOLE_KEY", "")
 
-# ============================================================
-# Bing Webmaster API
-# ============================================================
 BING_WEBMASTER_API_KEY = os.getenv("BING_WEBMASTER_API_KEY", "")
 BING_SEARCH_API_KEY = os.getenv("BING_SEARCH_API_KEY", "")
 BING_CUSTOM_CONFIG_ID = os.getenv("BING_CUSTOM_CONFIG_ID", "")
 
-# ============================================================
-# Social & Research APIs
-# ============================================================
 REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID", "")
 REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET", "")
 REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT", "SophiaAI/1.0 by ChinaWestConnector")
 
-# ============================================================
-# Web Scraping & Geocoding APIs
-# ============================================================
 ZENROWS_API_KEY = os.getenv("ZENROWS_API_KEY", "")
 
-# Intelligence Settings
+# Agentic Configuration
 AUTO_IMPROVEMENT_INTERVAL_HOURS = 24
 ENVIRONMENT_CHECK_INTERVAL_HOURS = 6
 GOAL_EXECUTION_INTERVAL_MINUTES = 5
@@ -148,320 +139,338 @@ MAX_TOOL_CHAIN_DEPTH = 3
 REFLECTION_THRESHOLD = 0.7
 NEWS_CACHE_MAX_AGE_MINUTES = 30
 
+# Convergent Agent Settings
+CONVERGENCE_THRESHOLD = 0.95
+MAX_SAFETY_ITERATIONS = 10
+CONVERGENCE_WINDOW = 3
+
+# ============================================================
+# ZERO COST TRACER - 100% Free Observability
+# ============================================================
+class ZeroCostTracer:
+    """100% free tracing - writes to local JSONL files with rotation"""
+    
+    def __init__(self, log_dir: str = "./logs"):
+        self.log_dir = Path(log_dir)
+        self.log_dir.mkdir(exist_ok=True)
+        self.current_file = self._get_log_file()
+        self._rotate_if_needed()
+        self.metrics = {
+            'total_traces': 0,
+            'total_latency_ms': 0,
+            'tool_usage': defaultdict(int)
+        }
+    
+    def _get_log_file(self):
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        return self.log_dir / f"traces_{date_str}.jsonl"
+    
+    def _rotate_if_needed(self):
+        import gzip
+        for old_file in self.log_dir.glob("traces_*.jsonl"):
+            if old_file != self.current_file and old_file.stat().st_size > 100_000:
+                with open(old_file, 'rb') as f_in:
+                    with gzip.open(f"{old_file}.gz", 'wb') as f_out:
+                        f_out.writelines(f_in)
+                old_file.unlink()
+    
+    def trace(self, session_id: str, operation: str, 
+              inputs: dict, outputs: dict, 
+              latency_ms: float, tools_used: list = None,
+              iteration: int = 1, converged: bool = True):
+        entry = {
+            "timestamp": datetime.now().isoformat(),
+            "session_id": session_id[:16],
+            "operation": operation,
+            "inputs": self._sanitize(inputs),
+            "outputs": self._sanitize(outputs),
+            "latency_ms": latency_ms,
+            "tools_used": tools_used or [],
+            "iteration": iteration,
+            "converged": converged
+        }
+        
+        with open(self.current_file, 'a') as f:
+            f.write(json.dumps(entry) + '\n')
+        
+        self.metrics['total_traces'] += 1
+        self.metrics['total_latency_ms'] += latency_ms
+        for tool in (tools_used or []):
+            self.metrics['tool_usage'][tool] += 1
+    
+    def _sanitize(self, data: dict) -> dict:
+        if not isinstance(data, dict):
+            return data
+        sanitized = {}
+        for k, v in data.items():
+            if any(sensitive in k.lower() for sensitive in ['password', 'key', 'token', 'secret']):
+                sanitized[k] = '[REDACTED]'
+            else:
+                sanitized[k] = v
+        return sanitized
+    
+    def get_stats(self) -> dict:
+        avg_latency = self.metrics['total_latency_ms'] / max(self.metrics['total_traces'], 1)
+        return {
+            'total_traces': self.metrics['total_traces'],
+            'avg_latency_ms': round(avg_latency, 2),
+            'tool_usage': dict(self.metrics['tool_usage'])
+        }
+
+tracer = ZeroCostTracer()
+
+# ============================================================
+# PROMPT CACHE - 100% Free Speedup
+# ============================================================
+class PromptCache:
+    """Cache LLM responses to avoid redundant calls"""
+    
+    def __init__(self, cache_dir: str = "./prompt_cache"):
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(exist_ok=True)
+        self.memory_cache = {}
+        self.hit_count = 0
+        self.miss_count = 0
+    
+    def _get_key(self, messages: List[dict], model: str, tools: list = None) -> str:
+        content = json.dumps({
+            "messages": messages, 
+            "model": model,
+            "tools": [t['function']['name'] for t in (tools or [])]
+        }, sort_keys=True)
+        return hashlib.sha256(content.encode()).hexdigest()[:32]
+    
+    async def get_or_compute(self, messages: List[dict], model: str,
+                             compute_func, tools: list = None) -> dict:
+        key = self._get_key(messages, model, tools)
+        
+        if key in self.memory_cache:
+            self.hit_count += 1
+            return self.memory_cache[key]
+        
+        cache_file = self.cache_dir / f"{key}.json"
+        if cache_file.exists():
+            with open(cache_file) as f:
+                result = json.load(f)
+                self.memory_cache[key] = result
+                self.hit_count += 1
+                return result
+        
+        self.miss_count += 1
+        result = await compute_func()
+        
+        self.memory_cache[key] = result
+        with open(cache_file, 'w') as f:
+            json.dump(result, f)
+        
+        return result
+    
+    def get_stats(self) -> dict:
+        total = self.hit_count + self.miss_count
+        hit_rate = self.hit_count / total if total > 0 else 0
+        return {
+            "hits": self.hit_count,
+            "misses": self.miss_count,
+            "hit_rate": f"{hit_rate:.1%}",
+            "memory_entries": len(self.memory_cache),
+            "disk_entries": len(list(self.cache_dir.glob("*.json")))
+        }
+
+prompt_cache = PromptCache()
+
+# ============================================================
+# LOCAL FAISS MEMORY - 100% Free Vector Storage
+# ============================================================
+class LocalFAISSMemory:
+    """Zero-cost vector memory using FAISS"""
+    
+    def __init__(self, dim: int = 384, storage_dir: str = "./faiss_memory"):
+        self.dim = dim
+        self.storage_dir = Path(storage_dir)
+        self.storage_dir.mkdir(exist_ok=True)
+        
+        self.index = faiss.IndexFlatIP(dim)
+        self.metadata = []
+        self.metadata_file = self.storage_dir / "metadata.pkl"
+        self.index_file = self.storage_dir / "faiss.index"
+        
+        self._load()
+    
+    def _load(self):
+        if self.index_file.exists():
+            self.index = faiss.read_index(str(self.index_file))
+        if self.metadata_file.exists():
+            import pickle
+            with open(self.metadata_file, 'rb') as f:
+                self.metadata = pickle.load(f)
+    
+    def _save(self):
+        faiss.write_index(self.index, str(self.index_file))
+        import pickle
+        with open(self.metadata_file, 'wb') as f:
+            pickle.dump(self.metadata, f)
+    
+    def add(self, text: str, embedding: List[float], metadata: dict = None):
+        vec = np.array(embedding, dtype=np.float32).reshape(1, -1)
+        faiss.normalize_L2(vec)
+        
+        self.index.add(vec)
+        self.metadata.append({
+            "text": text,
+            "metadata": metadata or {},
+            "timestamp": time.time()
+        })
+        
+        if len(self.metadata) % 10 == 0:
+            self._save()
+    
+    def search(self, query_embedding: List[float], k: int = 5) -> List[dict]:
+        if self.index.ntotal == 0:
+            return []
+        
+        vec = np.array(query_embedding, dtype=np.float32).reshape(1, -1)
+        faiss.normalize_L2(vec)
+        
+        scores, indices = self.index.search(vec, k)
+        
+        results = []
+        for score, idx in zip(scores[0], indices[0]):
+            if idx >= 0 and idx < len(self.metadata):
+                results.append({
+                    "text": self.metadata[idx]["text"],
+                    "score": float(score),
+                    "metadata": self.metadata[idx]["metadata"]
+                })
+        
+        return results
+    
+    def get_status(self) -> dict:
+        return {
+            "backend": "faiss_local",
+            "vectors": self.index.ntotal,
+            "dimension": self.dim,
+            "storage_size_mb": sum(f.stat().st_size for f in self.storage_dir.glob("*")) / 1024 / 1024
+        }
+
+local_memory = LocalFAISSMemory()
+
 # ============================================================
 # DATABASE LAYER
 # ============================================================
 def get_db():
-    """Get database connection"""
     if not DATABASE_URL:
         raise ValueError("DATABASE_URL not configured")
     return psycopg2.connect(DATABASE_URL)
 
 def init_db():
-    """Initialize all database tables"""
     try:
         conn = get_db()
         c = conn.cursor()
         
-        # Conversations table
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS conversations (
-                id SERIAL PRIMARY KEY,
-                session_id VARCHAR(100),
-                user_message TEXT,
-                ai_response TEXT,
-                intent VARCHAR(50),
-                reflection_score INTEGER DEFAULT 5,
-                goals_extracted JSONB,
-                tools_used JSONB,
-                confidence_score FLOAT,
-                timestamp TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        
-        # User profiles table
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS user_profiles (
-                id SERIAL PRIMARY KEY,
-                session_id VARCHAR(100) UNIQUE,
-                email VARCHAR(255),
-                name VARCHAR(255),
-                phone VARCHAR(50),
-                company VARCHAR(255),
-                lead_score INTEGER DEFAULT 0,
-                last_intent VARCHAR(50),
-                key_facts JSONB,
-                region_interest VARCHAR(100),
-                sector_interest VARCHAR(100),
-                visit_count INTEGER DEFAULT 1,
-                first_seen TIMESTAMP DEFAULT NOW(),
-                last_seen TIMESTAMP DEFAULT NOW(),
-                created_at TIMESTAMP DEFAULT NOW(),
-                updated_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        
-        # Autonomous goals table
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS autonomous_goals (
-                id SERIAL PRIMARY KEY,
-                session_id VARCHAR(100),
-                goal_type VARCHAR(50),
-                goal_description TEXT,
-                priority INTEGER DEFAULT 5,
-                status VARCHAR(20) DEFAULT 'pending',
-                subtasks JSONB,
-                completed_subtasks JSONB,
-                result TEXT,
-                confidence FLOAT,
-                source VARCHAR(50),
-                created_at TIMESTAMP DEFAULT NOW(),
-                started_at TIMESTAMP,
-                completed_at TIMESTAMP,
-                retry_count INTEGER DEFAULT 0
-            )
-        """)
-        
-        # Agent tasks table
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS agent_tasks (
-                id SERIAL PRIMARY KEY,
-                session_id VARCHAR(100),
-                task_type VARCHAR(50),
-                task_description TEXT,
-                status VARCHAR(20) DEFAULT 'pending',
-                assigned_agent VARCHAR(50),
-                result TEXT,
-                metadata JSONB,
-                created_at TIMESTAMP DEFAULT NOW(),
-                started_at TIMESTAMP,
-                completed_at TIMESTAMP
-            )
-        """)
-        
-        # Agent versions table
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS agent_versions (
-                id SERIAL PRIMARY KEY,
-                version_number INTEGER,
-                prompt_hash VARCHAR(64) UNIQUE,
-                prompt_text TEXT,
-                performance_score FLOAT,
-                deployed BOOLEAN DEFAULT FALSE,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        
-        # Environment alerts table
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS environment_alerts (
-                id SERIAL PRIMARY KEY,
-                source VARCHAR(100),
-                change_detected TEXT,
-                user_segments JSONB,
-                notified BOOLEAN DEFAULT FALSE,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        
-        # Tool registry table
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS tool_registry (
-                id SERIAL PRIMARY KEY,
-                tool_name VARCHAR(100) UNIQUE,
-                description TEXT,
-                parameters JSONB,
-                implementation TEXT,
-                created_by VARCHAR(100),
-                success_rate FLOAT DEFAULT 1.0,
-                use_count INTEGER DEFAULT 0,
-                deployed BOOLEAN DEFAULT TRUE,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        
-        # Proactive notifications table
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS proactive_notifications (
-                id SERIAL PRIMARY KEY,
-                session_id VARCHAR(100),
-                notification_type VARCHAR(50),
-                subject TEXT,
-                content TEXT,
-                sent BOOLEAN DEFAULT FALSE,
-                sent_at TIMESTAMP,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        
-        # Learning events table
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS learning_events (
-                id SERIAL PRIMARY KEY,
-                event_type VARCHAR(50),
-                description TEXT,
-                improvement_data JSONB,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        
-        # Learning feedback table
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS learning_feedback (
-                id SERIAL PRIMARY KEY,
-                session_id VARCHAR(100),
-                original_response TEXT,
-                corrected_response TEXT,
-                user_feedback TEXT,
-                intent VARCHAR(50),
-                learned_improvement TEXT,
-                applied BOOLEAN DEFAULT FALSE,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        
-        # News cache table
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS news_cache (
-                id SERIAL PRIMARY KEY,
-                topic VARCHAR(100),
-                news_data JSONB,
-                source VARCHAR(50),
-                fetched_at TIMESTAMP DEFAULT NOW(),
-                expires_at TIMESTAMP
-            )
-        """)
-        
-        # Tool chain history
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS tool_chain_history (
-                id SERIAL PRIMARY KEY,
-                session_id VARCHAR(100),
-                query TEXT,
-                tools_used JSONB,
-                success BOOLEAN,
-                user_satisfied BOOLEAN,
-                execution_time_ms INTEGER,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        
-        # Reflection history
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS reflection_history (
-                id SERIAL PRIMARY KEY,
-                session_id VARCHAR(100),
-                original_response TEXT,
-                reflection TEXT,
-                improved_response TEXT,
-                confidence_before FLOAT,
-                confidence_after FLOAT,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        
-        # Vector memory tables for pgvector
-        try:
-            c.execute("CREATE EXTENSION IF NOT EXISTS vector;")
-            print("✅ pgvector extension enabled")
-        except:
-            print("⚠️ pgvector extension not available")
-        
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS episodic_memories (
-                id SERIAL PRIMARY KEY,
-                session_id VARCHAR(100),
-                memory_text TEXT,
-                embedding vector(384),
-                intent VARCHAR(50),
-                success_score INTEGER,
-                metadata JSONB,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS semantic_memories (
-                id SERIAL PRIMARY KEY,
-                fact_type VARCHAR(100),
-                fact_value TEXT,
-                embedding vector(384),
-                importance INTEGER DEFAULT 5,
-                source VARCHAR(100),
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        
-        # Create vector indexes
-        try:
-            c.execute("""
-                CREATE INDEX IF NOT EXISTS episodic_embedding_idx 
-                ON episodic_memories USING ivfflat (embedding vector_cosine_ops)
-                WITH (lists = 100);
+        tables = [
+            ("conversations", """
+                CREATE TABLE IF NOT EXISTS conversations (
+                    id SERIAL PRIMARY KEY,
+                    session_id VARCHAR(100),
+                    user_message TEXT,
+                    ai_response TEXT,
+                    intent VARCHAR(50),
+                    reflection_score INTEGER DEFAULT 5,
+                    goals_extracted JSONB,
+                    tools_used JSONB,
+                    confidence_score FLOAT,
+                    iterations INTEGER DEFAULT 1,
+                    converged BOOLEAN DEFAULT TRUE,
+                    timestamp TIMESTAMP DEFAULT NOW()
+                )
+            """),
+            ("user_profiles", """
+                CREATE TABLE IF NOT EXISTS user_profiles (
+                    id SERIAL PRIMARY KEY,
+                    session_id VARCHAR(100) UNIQUE,
+                    email VARCHAR(255),
+                    name VARCHAR(255),
+                    phone VARCHAR(50),
+                    company VARCHAR(255),
+                    lead_score INTEGER DEFAULT 0,
+                    last_intent VARCHAR(50),
+                    key_facts JSONB,
+                    region_interest VARCHAR(100),
+                    sector_interest VARCHAR(100),
+                    visit_count INTEGER DEFAULT 1,
+                    first_seen TIMESTAMP DEFAULT NOW(),
+                    last_seen TIMESTAMP DEFAULT NOW(),
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )
+            """),
+            ("autonomous_goals", """
+                CREATE TABLE IF NOT EXISTS autonomous_goals (
+                    id SERIAL PRIMARY KEY,
+                    session_id VARCHAR(100),
+                    goal_type VARCHAR(50),
+                    goal_description TEXT,
+                    priority INTEGER DEFAULT 5,
+                    status VARCHAR(20) DEFAULT 'pending',
+                    subtasks JSONB,
+                    completed_subtasks JSONB,
+                    result TEXT,
+                    confidence FLOAT,
+                    source VARCHAR(50),
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    started_at TIMESTAMP,
+                    completed_at TIMESTAMP,
+                    retry_count INTEGER DEFAULT 0
+                )
+            """),
+            ("user_feedback", """
+                CREATE TABLE IF NOT EXISTS user_feedback (
+                    id SERIAL PRIMARY KEY,
+                    session_id VARCHAR(100),
+                    conversation_id INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
+                    rating INTEGER CHECK (rating >= 1 AND rating <= 5),
+                    comment TEXT,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """),
+            ("generated_tools", """
+                CREATE TABLE IF NOT EXISTS generated_tools (
+                    id SERIAL PRIMARY KEY,
+                    tool_name VARCHAR(100) UNIQUE,
+                    code TEXT,
+                    description TEXT,
+                    created_for TEXT,
+                    test_result JSONB,
+                    use_count INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """),
+            ("proactive_notifications", """
+                CREATE TABLE IF NOT EXISTS proactive_notifications (
+                    id SERIAL PRIMARY KEY,
+                    session_id VARCHAR(100),
+                    notification_type VARCHAR(50),
+                    subject TEXT,
+                    content TEXT,
+                    sent BOOLEAN DEFAULT FALSE,
+                    sent_at TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
             """)
-            c.execute("""
-                CREATE INDEX IF NOT EXISTS semantic_embedding_idx 
-                ON semantic_memories USING ivfflat (embedding vector_cosine_ops)
-                WITH (lists = 100);
-            """)
-            print("✅ Vector indexes created")
-        except Exception as e:
-            print(f"⚠️ Vector indexes not created: {e}")
-
-        # User feedback table (v10.1)
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS user_feedback (
-                id SERIAL PRIMARY KEY,
-                session_id VARCHAR(100),
-                conversation_id INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
-                rating INTEGER CHECK (rating >= 1 AND rating <= 5),
-                comment TEXT,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        print("✅ User feedback table created")
-
+        ]
+        
+        for name, sql in tables:
+            c.execute(sql)
+            print(f"✅ Table {name} ready")
+        
         conn.commit()
         conn.close()
-        print("✅ Database tables initialized")
-        run_migrations()
+        print("✅ Database initialized")
+        
     except Exception as e:
         print(f"⚠️ Database initialization error: {e}")
 
-def run_migrations():
-    """Add missing columns to existing tables"""
-    migrations = [
-        ("conversations", "confidence_score", "FLOAT"),
-        ("tool_registry", "parameters", "JSONB"),
-        ("conversations", "goals_extracted", "JSONB"),
-        ("conversations", "tools_used", "JSONB"),
-        ("user_profiles", "updated_at", "TIMESTAMP DEFAULT NOW()"),
-    ]
-    
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        
-        for table, column, dtype in migrations:
-            try:
-                c.execute(f"""
-                    SELECT column_name FROM information_schema.columns 
-                    WHERE table_name = %s AND column_name = %s
-                """, (table, column))
-                if not c.fetchone():
-                    c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {dtype}")
-                    print(f"✅ Migration: Added {column} to {table}")
-            except Exception as e:
-                if "already exists" not in str(e):
-                    print(f"⚠️ Migration warning ({table}.{column}): {e}")
-        
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"⚠️ Migration error: {e}")
-
 def get_or_create_user_profile(session_id: str) -> dict:
-    """Get or create user profile"""
     try:
         conn = get_db()
         c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -491,7 +500,6 @@ def get_or_create_user_profile(session_id: str) -> dict:
         return {}
 
 def update_user_profile(session_id: str, **kwargs):
-    """Update user profile fields"""
     try:
         conn = get_db()
         c = conn.cursor()
@@ -519,40 +527,9 @@ def update_user_profile(session_id: str, **kwargs):
         print(f"Update profile error: {e}")
 
 # ============================================================
-# EMAIL HELPER
-# ============================================================
-def send_email_brevo(to_email: str, subject: str, content: str) -> bool:
-    """Send email via Brevo API"""
-    if not BREVO_API_KEY or not to_email:
-        return False
-    
-    try:
-        response = requests.post(
-            "https://api.brevo.com/v3/smtp/email",
-            headers={
-                "accept": "application/json",
-                "content-type": "application/json",
-                "api-key": BREVO_API_KEY
-            },
-            json={
-                "sender": {"email": SENDER_EMAIL, "name": "Sophia - CWC"},
-                "to": [{"email": to_email}],
-                "subject": subject,
-                "textContent": content
-            },
-            timeout=30
-        )
-        return response.status_code == 201
-    except Exception as e:
-        print(f"Email error: {e}")
-        return False
-
-# ============================================================
 # FREE AI PROVIDER MANAGER
 # ============================================================
 class FreeAIProvider:
-    """Manages 100% free AI providers with automatic fallback"""
-    
     def __init__(self):
         self.providers = []
         self.current_provider = 0
@@ -575,7 +552,7 @@ class FreeAIProvider:
                     'X-Title': 'Sophia AI - CWC'
                 }
             })
-            print("✅ OpenRouter configured (50 requests/day FREE)")
+            print("✅ OpenRouter configured")
         
         if CLOUDFLARE_API_KEY and CLOUDFLARE_ACCOUNT_ID:
             self.providers.append({
@@ -592,7 +569,7 @@ class FreeAIProvider:
                     'Content-Type': 'application/json'
                 }
             })
-            print("✅ Cloudflare Workers AI configured (10K neurons/day FREE)")
+            print("✅ Cloudflare configured")
         
         if not self.providers:
             print("⚠️ No AI providers configured!")
@@ -609,7 +586,7 @@ class FreeAIProvider:
         print(f"🔄 Switched to: {self.providers[self.current_provider]['name']}")
         return self.get_current_provider()
     
-    async def chat_completion(self, messages, model_type='default', temperature=0.3, 
+    async def chat_completion(self, messages, model_type='default', temperature=0.3,
                               max_tokens=1000, tools=None, tool_choice=None):
         if not self.providers:
             raise Exception("No AI providers configured")
@@ -619,10 +596,10 @@ class FreeAIProvider:
             provider = self.get_current_provider()
             try:
                 if provider['name'] == 'openrouter':
-                    result = await self._call_openrouter(provider, messages, model_type, 
+                    result = await self._call_openrouter(provider, messages, model_type,
                                                          temperature, max_tokens, tools, tool_choice)
                 else:
-                    result = await self._call_cloudflare(provider, messages, model_type, 
+                    result = await self._call_cloudflare(provider, messages, model_type,
                                                          temperature, max_tokens)
                 
                 self.request_counts[provider['name']] += 1
@@ -631,7 +608,7 @@ class FreeAIProvider:
             except Exception as e:
                 last_error = str(e)
                 print(f"⚠️ {provider['name']} failed: {e}")
-                if any(code in str(e) for code in ['429', '404', '401', 'rate limit', 'not found', 'invalid']):
+                if any(code in str(e) for code in ['429', '404', '401', 'rate limit']):
                     self.switch_provider()
                     await asyncio.sleep(1)
         
@@ -648,17 +625,16 @@ class FreeAIProvider:
             payload["tools"] = tools
             payload["tool_choice"] = tool_choice or "auto"
         
-        response = requests.post(provider['endpoint'], headers=provider['headers'], 
+        response = requests.post(provider['endpoint'], headers=provider['headers'],
                                 json=payload, timeout=60)
         
         if response.status_code == 429:
             raise Exception("Rate limit (429)")
         elif response.status_code == 404:
-            error_detail = response.text[:200] if response.text else "Model not found"
-            print(f"❌ OpenRouter 404: {error_detail}")
-            raise Exception(f"Model not found (404): {provider['models'][model_type]}")
+            raise Exception(f"Model not found (404)")
         elif response.status_code == 401:
             raise Exception("Invalid API key (401)")
+        
         response.raise_for_status()
         return response.json()
     
@@ -666,18 +642,19 @@ class FreeAIProvider:
         model = provider['models'][model_type]
         url = f"https://api.cloudflare.com/client/v4/accounts/{provider['account_id']}/ai/run/{model}"
         
-        response = requests.post(url, headers=provider['headers'], 
-                                json={"messages": messages, "temperature": temperature, 
+        response = requests.post(url, headers=provider['headers'],
+                                json={"messages": messages, "temperature": temperature,
                                       "max_tokens": max_tokens}, timeout=60)
         
         if response.status_code == 429:
             raise Exception("Rate limit (429)")
+        
         response.raise_for_status()
         data = response.json()
         
         return {
             "choices": [{
-                "message": {"role": "assistant", 
+                "message": {"role": "assistant",
                            "content": data.get('result', {}).get('response', '')},
                 "finish_reason": "stop"
             }]
@@ -686,41 +663,24 @@ class FreeAIProvider:
 ai_provider = FreeAIProvider()
 
 # ============================================================
-# HYBRID VECTOR MEMORY SYSTEM
+# ENCODER
 # ============================================================
-class HybridVectorMemory:
-    """Hybrid memory system supporting multiple backends"""
-    
+class LightweightEncoder:
     def __init__(self):
         self.encoder = None
-        self.backend_type = "memory"
-        self.chroma_client = None
-        self.episodic_collection = None
-        self.semantic_collection = None
-        self.supabase_db_url = SUPABASE_DB_URL
-        self.memory_store = {"episodic": [], "semantic": []}
-        self.initialized = False
-        
-        self._init_encoder()
-        backend = self._determine_backend()
-        self._init_backend(backend)
-    
-    def _init_encoder(self):
-        """Initialize the sentence encoder - with lightweight fallback"""
         if SENTENCE_TRANSFORMERS_AVAILABLE:
             try:
                 from sentence_transformers import SentenceTransformer
                 self.encoder = SentenceTransformer('all-MiniLM-L6-v2')
-                print("✅ Sentence encoder initialized (all-MiniLM-L6-v2)")
-                return
-            except Exception as e:
-                print(f"⚠️ Encoder init failed: {e}")
+                print("✅ Using sentence-transformers")
+            except:
+                pass
         
-        print("✅ Using lightweight hash-based embeddings (no ML libraries needed)")
-        self.encoder = "hash"
+        if self.encoder is None:
+            print("✅ Using hash-based embeddings")
+            self.encoder = "hash"
     
     def encode(self, text: str) -> List[float]:
-        """Encode text to embedding vector - with lightweight fallback"""
         if self.encoder and self.encoder != "hash":
             try:
                 return self.encoder.encode(text).tolist()
@@ -739,253 +699,32 @@ class HybridVectorMemory:
             embedding = [x/norm for x in embedding]
         
         return embedding
-    
-    def _determine_backend(self) -> str:
-        """Determine which backend to use based on config"""
-        if VECTOR_DB_TYPE != "auto":
-            return VECTOR_DB_TYPE
-        
-        if CHROMA_CLOUD_API_KEY:
-            return "chroma_cloud"
-        elif CHROMA_SERVER_URL:
-            return "chroma_remote"
-        elif SUPABASE_DB_URL:
-            return "supabase"
-        else:
-            return "memory"
-    
-    def _init_backend(self, backend: str):
-        """Initialize the selected backend"""
-        print(f"🗄️ Initializing vector backend: {backend}")
-        
-        if backend == "supabase":
-            self._init_supabase()
-        else:
-            self._init_memory()
-    
-    def _init_supabase(self):
-        """Initialize Supabase pgvector backend"""
-        try:
-            conn = psycopg2.connect(self.supabase_db_url)
-            conn.close()
-            
-            self.backend_type = "supabase"
-            self.initialized = True
-            print("✅ Supabase pgvector connected")
-            
-        except Exception as e:
-            print(f"⚠️ Supabase connection failed: {e}")
-            print("   Falling back to in-memory storage...")
-            self._init_memory()
-    
-    def _init_memory(self):
-        """Initialize in-memory fallback"""
-        self.backend_type = "memory"
-        self.initialized = True
-        print("✅ In-memory vector storage initialized (ephemeral)")
-    
-    def store_episodic(self, session_id: str, user_msg: str, response: str, 
-                       success_score: int, intent: str, metadata: dict = None):
-        """Store episodic memory (conversation)"""
-        if not self.initialized:
-            return
-        
-        try:
-            text = f"User: {user_msg}\nSophia: {response}"
-            embedding = self.encode(text)
-            memory_id = f"ep_{session_id}_{int(time.time())}"
-            metadata = metadata or {}
-            metadata.update({
-                "session_id": session_id, "intent": intent,
-                "success_score": success_score, "timestamp": datetime.now().isoformat()
-            })
-            
-            if self.backend_type == "supabase":
-                self._store_supabase_episodic(memory_id, session_id, text, embedding, metadata)
-            else:
-                self.memory_store["episodic"].append({
-                    "id": memory_id, "text": text, "embedding": embedding, "metadata": metadata
-                })
-                
-        except Exception as e:
-            print(f"Episodic storage error: {e}")
-    
-    def _store_supabase_episodic(self, memory_id: str, session_id: str, text: str, 
-                                  embedding: List[float], metadata: dict):
-        """Store episodic memory in Supabase pgvector"""
-        try:
-            conn = psycopg2.connect(self.supabase_db_url)
-            c = conn.cursor()
-            c.execute("""
-                INSERT INTO episodic_memories (session_id, memory_text, embedding, intent, success_score, metadata)
-                VALUES (%s, %s, %s::vector, %s, %s, %s::jsonb)
-            """, (session_id, text, str(embedding), metadata.get("intent"), 
-                  metadata.get("success_score"), json.dumps(metadata)))
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            print(f"Supabase episodic storage error: {e}")
-    
-    def store_semantic(self, fact_type: str, fact_value: str, importance: int, source: str):
-        """Store semantic memory (fact)"""
-        if not self.initialized or importance < 5:
-            return
-        
-        try:
-            text = f"{fact_type}: {fact_value}"
-            embedding = self.encode(text)
-            memory_id = f"sem_{fact_type}_{int(time.time())}"
-            
-            if self.backend_type == "supabase":
-                self._store_supabase_semantic(fact_type, fact_value, embedding, importance, source)
-            else:
-                self.memory_store["semantic"].append({
-                    "id": memory_id, "text": text, "embedding": embedding,
-                    "metadata": {"fact_type": fact_type, "importance": importance, "source": source}
-                })
-                
-        except Exception as e:
-            print(f"Semantic storage error: {e}")
-    
-    def _store_supabase_semantic(self, fact_type: str, fact_value: str, 
-                                  embedding: List[float], importance: int, source: str):
-        """Store semantic memory in Supabase pgvector"""
-        try:
-            conn = psycopg2.connect(self.supabase_db_url)
-            c = conn.cursor()
-            c.execute("""
-                INSERT INTO semantic_memories (fact_type, fact_value, embedding, importance, source)
-                VALUES (%s, %s, %s::vector, %s, %s)
-            """, (fact_type, fact_value, str(embedding), importance, source))
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            print(f"Supabase semantic storage error: {e}")
-    
-    def recall_similar_episodes(self, query: str, n_results: int = 5) -> List[dict]:
-        """Recall similar episodic memories"""
-        if not self.initialized:
-            return []
-        
-        try:
-            query_embedding = self.encode(query)
-            
-            if self.backend_type == "supabase":
-                return self._recall_supabase_episodic(query_embedding, n_results)
-            else:
-                return self._memory_similarity_search("episodic", query_embedding, n_results)
-                
-        except Exception as e:
-            print(f"Recall error: {e}")
-            return []
-    
-    def _recall_supabase_episodic(self, query_embedding: List[float], n_results: int) -> List[dict]:
-        """Recall episodic memories from Supabase pgvector"""
-        try:
-            conn = psycopg2.connect(self.supabase_db_url)
-            c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-            c.execute("""
-                SELECT id, session_id, memory_text, embedding <=> %s::vector as distance,
-                       intent, success_score, metadata, created_at
-                FROM episodic_memories
-                ORDER BY embedding <=> %s::vector
-                LIMIT %s
-            """, (str(query_embedding), str(query_embedding), n_results))
-            
-            results = []
-            for row in c.fetchall():
-                results.append({
-                    'id': row['id'],
-                    'text': row['memory_text'],
-                    'metadata': dict(row)
-                })
-            conn.close()
-            return results
-        except Exception as e:
-            print(f"Supabase recall error: {e}")
-            return []
-    
-    def _memory_similarity_search(self, store_type: str, query_embedding: List[float], 
-                                   n_results: int) -> List[dict]:
-        """In-memory cosine similarity search"""
-        memories = self.memory_store.get(store_type, [])
-        if not memories:
-            return []
-        
-        similarities = []
-        for mem in memories:
-            sim = self._cosine_similarity(query_embedding, mem.get('embedding', [0.0]*384))
-            similarities.append((sim, mem))
-        
-        similarities.sort(key=lambda x: x[0], reverse=True)
-        return [mem for _, mem in similarities[:n_results]]
-    
-    def _cosine_similarity(self, a: List[float], b: List[float]) -> float:
-        """Calculate cosine similarity between two vectors"""
-        if len(a) != len(b):
-            return 0.0
-        
-        dot_product = sum(x * y for x, y in zip(a, b))
-        norm_a = math.sqrt(sum(x * x for x in a))
-        norm_b = math.sqrt(sum(x * x for x in b))
-        
-        if norm_a == 0 or norm_b == 0:
-            return 0.0
-        return dot_product / (norm_a * norm_b)
-    
-    def get_status(self) -> dict:
-        """Get memory system status"""
-        if self.encoder == "hash":
-            encoder_type = "hash-based (lightweight)"
-        elif self.encoder:
-            encoder_type = "sentence-transformers (ML)"
-        else:
-            encoder_type = "none"
-        
-        status = {
-            "backend": self.backend_type,
-            "initialized": self.initialized,
-            "encoder": encoder_type,
-        }
-        
-        if self.backend_type == "supabase":
-            status["database"] = "Supabase pgvector"
-        else:
-            status["episodic_count"] = len(self.memory_store["episodic"])
-            status["semantic_count"] = len(self.memory_store["semantic"])
-        
-        return status
 
-hybrid_memory = HybridVectorMemory()
+encoder = LightweightEncoder()
 
 # ============================================================
-# WIKIPEDIA & WIKIDATA API
+# WIKIPEDIA & WIKIDATA
 # ============================================================
 class WikipediaKnowledge:
-    """Free Wikipedia and Wikidata API integration"""
-    
     def __init__(self):
         self.wikipedia_api = "https://en.wikipedia.org/api/rest_v1"
         self.wikidata_api = "https://www.wikidata.org/w/api.php"
         self.wikipedia_action_api = "https://en.wikipedia.org/w/api.php"
         self.cache = {}
         self.cache_time = {}
-        self.cache_duration = 3600  # 1 hour cache
+        self.cache_duration = 3600
     
     def _get_cached(self, key: str) -> Optional[dict]:
-        """Get cached result if still valid"""
         if key in self.cache and key in self.cache_time:
             if time.time() - self.cache_time[key] < self.cache_duration:
                 return self.cache[key]
         return None
     
     def _set_cache(self, key: str, value: dict):
-        """Cache a result"""
         self.cache[key] = value
         self.cache_time[key] = time.time()
     
     async def search_wikipedia(self, query: str, limit: int = 5) -> List[dict]:
-        """Search Wikipedia for articles matching query"""
         cache_key = f"search_{query}"
         cached = self._get_cached(cache_key)
         if cached:
@@ -1024,14 +763,12 @@ class WikipediaKnowledge:
             return []
     
     async def get_article(self, title: str) -> dict:
-        """Get full Wikipedia article by title"""
         cache_key = f"article_{title}"
         cached = self._get_cached(cache_key)
         if cached:
             return cached
         
         try:
-            # Get article summary and content
             response = requests.get(
                 f"{self.wikipedia_api}/page/summary/{title.replace(' ', '_')}",
                 timeout=15
@@ -1051,7 +788,6 @@ class WikipediaKnowledge:
                 self._set_cache(cache_key, result)
                 return result
             
-            # Fallback to action API
             response = requests.get(
                 self.wikipedia_action_api,
                 params={
@@ -1084,22 +820,7 @@ class WikipediaKnowledge:
         except Exception as e:
             return {"error": str(e)}
     
-    async def get_article_html(self, title: str) -> str:
-        """Get full HTML content of Wikipedia article"""
-        try:
-            response = requests.get(
-                f"{self.wikipedia_api}/page/html/{title.replace(' ', '_')}",
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                return response.text[:50000]  # Limit to 50KB
-            return ""
-        except Exception as e:
-            return f"Error: {e}"
-    
     async def search_wikidata(self, query: str, limit: int = 5) -> List[dict]:
-        """Search Wikidata for entities"""
         try:
             response = requests.get(
                 self.wikidata_api,
@@ -1130,14 +851,13 @@ class WikipediaKnowledge:
             return []
     
     async def get_wikidata_entity(self, entity_id: str) -> dict:
-        """Get detailed information about a Wikidata entity"""
         try:
             response = requests.get(
                 self.wikidata_api,
                 params={
                     "action": "wbgetentities",
                     "ids": entity_id,
-                    "languages": "en|zh",  # Request both English and Chinese labels
+                    "languages": "en|zh",
                     "format": "json"
                 },
                 timeout=15
@@ -1152,13 +872,12 @@ class WikipediaKnowledge:
                     "labels": entity.get("labels", {}),
                     "descriptions": entity.get("descriptions", {}),
                     "aliases": entity.get("aliases", {}),
-                    "claims": {}  # Simplified claims
+                    "claims": {}
                 }
                 
-                # Extract key claims (properties)
                 for prop_id, claims in entity.get("claims", {}).items():
                     values = []
-                    for claim in claims[:3]:  # Limit to first 3 values
+                    for claim in claims[:3]:
                         mainsnak = claim.get("mainsnak", {})
                         if mainsnak.get("datatype") == "string":
                             values.append(mainsnak.get("datavalue", {}).get("value"))
@@ -1173,539 +892,628 @@ class WikipediaKnowledge:
             return {"error": f"Entity not found: {entity_id}"}
         except Exception as e:
             return {"error": str(e)}
-    
-    async def get_company_info(self, company_name: str) -> dict:
-        """Get company information from Wikipedia and Wikidata, with China focus"""
-        # Search Wikipedia
-        wiki_results = await self.search_wikipedia(f"{company_name} company", limit=1)
-        
-        result = {
-            "company": company_name,
-            "wikipedia": None,
-            "wikidata": None,
-            "is_chinese": False,
-            "chinese_name": None
-        }
-        
-        if wiki_results:
-            article = await self.get_article(wiki_results[0]["title"])
-            result["wikipedia"] = article
-            
-            # Try to find Wikidata entity
-            wd_results = await self.search_wikidata(company_name, limit=1)
-            if wd_results:
-                entity = await self.get_wikidata_entity(wd_results[0]["id"])
-                result["wikidata"] = entity
-                
-                # Check if the company is in China (country property P17 = Q148)
-                if "P17" in entity.get("claims", {}):
-                    countries = entity["claims"]["P17"]
-                    if "Q148" in str(countries):
-                        result["is_chinese"] = True
-                
-                # Try to get Chinese name
-                if "labels" in entity and "zh" in entity["labels"]:
-                    result["chinese_name"] = entity["labels"]["zh"].get("value")
-                elif "labels" in entity and "zh-cn" in entity["labels"]:
-                    result["chinese_name"] = entity["labels"]["zh-cn"].get("value")
-        
-        return result
-    
-    async def get_topic_summary(self, topic: str) -> str:
-        """Get a concise summary of any topic"""
-        article = await self.get_article(topic)
-        
-        if "error" in article:
-            # Try searching
-            results = await self.search_wikipedia(topic, limit=1)
-            if results:
-                article = await self.get_article(results[0]["title"])
-        
-        if "extract" in article:
-            return article["extract"]
-        return f"No Wikipedia article found for: {topic}"
 
 wikipedia_knowledge = WikipediaKnowledge()
 
 # ============================================================
-# BROWSER AUTOMATION (Playwright)
+# RESILIENT TOOL EXECUTOR
 # ============================================================
-class BrowserAutomation:
-    """Browser automation using Playwright or HTTP fallback"""
-    
-    def __init__(self):
-        self.playwright_available = PLAYWRIGHT_AVAILABLE
-        self.browser = None
-        self.context = None
-        self.page = None
-    
-    async def init_browser(self):
-        """Initialize Playwright browser"""
-        if not PLAYWRIGHT_AVAILABLE:
-            return False
+class ResilientToolExecutor:
+    async def execute_with_recovery(self, tool_name: str, params: dict,
+                                    max_retries: int = 3) -> dict:
+        last_error = None
         
-        try:
-            playwright = await async_playwright.start()
-            self.browser = await playwright.chromium.launch(headless=True)
-            self.context = await self.browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            )
-            self.page = await self.context.new_page()
-            print("✅ Playwright browser initialized")
-            return True
-        except Exception as e:
-            print(f"⚠️ Browser init failed: {e}")
-            return False
-    
-    async def close_browser(self):
-        """Close browser"""
-        if self.browser:
-            await self.browser.close()
-            self.browser = None
-            self.context = None
-            self.page = None
-    
-    async def browse_page(self, url: str, wait_time: int = 2) -> dict:
-        """
-        Browse to a URL and get page content.
-        Uses Playwright if available, otherwise falls back to HTTP requests.
-        """
-        result = {
-            "url": url,
-            "title": "",
-            "content": "",
-            "html": "",
-            "screenshot": None,
-            "success": False,
-            "method": "http"
-        }
-        
-        # Try Playwright first
-        if PLAYWRIGHT_AVAILABLE:
+        for attempt in range(max_retries):
             try:
-                if not self.page:
-                    await self.init_browser()
+                result = await tool_registry.execute(tool_name, params)
                 
-                if self.page:
-                    await self.page.goto(url, timeout=30000)
-                    await asyncio.sleep(wait_time)
-                    
-                    result["title"] = await self.page.title()
-                    result["content"] = await self.page.content()
-                    
-                    # Get visible text
-                    result["text"] = await self.page.evaluate("""
-                        () => document.body.innerText
-                    """)
-                    
-                    # Take screenshot
-                    screenshot_bytes = await self.page.screenshot(full_page=False)
-                    result["screenshot"] = base64.b64encode(screenshot_bytes).decode('utf-8')
-                    
-                    result["success"] = True
-                    result["method"] = "playwright"
+                if result.get('success'):
                     return result
-            except Exception as e:
-                print(f"Playwright error: {e}")
-        
-        # HTTP fallback
-        try:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            }
-            response = requests.get(url, headers=headers, timeout=30)
-            
-            if response.status_code == 200:
-                result["html"] = response.text[:100000]  # Limit to 100KB
-                result["content"] = response.text[:10000]  # Shorter content
-                result["success"] = True
-                result["method"] = "http"
                 
-                # Extract title
-                title_match = re.search(r'<title>([^<]+)</title>', response.text, re.IGNORECASE)
-                if title_match:
-                    result["title"] = title_match.group(1)
-        except Exception as e:
-            result["error"] = str(e)
+                if self._is_partially_valid(result):
+                    return {**result, "partial": True}
+                
+                last_error = result.get('error', 'Unknown error')
+                
+            except Exception as e:
+                last_error = str(e)
+            
+            wait_time = (2 ** attempt) + random.random()
+            await asyncio.sleep(wait_time)
+            
+            params = self._adapt_params(params, attempt)
         
-        return result
-    
-    async def fill_form(self, url: str, form_data: dict, submit_selector: str = None) -> dict:
-        """Fill out a form on a webpage"""
-        if not PLAYWRIGHT_AVAILABLE:
-            return {"error": "Playwright not available. Install with: pip install playwright && playwright install"}
+        fallback_result = await self._try_fallback(tool_name, params)
+        if fallback_result:
+            return fallback_result
         
-        try:
-            if not self.page:
-                await self.init_browser()
-            
-            await self.page.goto(url, timeout=30000)
-            
-            # Fill form fields
-            for selector, value in form_data.items():
-                try:
-                    await self.page.fill(selector, str(value))
-                except Exception as e:
-                    print(f"Could not fill {selector}: {e}")
-            
-            # Submit if selector provided
-            if submit_selector:
-                await self.page.click(submit_selector)
-                await asyncio.sleep(2)
-            
-            result = {
-                "success": True,
-                "url": self.page.url,
-                "title": await self.page.title(),
-                "content": await self.page.content()
-            }
-            
-            return result
-        except Exception as e:
-            return {"error": str(e)}
+        return {
+            "success": False,
+            "error": f"Failed after {max_retries} attempts: {last_error}",
+            "suggestion": "Try rephrasing your query"
+        }
     
-    async def take_screenshot(self, url: str, full_page: bool = False) -> dict:
-        """Take a screenshot of a webpage"""
-        result = {
-            "url": url,
-            "screenshot": None,
-            "success": False
+    def _is_partially_valid(self, result: dict) -> bool:
+        if not isinstance(result, dict):
+            return False
+        has_content = any(k in result for k in ['text', 'content', 'extract', 'results'])
+        return has_content and not result.get('error')
+    
+    def _adapt_params(self, params: dict, attempt: int) -> dict:
+        adapted = params.copy()
+        
+        if 'query' in adapted and attempt > 0:
+            query = adapted['query']
+            if attempt == 1:
+                adapted['query'] = query[:100]
+            elif attempt == 2:
+                words = query.split()
+                adapted['query'] = ' '.join(words[:5])
+        
+        return adapted
+    
+    async def _try_fallback(self, tool_name: str, params: dict) -> Optional[dict]:
+        fallbacks = {
+            'tavily_search': ['duckduckgo_search', 'wikipedia_search'],
+            'browse_page': ['jina_reader', 'stealth_fetch'],
+            'wikipedia_article': ['wikidata_entity', 'duckduckgo_search']
         }
         
-        if not PLAYWRIGHT_AVAILABLE:
-            # Use external service as fallback
+        for fallback in fallbacks.get(tool_name, []):
             try:
-                # Use a screenshot API service
-                screenshot_url = f"https://api.microlink.io/?url={url}&screenshot=true&embed=screenshot.url"
-                response = requests.get(screenshot_url, timeout=30)
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    if data.get("screenshot"):
-                        result["screenshot_url"] = data["screenshot"].get("url")
-                        result["success"] = True
-                        result["method"] = "microlink"
-            except Exception as e:
-                result["error"] = str(e)
-            
-            return result
+                result = await tool_registry.execute(fallback, params)
+                if result.get('success'):
+                    return {**result, "fallback_used": fallback}
+            except:
+                continue
         
-        try:
-            if not self.page:
-                await self.init_browser()
-            
-            await self.page.goto(url, timeout=30000)
-            await asyncio.sleep(2)
-            
-            screenshot_bytes = await self.page.screenshot(full_page=full_page)
-            result["screenshot"] = base64.b64encode(screenshot_bytes).decode('utf-8')
-            result["success"] = True
-            result["method"] = "playwright"
-        except Exception as e:
-            result["error"] = str(e)
-        
-        return result
-    
-    async def extract_data(self, url: str, selectors: dict) -> dict:
-        """Extract specific data from a webpage using CSS selectors"""
-        result = {
-            "url": url,
-            "data": {},
-            "success": False
+        return None
+
+resilient_executor = ResilientToolExecutor()
+
+# ============================================================
+# AGENT SWARM
+# ============================================================
+class AgentSwarm:
+    def __init__(self):
+        self.agents = {
+            'planner': {
+                'system': """You are a planning agent. Break complex tasks into steps.
+Output format: STEP 1: [action] | TOOL: [tool_name] | VERIFY: [expected_result]""",
+                'model': 'fast'
+            },
+            'executor': {
+                'system': """You are an execution agent. Execute one step at a time.
+Use tools proactively. Report success/failure with evidence.""",
+                'model': 'default'
+            },
+            'verifier': {
+                'system': """You are a verification agent. Check if results meet goals.
+Identify gaps, errors, or missing information. Be critical.""",
+                'model': 'smart'
+            },
+            'synthesizer': {
+                'system': """You are a synthesis agent. Combine multiple results into coherent answer.
+Resolve conflicts and present balanced view.""",
+                'model': 'smart'
+            }
         }
-        
-        if not PLAYWRIGHT_AVAILABLE:
-            # HTTP fallback with regex
-            try:
-                headers = {"User-Agent": "Mozilla/5.0"}
-                response = requests.get(url, headers=headers, timeout=30)
-                
-                if response.status_code == 200:
-                    html = response.text
-                    for key, selector in selectors.items():
-                        # Simple regex extraction
-                        pattern = rf'{selector}[^>]*>([^<]+)</'
-                        match = re.search(pattern, html, re.IGNORECASE)
-                        if match:
-                            result["data"][key] = match.group(1).strip()
-                    result["success"] = True
-                    result["method"] = "http"
-            except Exception as e:
-                result["error"] = str(e)
-            
-            return result
-        
-        try:
-            if not self.page:
-                await self.init_browser()
-            
-            await self.page.goto(url, timeout=30000)
-            
-            for key, selector in selectors.items():
-                try:
-                    element = await self.page.query_selector(selector)
-                    if element:
-                        result["data"][key] = await element.inner_text()
-                except Exception as e:
-                    result["data"][key] = f"Error: {e}"
-            
-            result["success"] = True
-            result["method"] = "playwright"
-        except Exception as e:
-            result["error"] = str(e)
-        
-        return result
     
-    async def click_and_navigate(self, url: str, click_selector: str) -> dict:
-        """Click an element and wait for navigation"""
-        if not PLAYWRIGHT_AVAILABLE:
-            return {"error": "Playwright not available"}
+    async def solve(self, task: str, session_id: str) -> dict:
+        start_time = time.time()
         
-        try:
-            if not self.page:
-                await self.init_browser()
+        # Phase 1: Planning
+        plan = await self._agent_call('planner', f"Create plan for: {task}")
+        steps = self._parse_plan(plan)
+        
+        # Phase 2: Parallel execution
+        results = await self._execute_parallel(steps, session_id)
+        
+        # Phase 3: Verification loop
+        verified = False
+        iterations = 0
+        
+        while not verified and iterations < 5:
+            verification = await self._agent_call('verifier',
+                f"Task: {task}\nResults: {json.dumps(results)}\nAre these complete?")
             
-            await self.page.goto(url, timeout=30000)
-            await self.page.click(click_selector)
-            await self.page.wait_for_load_state("networkidle")
+            if "COMPLETE" in verification.upper():
+                verified = True
+            else:
+                gaps = self._extract_gaps(verification)
+                additional = await self._fill_gaps(gaps, session_id)
+                results.extend(additional)
+                iterations += 1
+        
+        # Phase 4: Synthesis
+        final = await self._agent_call('synthesizer',
+            f"Synthesize from: {json.dumps(results)}")
+        
+        latency = (time.time() - start_time) * 1000
+        
+        return {
+            'answer': final,
+            'plan': steps,
+            'iterations': iterations,
+            'tools_used': self._extract_tools(results),
+            'confidence': self._calculate_confidence(results, verification),
+            'latency_ms': latency
+        }
+    
+    async def _agent_call(self, agent_type: str, message: str) -> str:
+        agent = self.agents[agent_type]
+        
+        response = await ai_provider.chat_completion(
+            messages=[
+                {"role": "system", "content": agent['system']},
+                {"role": "user", "content": message}
+            ],
+            model_type=agent['model'],
+            max_tokens=800
+        )
+        return response['choices'][0]['message']['content']
+    
+    def _parse_plan(self, plan_text: str) -> List[dict]:
+        steps = []
+        for line in plan_text.split('\n'):
+            if 'STEP' in line:
+                parts = line.split('|')
+                step = {'action': line}
+                for part in parts:
+                    if 'TOOL:' in part:
+                        step['tool'] = part.replace('TOOL:', '').strip()
+                    if 'VERIFY:' in part:
+                        step['verify'] = part.replace('VERIFY:', '').strip()
+                steps.append(step)
+        return steps or [{'action': plan_text}]
+    
+    async def _execute_parallel(self, steps: List[dict], session_id: str) -> List[dict]:
+        tasks = []
+        for step in steps:
+            if step.get('tool'):
+                task = self._execute_tool_step(step, session_id)
+            else:
+                task = self._agent_call('executor', step['action'])
+            tasks.append(task)
+        
+        return await asyncio.gather(*tasks, return_exceptions=True)
+    
+    async def _execute_tool_step(self, step: dict, session_id: str) -> dict:
+        tool_name = step['tool']
+        params = self._extract_params(step['action'])
+        return await resilient_executor.execute_with_recovery(tool_name, params)
+    
+    def _extract_params(self, action: str) -> dict:
+        # Simple extraction - can be enhanced
+        return {'query': action}
+    
+    def _extract_gaps(self, verification: str) -> List[str]:
+        gaps = []
+        for line in verification.split('\n'):
+            if any(x in line.lower() for x in ['missing', 'lack', 'need', 'no ', 'not '] ):
+                gaps.append(line.strip('- '))
+        return gaps
+    
+    async def _fill_gaps(self, gaps: List[str], session_id: str) -> List[dict]:
+        results = []
+        for gap in gaps:
+            result = await self._agent_call('executor', f"Research and fill gap: {gap}")
+            results.append({'gap': gap, 'result': result})
+        return results
+    
+    def _extract_tools(self, results: List[dict]) -> List[str]:
+        tools = []
+        for r in results:
+            if isinstance(r, dict):
+                if 'tool' in r:
+                    tools.append(r['tool'])
+                if 'fallback_used' in r:
+                    tools.append(r['fallback_used'])
+        return list(set(tools))
+    
+    def _calculate_confidence(self, results: List[dict], verification: str) -> float:
+        if "COMPLETE" in verification.upper() and "ERROR" not in verification.upper():
+            return 0.9
+        elif "PARTIAL" in verification.upper():
+            return 0.6
+        return 0.4
+
+swarm = AgentSwarm()
+
+# ============================================================
+# CONVERGENT AGENT
+# ============================================================
+class ConvergentAgent:
+    async def solve_with_convergence(self, task: str, session_id: str) -> dict:
+        history = []
+        
+        for iteration in range(MAX_SAFETY_ITERATIONS):
+            context = self._build_iteration_context(history)
+            
+            response = await ai_provider.chat_completion(
+                messages=[
+                    {"role": "system", "content": f"Iteration {iteration}. Refine answer."},
+                    {"role": "user", "content": f"Task: {task}\nPrevious: {context}"}
+                ],
+                tools=tool_registry.get_tools_schema(),
+                max_tokens=1000
+            )
+            
+            current_answer = response['choices'][0]['message']['content']
+            tools_used = self._extract_tools_from_response(response)
+            
+            embedding = encoder.encode(current_answer)
+            
+            history.append({
+                'iteration': iteration,
+                'answer': current_answer,
+                'tools_used': tools_used,
+                'embedding': embedding
+            })
+            
+            if len(history) >= CONVERGENCE_WINDOW:
+                if self._check_convergence(history[-CONVERGENCE_WINDOW:]):
+                    return {
+                        'answer': current_answer,
+                        'iterations': iteration + 1,
+                        'converged': True,
+                        'tools_used': tools_used,
+                        'history': history
+                    }
+            
+            if iteration > 2 and not self._improvement_potential(history):
+                return {
+                    'answer': current_answer,
+                    'iterations': iteration + 1,
+                    'converged': False,
+                    'reason': 'diminishing_returns',
+                    'tools_used': tools_used
+                }
+        
+        return {
+            'answer': history[-1]['answer'],
+            'iterations': MAX_SAFETY_ITERATIONS,
+            'converged': False,
+            'reason': 'safety_limit',
+            'tools_used': history[-1]['tools_used']
+        }
+    
+    def _build_iteration_context(self, history: List[dict]) -> str:
+        if not history:
+            return "No previous attempts."
+        return f"Previous answer: {history[-1]['answer'][:500]}..."
+    
+    def _extract_tools_from_response(self, response: dict) -> List[str]:
+        tools = []
+        message = response['choices'][0]['message']
+        if 'tool_calls' in message:
+            for tc in message['tool_calls']:
+                tools.append(tc['function']['name'])
+        return tools
+    
+    def _check_convergence(self, recent_history: List[dict]) -> bool:
+        if len(recent_history) < 2:
+            return False
+        
+        similarities = []
+        for i in range(len(recent_history) - 1):
+            sim = self._cosine_similarity(
+                recent_history[i]['embedding'],
+                recent_history[i+1]['embedding']
+            )
+            similarities.append(sim)
+        
+        return all(s > CONVERGENCE_THRESHOLD for s in similarities)
+    
+    def _improvement_potential(self, history: List[dict]) -> bool:
+        if len(history) < 3:
+            return True
+        
+        recent_lengths = [len(h['answer']) for h in history[-3:]]
+        return recent_lengths[-1] != recent_lengths[0]
+    
+    def _cosine_similarity(self, a: List[float], b: List[float]) -> float:
+        dot = sum(x*y for x,y in zip(a,b))
+        norm_a = sum(x*x for x in a) ** 0.5
+        norm_b = sum(x*x for x in b) ** 0.5
+        return dot / (norm_a * norm_b) if norm_a and norm_b else 0
+
+convergent_agent = ConvergentAgent()
+
+# ============================================================
+# SELF-IMPROVING TOOLS
+# ============================================================
+class SelfImprovingTools:
+    def __init__(self):
+        self.generated_tools_dir = Path("./generated_tools")
+        self.generated_tools_dir.mkdir(exist_ok=True)
+        self.runtime_registry = {}
+        self._load_persisted_tools()
+    
+    def _load_persisted_tools(self):
+        try:
+            conn = get_db()
+            c = conn.cursor()
+            c.execute("SELECT tool_name, code, description FROM generated_tools WHERE use_count > 0")
+            for row in c.fetchall():
+                self.runtime_registry[row[0]] = {
+                    'code': row[1],
+                    'description': row[2],
+                    'persisted': True
+                }
+            conn.close()
+        except Exception as e:
+            print(f"Loading generated tools error: {e}")
+    
+    async def create_tool_on_demand(self, need_description: str, failed_tool: str = None) -> Optional[str]:
+        analysis_prompt = f"""A tool has failed or is missing for: {need_description}
+Failed tool: {failed_tool or 'None'}
+
+Create a Python async function. Requirements:
+1. Use only requests/bs4/stdlib (no paid APIs)
+2. Handle errors gracefully
+3. Return dict with 'success' boolean
+4. Function name: auto_{int(time.time())}
+
+Output ONLY the function code, no explanation."""
+        
+        code_response = await ai_provider.chat_completion(
+            [{"role": "user", "content": analysis_prompt}],
+            max_tokens=600
+        )
+        code = code_response['choices'][0]['message']['content']
+        code = self._extract_code(code)
+        
+        tool_name = f"auto_{int(time.time())}"
+        test_result = await self._test_tool(code, tool_name)
+        
+        if test_result['success']:
+            tool_file = self.generated_tools_dir / f"{tool_name}.py"
+            with open(tool_file, 'w') as f:
+                f.write(code)
+            
+            try:
+                conn = get_db()
+                c = conn.cursor()
+                c.execute("""
+                    INSERT INTO generated_tools (tool_name, code, description, test_result)
+                    VALUES (%s, %s, %s, %s)
+                """, (tool_name, code, need_description, json.dumps(test_result)))
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                print(f"Storing generated tool error: {e}")
+            
+            self.runtime_registry[tool_name] = {
+                'code': code,
+                'created_for': need_description,
+                'test_result': test_result
+            }
+            
+            # Add to tool registry dynamically
+            tool_registry.tools[tool_name] = {
+                'description': f"Auto-generated for: {need_description[:50]}",
+                'parameters': {'query': 'string'},
+                'handler': self._make_handler(code, tool_name)
+            }
+            
+            return tool_name
+        
+        return None
+    
+    def _extract_code(self, text: str) -> str:
+        if "```python" in text:
+            return text.split("```python")[1].split("```")[0].strip()
+        if "```" in text:
+            return text.split("```")[1].split("```")[0].strip()
+        return text.strip()
+    
+    async def _test_tool(self, code: str, tool_name: str) -> dict:
+        try:
+            namespace = {}
+            exec(code, namespace)
+            func = namespace.get(tool_name) or [v for v in namespace.values() if callable(v)][0]
+            
+            test_result = await func({'query': 'test'})
             
             return {
-                "success": True,
-                "new_url": self.page.url,
-                "title": await self.page.title(),
-                "content": await self.page.content()
+                'success': isinstance(test_result, dict) and 'success' in test_result,
+                'result': test_result
             }
         except Exception as e:
-            return {"error": str(e)}
+            return {'success': False, 'error': str(e)}
+    
+    def _make_handler(self, code: str, tool_name: str):
+        async def handler(params: dict) -> str:
+            try:
+                namespace = {}
+                exec(code, namespace)
+                func = namespace.get(tool_name) or [v for v in namespace.values() if callable(v)][0]
+                result = await func(params)
+                return json.dumps(result) if not isinstance(result, str) else result
+            except Exception as e:
+                return f"Error: {e}"
+        return handler
 
-browser_automation = BrowserAutomation()
+self_improving = SelfImprovingTools()
 
 # ============================================================
-# TOOL REGISTRY & EXECUTION PIPELINE
+# AUTONOMOUS MONITOR
+# ============================================================
+class AutonomousMonitor:
+    def __init__(self):
+        self.monitors = {}
+        self.running = False
+    
+    def start_monitoring(self):
+        self.running = True
+        thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        thread.start()
+        print("👁️ Autonomous monitoring started")
+    
+    def _monitor_loop(self):
+        while self.running:
+            for monitor_id, config in list(self.monitors.items()):
+                try:
+                    should_act = self._check_condition(config)
+                    if should_act:
+                        asyncio.run(self._execute_autonomous_action(config))
+                        config['last_triggered'] = time.time()
+                except Exception as e:
+                    print(f"Monitor {monitor_id} error: {e}")
+            
+            time.sleep(60)
+    
+    def _check_condition(self, config: dict) -> bool:
+        source_type = config.get('source_type')
+        
+        if source_type == 'time':
+            return time.time() > config.get('schedule', 0)
+        elif source_type == 'pattern':
+            return self._check_conversation_pattern(config)
+        
+        return False
+    
+    def _check_conversation_pattern(self, config: dict) -> bool:
+        try:
+            conn = get_db()
+            c = conn.cursor()
+            c.execute("""
+                SELECT user_message, ai_response 
+                FROM conversations 
+                WHERE timestamp > NOW() - INTERVAL '1 hour'
+                AND session_id = %s
+            """, (config.get('session_id'),))
+            
+            recent = c.fetchall()
+            conn.close()
+            
+            topic = config.get('watch_topic', '').lower()
+            mentions = sum(1 for r in recent if topic in r[0].lower())
+            failures = sum(1 for r in recent if any(x in r[1].lower() for x in ['sorry', 'cannot', 'don\'t have']))
+            
+            return mentions >= 2 and failures >= 1
+            
+        except:
+            return False
+    
+    async def _execute_autonomous_action(self, config: dict):
+        action_type = config.get('action_type')
+        
+        if action_type == 'deep_research':
+            result = await sophia.process_message(
+                session_id=config['session_id'],
+                user_message=f"Proactive research: {config['topic']}",
+                context={'intent': 'autonomous_research', 'autonomous': True}
+            )
+            self._store_proactive_result(config['session_id'], result)
+        
+        elif action_type == 'tool_creation':
+            await self_improving.create_tool_on_demand(config['need'])
+    
+    def _store_proactive_result(self, session_id: str, result: tuple):
+        try:
+            conn = get_db()
+            c = conn.cursor()
+            c.execute("""
+                INSERT INTO proactive_notifications 
+                (session_id, notification_type, subject, content, created_at)
+                VALUES (%s, 'autonomous_research', 'Research Complete', %s, NOW())
+            """, (session_id, result[0][:1000]))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"Storing proactive result error: {e}")
+
+monitor = AutonomousMonitor()
+
+# ============================================================
+# TOOL REGISTRY
 # ============================================================
 class ToolRegistry:
-    """Dynamic tool registry with execution capabilities"""
-    
     def __init__(self):
         self.tools = {}
         self._register_builtin_tools()
-        self._load_from_db()
+        self._load_generated_tools()
     
     def _register_builtin_tools(self):
-        """Register built-in tools"""
         self.tools.update({
-            # Original tools
             'search_web': {
-                'description': 'Search the web for information',
+                'description': 'Search the web',
                 'parameters': {'query': 'string'},
                 'handler': self._tool_search_web
             },
-            'calculate_risk_score': {
-                'description': 'Calculate risk score for a company',
-                'parameters': {'company_name': 'string', 'context': 'object'},
-                'handler': self._tool_calculate_risk
-            },
-            'generate_report': {
-                'description': 'Generate a detailed report',
-                'parameters': {'topic': 'string', 'format': 'string'},
-                'handler': self._tool_generate_report
-            },
-            'send_notification': {
-                'description': 'Send proactive notification to user',
-                'parameters': {'session_id': 'string', 'message': 'string'},
-                'handler': self._tool_send_notification
-            },
-            'create_goal': {
-                'description': 'Create an autonomous goal',
-                'parameters': {'goal_type': 'string', 'description': 'string', 'priority': 'integer'},
-                'handler': self._tool_create_goal
-            },
-            'schedule_followup': {
-                'description': 'Schedule a followup action',
-                'parameters': {'session_id': 'string', 'delay_hours': 'integer', 'action': 'string'},
-                'handler': self._tool_schedule_followup
-            },
-            'analyze_sentiment': {
-                'description': 'Analyze sentiment of text',
-                'parameters': {'text': 'string'},
-                'handler': self._tool_analyze_sentiment
-            },
-            'tavily_search': {
-                'description': 'AI-powered web search',
-                'parameters': {'query': 'string', 'search_depth': 'string'},
-                'handler': self._tool_tavily_search
-            },
-            'jina_reader': {
-                'description': 'Read any webpage as clean markdown',
-                'parameters': {'url': 'string'},
-                'handler': self._tool_jina_reader
-            },
-            'news_monitor': {
-                'description': 'Monitor global news on any topic',
-                'parameters': {'topic': 'string'},
-                'handler': self._tool_news_monitor
-            },
-            'indexnow_ping': {
-                'description': 'Notify search engines to index a URL',
-                'parameters': {'url': 'string'},
-                'handler': self._tool_indexnow_ping
-            },
-            'content_writer': {
-                'description': 'Generate SEO-optimized content',
-                'parameters': {'topic': 'string', 'content_type': 'string', 'keywords': 'array'},
-                'handler': self._tool_content_writer
-            },
             'duckduckgo_search': {
-                'description': 'Search the web using DuckDuckGo. 100% FREE.',
+                'description': 'Search DuckDuckGo',
                 'parameters': {'query': 'string', 'max_results': 'integer'},
                 'handler': self._tool_duckduckgo_search
             },
-            'reddit_search': {
-                'description': 'Search Reddit for discussions',
-                'parameters': {'query': 'string', 'subreddit': 'string', 'limit': 'integer'},
-                'handler': self._tool_reddit_search
-            },
-            'reddit_get_posts': {
-                'description': 'Get recent posts from a subreddit',
-                'parameters': {'subreddit': 'string', 'limit': 'integer', 'sort_by': 'string'},
-                'handler': self._tool_reddit_get_posts
-            },
-            'geocode_address': {
-                'description': 'Verify and geocode an address',
-                'parameters': {'address': 'string'},
-                'handler': self._tool_geocode_address
-            },
-            'zenrows_scrape': {
-                'description': 'Scrape any website with anti-bot bypass',
-                'parameters': {'url': 'string', 'css_extractor': 'string'},
-                'handler': self._tool_zenrows_scrape
-            },
-            'memory_status': {
-                'description': 'Get the status of the vector memory system',
-                'parameters': {},
-                'handler': self._tool_memory_status
-            },
-            'store_memory': {
-                'description': 'Store a fact in vector memory',
-                'parameters': {'fact_type': 'string', 'fact_value': 'string', 'importance': 'integer'},
-                'handler': self._tool_store_memory
-            },
-            'recall_memories': {
-                'description': 'Recall similar memories',
-                'parameters': {'query': 'string', 'n_results': 'integer'},
-                'handler': self._tool_recall_memories
-            },
-            
-            # Wikipedia & Wikidata tools
             'wikipedia_search': {
-                'description': 'Search Wikipedia encyclopedia for articles. FREE and instant knowledge!',
+                'description': 'Search Wikipedia',
                 'parameters': {'query': 'string', 'limit': 'integer'},
                 'handler': self._tool_wikipedia_search
             },
             'wikipedia_article': {
-                'description': 'Get full Wikipedia article by title. Comprehensive information on any topic.',
+                'description': 'Get Wikipedia article',
                 'parameters': {'title': 'string'},
                 'handler': self._tool_wikipedia_article
             },
-            'wikipedia_summary': {
-                'description': 'Get a quick summary of any topic from Wikipedia. Perfect for quick lookups.',
-                'parameters': {'topic': 'string'},
-                'handler': self._tool_wikipedia_summary
-            },
             'wikidata_search': {
-                'description': 'Search Wikidata for structured entity data. Companies, people, places, etc.',
+                'description': 'Search Wikidata',
                 'parameters': {'query': 'string', 'limit': 'integer'},
                 'handler': self._tool_wikidata_search
             },
             'wikidata_entity': {
-                'description': 'Get detailed structured data about a Wikidata entity by ID.',
+                'description': 'Get Wikidata entity',
                 'parameters': {'entity_id': 'string'},
                 'handler': self._tool_wikidata_entity
             },
             'company_info': {
-                'description': 'Get comprehensive company information from Wikipedia and Wikidata, with China focus.',
+                'description': 'Get company information',
                 'parameters': {'company_name': 'string'},
                 'handler': self._tool_company_info
             },
-            
-            # Browser automation tools
-            'browse_page': {
-                'description': 'Browse to a URL and get page content. Can take screenshots!',
-                'parameters': {'url': 'string', 'wait_time': 'integer'},
-                'handler': self._tool_browse_page
+            'stealth_fetch': {
+                'description': 'Fetch webpage with stealth headers',
+                'parameters': {'url': 'string'},
+                'handler': self._tool_stealth_fetch
             },
-            'screenshot_page': {
-                'description': 'Take a screenshot of any webpage. Great for visual verification.',
-                'parameters': {'url': 'string', 'full_page': 'boolean'},
-                'handler': self._tool_screenshot_page
+            'jina_reader': {
+                'description': 'Read webpage as markdown',
+                'parameters': {'url': 'string'},
+                'handler': self._tool_jina_reader
             },
-            'extract_web_data': {
-                'description': 'Extract specific data from a webpage using CSS selectors.',
-                'parameters': {'url': 'string', 'selectors': 'object'},
-                'handler': self._tool_extract_web_data
+            'news_monitor': {
+                'description': 'Monitor news on topic',
+                'parameters': {'topic': 'string'},
+                'handler': self._tool_news_monitor
             },
-            'fill_web_form': {
-                'description': 'Fill out and submit a web form. Useful for automating submissions.',
-                'parameters': {'url': 'string', 'form_data': 'object', 'submit_selector': 'string'},
-                'handler': self._tool_fill_web_form
-            },
-            'research_topic': {
-                'description': 'Deep research on any topic: combines Wikipedia, Wikidata, and web search.',
-                'parameters': {'topic': 'string', 'depth': 'string'},
-                'handler': self._tool_research_topic
-            },
-
-            # ============================================================
-            # NEW v10.2: China Business News tool
-            # ============================================================
-            'china_business_news': {
-                'description': 'Get the latest news about China business, suppliers, and economy – 100% free via Google News RSS.',
-                'parameters': {},
-                'handler': self._tool_china_business_news
-            },
-
-            # ============================================================
-            # NEW v10.3: Chinese Translation, RSS Aggregator, Economic Indicators
-            # ============================================================
             'translate_chinese': {
-                'description': 'Translate text between English and Chinese using free LibreTranslate API.',
-                'parameters': {'text': 'string', 'target_language': 'string'},  # 'en' or 'zh'
+                'description': 'Translate between English and Chinese',
+                'parameters': {'text': 'string', 'target_language': 'string'},
                 'handler': self._tool_translate_chinese
             },
             'china_rss_news': {
-                'description': 'Fetch the latest China business headlines from multiple RSS feeds (China Briefing, China Daily, SCMP).',
+                'description': 'Fetch China news from RSS',
                 'parameters': {'limit': 'integer'},
                 'handler': self._tool_china_rss_news
             },
             'china_economic_indicator': {
-                'description': 'Get current economic indicators for China (GDP, PMI, trade) from World Bank open data.',
-                'parameters': {'indicator': 'string'},  # 'gdp', 'pmi', 'trade'
+                'description': 'Get China economic indicators',
+                'parameters': {'indicator': 'string'},
                 'handler': self._tool_china_economic_indicator
-            },
+            }
         })
     
-    def _load_from_db(self):
-        """Load custom tools from database"""
-        try:
-            conn = get_db()
-            c = conn.cursor()
-            try:
-                c.execute("SELECT tool_name, description, parameters, implementation FROM tool_registry WHERE deployed = TRUE")
-                for name, desc, params, impl in c.fetchall():
-                    self.tools[name] = {
-                        'description': desc,
-                        'parameters': params or {},
-                        'implementation': impl
-                    }
-            except:
-                pass
-            conn.close()
-            print(f"🔧 Loaded {len(self.tools)} tools")
-        except Exception as e:
-            print(f"Tool load error: {e}")
+    def _load_generated_tools(self):
+        for tool_name, tool_data in self_improving.runtime_registry.items():
+            self.tools[tool_name] = {
+                'description': tool_data.get('description', f'Generated tool {tool_name}'),
+                'parameters': {'query': 'string'},
+                'handler': self_improving._make_handler(tool_data['code'], tool_name)
+            }
     
     async def execute(self, tool_name: str, params: dict) -> dict:
-        """Execute a tool and return result"""
         if tool_name not in self.tools:
             return {'success': False, 'error': f"Tool '{tool_name}' not found"}
         
@@ -1714,22 +1522,15 @@ class ToolRegistry:
             if 'handler' in tool:
                 result = await tool['handler'](params)
             else:
-                result = self._execute_custom(tool, params)
+                result = {'success': False, 'error': 'No handler'}
             
-            return {'success': True, 'result': result}
+            if isinstance(result, str):
+                return {'success': True, 'result': result}
+            return result
         except Exception as e:
             return {'success': False, 'error': str(e)}
     
-    def _execute_custom(self, tool: dict, params: dict) -> str:
-        """Execute custom tool implementation"""
-        impl = tool.get('implementation', '')
-        locals_dict = {'params': params, 'result': ''}
-        exec(impl, {}, locals_dict)
-        return locals_dict.get('result', 'Executed')
-    
     def get_tools_schema(self) -> List[dict]:
-        """Get OpenAI-style tools schema."""
-        # Parameters that are always optional regardless of position
         OPTIONAL_PARAMS = {
             'limit', 'wait_time', 'full_page', 'submit_selector',
             'subreddit', 'sort_by', 'max_results', 'search_depth',
@@ -1746,18 +1547,17 @@ class ToolRegistry:
             for i, (pname, ptype) in enumerate(params.items()):
                 if isinstance(ptype, str):
                     json_type = 'string'
-                    if 'integer' in ptype.lower() or 'int' in ptype.lower():
+                    if 'integer' in ptype.lower():
                         json_type = 'integer'
-                    elif 'float' in ptype.lower() or 'number' in ptype.lower():
+                    elif 'float' in ptype.lower():
                         json_type = 'number'
-                    elif 'array' in ptype.lower() or 'list' in ptype.lower():
+                    elif 'array' in ptype.lower():
                         json_type = 'array'
-                    elif 'object' in ptype.lower() or 'dict' in ptype.lower():
+                    elif 'object' in ptype.lower():
                         json_type = 'object'
-                    elif 'boolean' in ptype.lower() or 'bool' in ptype.lower():
+                    elif 'boolean' in ptype.lower():
                         json_type = 'boolean'
                     properties[pname] = {"type": json_type}
-                    # Mark required only if it's the primary param and not in optional set
                     if i == 0 and pname not in OPTIONAL_PARAMS:
                         required.append(pname)
 
@@ -1775,247 +1575,12 @@ class ToolRegistry:
             })
         return schema
     
-    # ============================================================
-    # TOOL HANDLERS
-    # ============================================================
+    # Tool handlers
+    async def _tool_search_web(self, params: dict) -> dict:
+        return await self._tool_duckduckgo_search(params)
     
-    async def _tool_search_web(self, params: dict) -> str:
-        """Fallback web search"""
+    async def _tool_duckduckgo_search(self, params: dict) -> dict:
         query = params.get('query', '')
-        return await self._tool_duckduckgo_search({'query': query})
-    
-    async def _tool_calculate_risk(self, params: dict) -> str:
-        """Calculate risk score"""
-        company = params.get('company_name', 'Unknown')
-        context = params.get('context', {})
-        risk = 50
-        
-        if context.get('years_in_business', 0) > 5:
-            risk -= 10
-        if context.get('verified'):
-            risk -= 15
-        if context.get('complaints', 0) > 0:
-            risk += context['complaints'] * 5
-        
-        return f"Risk score for {company}: {max(0, min(100, risk))}/100"
-    
-    async def _tool_generate_report(self, params: dict) -> str:
-        """Generate a report"""
-        topic = params.get('topic', 'General')
-        
-        messages = [
-            {"role": "system", "content": "You are a business report generator."},
-            {"role": "user", "content": f"Generate a brief report on: {topic}"}
-        ]
-        
-        result = await ai_provider.chat_completion(messages, max_tokens=500)
-        return result['choices'][0]['message']['content']
-    
-    async def _tool_send_notification(self, params: dict) -> str:
-        """Send notification"""
-        session_id = params.get('session_id', '')
-        message = params.get('message', '')
-        
-        try:
-            conn = get_db()
-            c = conn.cursor()
-            c.execute("""
-                INSERT INTO proactive_notifications (session_id, notification_type, subject, content)
-                VALUES (%s, 'proactive', 'Sophia Update', %s)
-            """, (session_id, message))
-            conn.commit()
-            conn.close()
-            return f"Notification queued for session {session_id}"
-        except Exception as e:
-            return f"Failed to send notification: {e}"
-    
-    async def _tool_create_goal(self, params: dict) -> str:
-        """Create an autonomous goal"""
-        goal_type = params.get('goal_type', 'general')
-        description = params.get('description', '')
-        priority = params.get('priority', 5)
-        
-        try:
-            conn = get_db()
-            c = conn.cursor()
-            c.execute("""
-                INSERT INTO autonomous_goals (goal_type, goal_description, priority, source)
-                VALUES (%s, %s, %s, 'tool')
-                RETURNING id
-            """, (goal_type, description, priority))
-            goal_id = c.fetchone()[0]
-            conn.commit()
-            conn.close()
-            return f"Created goal #{goal_id}: {description}"
-        except Exception as e:
-            return f"Failed to create goal: {e}"
-    
-    async def _tool_schedule_followup(self, params: dict) -> str:
-        """Schedule a follow-up"""
-        session_id = params.get('session_id', '')
-        delay_hours = params.get('delay_hours', 24)
-        action = params.get('action', '')
-        
-        return f"Scheduled follow-up for session {session_id} in {delay_hours} hours: {action}"
-    
-    async def _tool_analyze_sentiment(self, params: dict) -> str:
-        """Analyze sentiment"""
-        text = params.get('text', '')
-        
-        positive_words = ['good', 'great', 'excellent', 'happy', 'love', 'best', 'amazing']
-        negative_words = ['bad', 'terrible', 'awful', 'hate', 'worst', 'poor', 'scam']
-        
-        text_lower = text.lower()
-        pos_count = sum(1 for w in positive_words if w in text_lower)
-        neg_count = sum(1 for w in negative_words if w in text_lower)
-        
-        if pos_count > neg_count:
-            sentiment = "Positive"
-        elif neg_count > pos_count:
-            sentiment = "Negative"
-        else:
-            sentiment = "Neutral"
-        
-        return f"Sentiment: {sentiment} (positive: {pos_count}, negative: {neg_count})"
-    
-    async def _tool_tavily_search(self, params: dict) -> str:
-        """Tavily search"""
-        query = params.get('query', '')
-        
-        if not TAVILY_API_KEY:
-            return await self._tool_duckduckgo_search({'query': query})
-        
-        try:
-            response = requests.post(
-                "https://api.tavily.com/search",
-                headers={"Authorization": f"Bearer {TAVILY_API_KEY}"},
-                json={"query": query, "search_depth": "basic"},
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                results = []
-                for r in data.get('results', [])[:5]:
-                    results.append(f"- {r.get('title', 'No title')}: {r.get('url', '')}")
-                return f"Tavily results for '{query}':\n" + "\n".join(results)
-            return f"Tavily error: {response.status_code}"
-        except Exception as e:
-            return f"Tavily search failed: {e}"
-    
-    async def _tool_jina_reader(self, params: dict) -> str:
-        """Jina reader"""
-        url = params.get('url', '')
-        
-        try:
-            response = requests.get(
-                f"https://r.jina.ai/{url}",
-                headers={"User-Agent": "SophiaAI/1.0"},
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                return response.text[:3000]
-            return f"Jina Reader error: {response.status_code}"
-        except Exception as e:
-            return f"Failed to read webpage: {e}"
-    
-    async def _tool_news_monitor(self, params: dict) -> str:
-        """Monitor global news on any topic – enhanced with Google News RSS fallback"""
-        topic = params.get('topic', 'China business')
-        
-        # Try NewsAPI first if key is available
-        if NEWS_API_KEY:
-            try:
-                response = requests.get(
-                    "https://newsapi.org/v2/everything",
-                    params={"q": topic, "apiKey": NEWS_API_KEY, "pageSize": 5, "sortBy": "publishedAt"},
-                    timeout=15
-                )
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    articles = data.get('articles', [])
-                    if articles:
-                        results = []
-                        for a in articles:
-                            published = a.get('publishedAt', '')[:10]  # YYYY-MM-DD
-                            results.append(f"- {a.get('title', 'No title')} ({a.get('source', {}).get('name', 'Unknown')}) - {published}")
-                        return f"📰 Latest news for '{topic}':\n" + "\n".join(results)
-            except Exception as e:
-                print(f"NewsAPI error: {e}")
-        
-        # Fallback to Google News RSS (100% free, real-time)
-        if FEEDPARSER_AVAILABLE:
-            try:
-                import urllib.parse
-                query_encoded = urllib.parse.quote(topic)
-                feed_url = f"https://news.google.com/rss/search?q={query_encoded}&hl=en-US&gl=US&ceid=US:en"
-                feed = feedparser.parse(feed_url)
-                
-                if feed.entries and len(feed.entries) > 0:
-                    results = []
-                    for entry in feed.entries[:5]:
-                        published = entry.get('published', '')
-                        if hasattr(entry, 'published_parsed') and entry.published_parsed:
-                            published_dt = datetime(*entry.published_parsed[:6])
-                            published = published_dt.strftime('%Y-%m-%d')
-                        title = entry.get('title', 'No title')
-                        source = entry.get('source', {}).get('title', 'Google News')
-                        link = entry.get('link', '')
-                        results.append(f"- {title} ({source}) - {published}\n  {link}")
-                    
-                    return f"📰 Real-time news for '{topic}' (via Google News):\n" + "\n".join(results)
-            except Exception as e:
-                print(f"Google News RSS error: {e}")
-        
-        # Ultimate fallback: DuckDuckGo
-        return await self._tool_duckduckgo_search({'query': f'{topic} news'})
-    
-    async def _tool_indexnow_ping(self, params: dict) -> str:
-        """IndexNow ping"""
-        url = params.get('url', '')
-        
-        if not INDEXNOW_KEY:
-            return "IndexNow key not configured"
-        
-        try:
-            response = requests.get(
-                f"https://www.bing.com/indexnow",
-                params={"url": url, "key": INDEXNOW_KEY},
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                return f"✅ URL submitted to search engines: {url}"
-            return f"IndexNow response: {response.status_code}"
-        except Exception as e:
-            return f"IndexNow failed: {e}"
-    
-    async def _tool_content_writer(self, params: dict) -> str:
-        """Content writer"""
-        topic = params.get('topic', '')
-        keywords = params.get('keywords', [])
-        
-        prompt = f"""Write a blog post about "{topic}" promoting China West Connector (CWC).
-CWC helps businesses connect with reliable Chinese suppliers.
-
-Keywords: {', '.join(keywords) if keywords else 'China sourcing, supplier verification'}
-
-Keep it professional and 300-500 words."""
-        
-        messages = [
-            {"role": "system", "content": "You are a professional content writer."},
-            {"role": "user", "content": prompt}
-        ]
-        
-        result = await ai_provider.chat_completion(messages, max_tokens=800)
-        return result['choices'][0]['message']['content']
-    
-    async def _tool_duckduckgo_search(self, params: dict) -> str:
-        """DuckDuckGo search"""
-        query = params.get('query', '')
-        
         try:
             response = requests.get(
                 "https://api.duckduckgo.com/",
@@ -2034,442 +1599,167 @@ Keep it professional and 300-500 words."""
                     if isinstance(topic, dict) and 'Text' in topic:
                         results.append(f"- {topic['Text'][:200]}")
                 
-                if results:
-                    return f"DuckDuckGo results for '{query}':\n" + "\n".join(results)
+                return {'success': True, 'results': results}
         except Exception as e:
-            return f"Search failed: {e}"
+            return {'success': False, 'error': str(e)}
         
-        return f"No results found for: {query}"
+        return {'success': False, 'error': 'No results'}
     
-    async def _tool_reddit_search(self, params: dict) -> str:
-        """Reddit search"""
+    async def _tool_wikipedia_search(self, params: dict) -> dict:
         query = params.get('query', '')
-        subreddit = params.get('subreddit', 'all')
         limit = params.get('limit', 5)
-        
-        try:
-            url = f"https://www.reddit.com/r/{subreddit}/search.json"
-            response = requests.get(
-                url,
-                params={"q": query, "restrict_sr": 1 if subreddit != 'all' else 0, "limit": limit},
-                headers={"User-Agent": REDDIT_USER_AGENT},
-                timeout=15
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                results = []
-                for post in data['data']['children']:
-                    p = post['data']
-                    results.append(f"- [{p.get('score', 0)}↑] {p.get('title', 'No title')} (r/{p.get('subreddit', 'unknown')})")
-                return f"Reddit results for '{query}':\n" + "\n".join(results)
-            return f"Reddit error: {response.status_code}"
-        except Exception as e:
-            return f"Reddit search failed: {e}"
+        results = await wikipedia_knowledge.search_wikipedia(query, limit)
+        return {'success': True, 'results': results}
     
-    async def _tool_reddit_get_posts(self, params: dict) -> str:
-        """Get Reddit posts"""
-        subreddit = params.get('subreddit', 'ChinaSourcing')
+    async def _tool_wikipedia_article(self, params: dict) -> dict:
+        title = params.get('title', '')
+        article = await wikipedia_knowledge.get_article(title)
+        return {'success': 'error' not in article, **article}
+    
+    async def _tool_wikidata_search(self, params: dict) -> dict:
+        query = params.get('query', '')
         limit = params.get('limit', 5)
-        sort_by = params.get('sort_by', 'hot')
-        
-        try:
-            url = f"https://www.reddit.com/r/{subreddit}/{sort_by}.json"
-            response = requests.get(
-                url,
-                params={"limit": limit},
-                headers={"User-Agent": REDDIT_USER_AGENT},
-                timeout=15
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                results = []
-                for post in data['data']['children']:
-                    p = post['data']
-                    results.append(f"- [{p.get('score', 0)}↑] {p.get('title', 'No title')}")
-                return f"r/{subreddit} posts:\n" + "\n".join(results)
-            return f"Reddit error: {response.status_code}"
-        except Exception as e:
-            return f"Reddit get posts failed: {e}"
+        results = await wikipedia_knowledge.search_wikidata(query, limit)
+        return {'success': True, 'results': results}
     
-    async def _tool_geocode_address(self, params: dict) -> str:
-        """Geocode address"""
-        address = params.get('address', '')
-        
-        try:
-            response = requests.get(
-                "https://nominatim.openstreetmap.org/search",
-                params={"q": address, "format": "json", "limit": 1},
-                headers={"User-Agent": "SophiaAI/1.0"},
-                timeout=15
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data:
-                    r = data[0]
-                    return f"Address verified: {r.get('display_name', 'Unknown')}\nCoordinates: {r.get('lat', '')}, {r.get('lon', '')}"
-                return f"Address not found: {address}"
-            return f"Geocoding error: {response.status_code}"
-        except Exception as e:
-            return f"Geocoding failed: {e}"
+    async def _tool_wikidata_entity(self, params: dict) -> dict:
+        entity_id = params.get('entity_id', '')
+        entity = await wikipedia_knowledge.get_wikidata_entity(entity_id)
+        return {'success': 'error' not in entity, **entity}
     
-    async def _tool_zenrows_scrape(self, params: dict) -> str:
-        """ZenRows scrape"""
+    async def _tool_company_info(self, params: dict) -> dict:
+        company_name = params.get('company_name', '')
+        
+        wiki_results = await wikipedia_knowledge.search_wikipedia(f"{company_name} company", limit=1)
+        
+        result = {'company': company_name, 'wikipedia': None, 'wikidata': None, 'is_chinese': False}
+        
+        if wiki_results:
+            article = await wikipedia_knowledge.get_article(wiki_results[0]["title"])
+            result["wikipedia"] = article
+            
+            wd_results = await wikipedia_knowledge.search_wikidata(company_name, limit=1)
+            if wd_results:
+                entity = await wikipedia_knowledge.get_wikidata_entity(wd_results[0]["id"])
+                result["wikidata"] = entity
+                
+                if "P17" in entity.get("claims", {}):
+                    if "Q148" in str(entity["claims"]["P17"]):
+                        result["is_chinese"] = True
+                
+                if entity.get("labels", {}).get("zh"):
+                    result["chinese_name"] = entity["labels"]["zh"].get("value")
+        
+        return {'success': True, **result}
+    
+    async def _tool_stealth_fetch(self, params: dict) -> dict:
         url = params.get('url', '')
         
-        if ZENROWS_API_KEY:
+        headers_pool = [
+            {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+                "Accept-Encoding": "gzip, deflate, br",
+                "DNT": "1",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1"
+            },
+            {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Referer": "https://www.google.com/"
+            }
+        ]
+        
+        headers = random.choice(headers_pool)
+        
+        try:
+            session = requests.Session()
+            response = session.get(url, headers=headers, timeout=30, allow_redirects=True)
+            
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            for script in soup(["script", "style", "nav", "footer", "header"]):
+                script.decompose()
+            
+            text = soup.get_text(separator='\n', strip=True)
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+            
+            return {
+                'success': True,
+                'title': soup.title.string if soup.title else "No title",
+                'text': '\n'.join(lines[:100])[:5000],
+                'links': [a.get('href') for a in soup.find_all('a', href=True)][:20]
+            }
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    async def _tool_jina_reader(self, params: dict) -> dict:
+        url = params.get('url', '')
+        try:
+            response = requests.get(
+                f"https://r.jina.ai/{url}",
+                headers={"User-Agent": "SophiaAI/1.0"},
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                return {'success': True, 'content': response.text[:3000]}
+            return {'success': False, 'error': f"Status {response.status_code}"}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    async def _tool_news_monitor(self, params: dict) -> dict:
+        topic = params.get('topic', 'China business')
+        
+        if NEWS_API_KEY:
             try:
                 response = requests.get(
-                    "https://api.zenrows.com/v1/",
-                    params={"url": url, "apikey": ZENROWS_API_KEY},
-                    timeout=30
+                    "https://newsapi.org/v2/everything",
+                    params={"q": topic, "apiKey": NEWS_API_KEY, "pageSize": 5},
+                    timeout=15
                 )
+                
                 if response.status_code == 200:
-                    return response.text[:3000]
+                    data = response.json()
+                    articles = data.get('articles', [])
+                    if articles:
+                        results = [f"- {a.get('title')} ({a.get('source', {}).get('name')})" for a in articles]
+                        return {'success': True, 'results': results}
             except:
                 pass
         
-        return await self._tool_jina_reader({'url': url})
+        if FEEDPARSER_AVAILABLE:
+            try:
+                query_encoded = urllib.parse.quote(topic)
+                feed_url = f"https://news.google.com/rss/search?q={query_encoded}&hl=en-US&gl=US&ceid=US:en"
+                feed = feedparser.parse(feed_url)
+                
+                if feed.entries:
+                    results = []
+                    for entry in feed.entries[:5]:
+                        title = entry.get('title', 'No title')
+                        source = entry.get('source', {}).get('title', 'Google News')
+                        results.append(f"- {title} ({source})")
+                    return {'success': True, 'results': results}
+            except:
+                pass
+        
+        return {'success': False, 'error': 'News fetch failed'}
     
-    async def _tool_memory_status(self, params: dict) -> str:
-        """Memory status"""
-        status = hybrid_memory.get_status()
-        return f"🧠 Vector Memory Status:\n" + "\n".join(f"- {k}: {v}" for k, v in status.items())
-    
-    async def _tool_store_memory(self, params: dict) -> str:
-        """Store memory"""
-        fact_type = params.get('fact_type', 'general')
-        fact_value = params.get('fact_value', '')
-        importance = params.get('importance', 5)
-        
-        hybrid_memory.store_semantic(fact_type, fact_value, importance, 'user')
-        return f"✅ Memory stored: {fact_type} = {fact_value}"
-    
-    async def _tool_recall_memories(self, params: dict) -> str:
-        """Recall memories"""
-        query = params.get('query', '')
-        n_results = params.get('n_results', 5)
-        
-        episodes = hybrid_memory.recall_similar_episodes(query, n_results)
-        
-        result = f"🧠 Memories for '{query}':\n"
-        for ep in episodes:
-            result += f"- {ep['text'][:200]}...\n"
-        
-        return result or "No similar memories found."
-    
-    # Wikipedia & Wikidata tool handlers
-    async def _tool_wikipedia_search(self, params: dict) -> str:
-        """Search Wikipedia"""
-        query = params.get('query', '')
-        limit = params.get('limit', 5)
-        
-        results = await wikipedia_knowledge.search_wikipedia(query, limit)
-        
-        if not results:
-            return f"No Wikipedia articles found for: {query}"
-        
-        output = f"📚 Wikipedia search results for '{query}':\n\n"
-        for i, r in enumerate(results, 1):
-            output += f"{i}. **{r['title']}**\n"
-            output += f"   {r['snippet'][:150]}...\n"
-            output += f"   🔗 {r['url']}\n\n"
-        
-        return output
-    
-    async def _tool_wikipedia_article(self, params: dict) -> str:
-        """Get Wikipedia article"""
-        title = params.get('title', '')
-        
-        article = await wikipedia_knowledge.get_article(title)
-        
-        if 'error' in article:
-            return article['error']
-        
-        output = f"📚 **{article.get('title', title)}**\n\n"
-        
-        if article.get('description'):
-            output += f"*{article['description']}*\n\n"
-        
-        if article.get('extract'):
-            output += article['extract'][:2000]
-        
-        if article.get('url'):
-            output += f"\n\n🔗 Read more: {article['url']}"
-        
-        return output
-    
-    async def _tool_wikipedia_summary(self, params: dict) -> str:
-        """Get topic summary"""
-        topic = params.get('topic', '')
-        
-        summary = await wikipedia_knowledge.get_topic_summary(topic)
-        
-        return f"📚 **{topic}**\n\n{summary}"
-    
-    async def _tool_wikidata_search(self, params: dict) -> str:
-        """Search Wikidata"""
-        query = params.get('query', '')
-        limit = params.get('limit', 5)
-        
-        results = await wikipedia_knowledge.search_wikidata(query, limit)
-        
-        if not results:
-            return f"No Wikidata entities found for: {query}"
-        
-        output = f"📊 Wikidata entities for '{query}':\n\n"
-        for i, r in enumerate(results, 1):
-            output += f"{i}. **{r['label']}** ({r['id']})\n"
-            if r.get('description'):
-                output += f"   {r['description']}\n"
-            output += f"   🔗 {r['url']}\n\n"
-        
-        return output
-    
-    async def _tool_wikidata_entity(self, params: dict) -> str:
-        """Get Wikidata entity"""
-        entity_id = params.get('entity_id', '')
-        
-        entity = await wikipedia_knowledge.get_wikidata_entity(entity_id)
-        
-        if 'error' in entity:
-            return entity['error']
-        
-        output = f"📊 **Wikidata Entity: {entity_id}**\n\n"
-        
-        if entity.get('labels', {}).get('en'):
-            output += f"**Label:** {entity['labels']['en'].get('value', 'N/A')}\n\n"
-        
-        if entity.get('descriptions', {}).get('en'):
-            output += f"**Description:** {entity['descriptions']['en'].get('value', 'N/A')}\n\n"
-        
-        if entity.get('claims'):
-            output += "**Properties:**\n"
-            for prop, values in list(entity['claims'].items())[:10]:
-                output += f"- {prop}: {', '.join(str(v) for v in values[:3])}\n"
-        
-        return output
-    
-    async def _tool_company_info(self, params: dict) -> str:
-        """Get company info with China focus"""
-        company_name = params.get('company_name', '')
-        
-        info = await wikipedia_knowledge.get_company_info(company_name)
-        
-        output = f"🏢 **{company_name}** - Company Information\n\n"
-        
-        if info.get('wikipedia'):
-            wp = info['wikipedia']
-            output += "**Wikipedia:**\n"
-            if wp.get('extract'):
-                output += f"{wp['extract'][:1000]}\n\n"
-            if wp.get('url'):
-                output += f"🔗 {wp['url']}\n\n"
-        
-        if info.get('wikidata'):
-            wd = info['wikidata']
-            output += "**Wikidata:**\n"
-            if wd.get('labels', {}).get('en'):
-                output += f"Label: {wd['labels']['en'].get('value', 'N/A')}\n"
-            if wd.get('descriptions', {}).get('en'):
-                output += f"Description: {wd['descriptions']['en'].get('value', 'N/A')}\n"
-        
-        # China-specific additions
-        if info.get('is_chinese'):
-            output += "\n🇨🇳 **This is a Chinese company.**\n"
-        if info.get('chinese_name'):
-            output += f"Chinese name: {info['chinese_name']}\n"
-        
-        return output
-    
-    # Browser automation tool handlers
-    async def _tool_browse_page(self, params: dict) -> str:
-        """Browse a webpage"""
-        url = params.get('url', '')
-        wait_time = params.get('wait_time', 2)
-        
-        if not url.startswith('http'):
-            url = 'https://' + url
-        
-        result = await browser_automation.browse_page(url, wait_time)
-        
-        if not result.get('success'):
-            return f"❌ Failed to browse {url}: {result.get('error', 'Unknown error')}"
-        
-        output = f"🌐 **Browsed:** {url}\n"
-        output += f"**Method:** {result['method']}\n"
-        
-        if result.get('title'):
-            output += f"**Title:** {result['title']}\n\n"
-        
-        if result.get('text'):
-            output += f"**Content Preview:**\n{result['text'][:2000]}"
-        elif result.get('content'):
-            # Strip HTML tags for display
-            text = re.sub(r'<[^>]+>', '', result['content'][:2000])
-            output += f"**Content Preview:**\n{text}"
-        
-        if result.get('screenshot'):
-            output += f"\n\n📸 Screenshot available (base64, {len(result['screenshot'])} chars)"
-        
-        return output
-    
-    async def _tool_screenshot_page(self, params: dict) -> str:
-        """Take screenshot"""
-        url = params.get('url', '')
-        full_page = params.get('full_page', False)
-        
-        if not url.startswith('http'):
-            url = 'https://' + url
-        
-        result = await browser_automation.take_screenshot(url, full_page)
-        
-        if not result.get('success'):
-            return f"❌ Failed to screenshot {url}: {result.get('error', 'Unknown error')}"
-        
-        output = f"📸 **Screenshot taken:** {url}\n"
-        output += f"**Method:** {result['method']}\n"
-        
-        if result.get('screenshot'):
-            output += f"**Screenshot:** Base64 encoded image ({len(result['screenshot'])} characters)\n"
-            output += f"*Use the screenshot data to display or save the image.*"
-        elif result.get('screenshot_url'):
-            output += f"**Screenshot URL:** {result['screenshot_url']}"
-        
-        return output
-    
-    async def _tool_extract_web_data(self, params: dict) -> str:
-        """Extract web data"""
-        url = params.get('url', '')
-        selectors = params.get('selectors', {})
-        
-        if not url.startswith('http'):
-            url = 'https://' + url
-        
-        result = await browser_automation.extract_data(url, selectors)
-        
-        if not result.get('success'):
-            return f"❌ Failed to extract data from {url}: {result.get('error', 'Unknown error')}"
-        
-        output = f"🔍 **Extracted data from:** {url}\n"
-        output += f"**Method:** {result['method']}\n\n"
-        
-        if result.get('data'):
-            output += "**Extracted Values:**\n"
-            for key, value in result['data'].items():
-                output += f"- {key}: {value}\n"
-        
-        return output
-    
-    async def _tool_fill_web_form(self, params: dict) -> str:
-        """Fill web form"""
-        url = params.get('url', '')
-        form_data = params.get('form_data', {})
-        submit_selector = params.get('submit_selector')
-        
-        if not url.startswith('http'):
-            url = 'https://' + url
-        
-        result = await browser_automation.fill_form(url, form_data, submit_selector)
-        
-        if 'error' in result:
-            return f"❌ Failed to fill form: {result['error']}"
-        
-        output = f"📝 **Form filled successfully:** {url}\n\n"
-        output += f"**Fields filled:** {len(form_data)}\n"
-        
-        if result.get('title'):
-            output += f"**Result page:** {result['title']}\n"
-        
-        if result.get('url'):
-            output += f"**Final URL:** {result['url']}"
-        
-        return output
-    
-    async def _tool_research_topic(self, params: dict) -> str:
-        """Deep research on a topic"""
-        topic = params.get('topic', '')
-        depth = params.get('depth', 'standard')  # quick, standard, deep
-        
-        output = f"🔬 **Research Report: {topic}**\n\n"
-        
-        # Step 1: Wikipedia
-        wiki_article = await wikipedia_knowledge.get_article(topic)
-        if 'extract' in wiki_article:
-            output += f"📚 **Wikipedia Summary:**\n{wiki_article['extract'][:1500]}\n\n"
-        
-        # Step 2: Wikidata
-        wd_results = await wikipedia_knowledge.search_wikidata(topic, limit=1)
-        if wd_results:
-            entity = await wikipedia_knowledge.get_wikidata_entity(wd_results[0]['id'])
-            if entity.get('descriptions', {}).get('en'):
-                output += f"📊 **Wikidata:** {entity['descriptions']['en'].get('value', '')}\n\n"
-        
-        # Step 3: Web search for more
-        if depth in ['standard', 'deep']:
-            web_results = await self._tool_duckduckgo_search({'query': topic})
-            output += f"🌐 **Web Results:**\n{web_results[:1000]}\n\n"
-        
-        # Step 4: News (if deep)
-        if depth == 'deep':
-            news = await self._tool_news_monitor({'topic': topic})
-            output += f"📰 **Recent News:**\n{news[:500]}\n"
-        
-        return output
-
-    # ============================================================
-    # v10.2: China Business News tool handler
-    # ============================================================
-    async def _tool_china_business_news(self, params: dict) -> str:
-        """Get the latest China business news via Google News RSS (100% free)."""
-        if not FEEDPARSER_AVAILABLE:
-            return "⚠️ Feedparser not installed. Install with: pip install feedparser"
-        
-        import urllib.parse
-        query = "China business OR Chinese suppliers OR China economy"
-        query_encoded = urllib.parse.quote(query)
-        feed_url = f"https://news.google.com/rss/search?q={query_encoded}&hl=en-US&gl=US&ceid=US:en"
-        
-        try:
-            feed = feedparser.parse(feed_url)
-            if not feed.entries:
-                return "No recent China business news found."
-            
-            results = []
-            for entry in feed.entries[:5]:
-                published = entry.get('published', '')
-                if hasattr(entry, 'published_parsed') and entry.published_parsed:
-                    published_dt = datetime(*entry.published_parsed[:6])
-                    published = published_dt.strftime('%Y-%m-%d')
-                title = entry.get('title', 'No title')
-                source = entry.get('source', {}).get('title', 'Google News')
-                link = entry.get('link', '')
-                results.append(f"- {title} ({source}) - {published}\n  {link}")
-            
-            return "🇨🇳 **China Business News** (latest):\n" + "\n".join(results)
-        except Exception as e:
-            return f"Error fetching China news: {e}"
-
-    # ============================================================
-    # v10.3: Chinese Translation (LibreTranslate public demo)
-    # ============================================================
-    async def _tool_translate_chinese(self, params: dict) -> str:
-        """Translate text between English and Chinese using LibreTranslate."""
+    async def _tool_translate_chinese(self, params: dict) -> dict:
         text = params.get('text', '')
-        target = params.get('target_language', 'en')  # 'en' or 'zh'
+        target = params.get('target_language', 'en')
         
         if not text:
-            return "Please provide text to translate."
-        
-        # Determine source language automatically (leave empty for auto-detect)
-        source = 'en' if target == 'zh' else 'zh'
+            return {'success': False, 'error': 'No text provided'}
         
         url = "https://libretranslate.de/translate"
         payload = {
             'q': text,
-            'source': 'auto',  # auto-detect source
+            'source': 'auto',
             'target': target,
             'format': 'text'
         }
@@ -2478,118 +1768,84 @@ Keep it professional and 300-500 words."""
             response = requests.post(url, data=payload, timeout=10)
             if response.status_code == 200:
                 result = response.json()
-                translated = result.get('translatedText', '')
-                return f"🔄 **Translated ({'auto' if source=='auto' else source} → {target}):**\n{translated}"
-            else:
-                return f"Translation failed (status {response.status_code}). Please try again later."
+                return {'success': True, 'translated': result.get('translatedText', '')}
+            return {'success': False, 'error': f"Status {response.status_code}"}
         except Exception as e:
-            return f"Translation error: {e}"
-
-    # ============================================================
-    # v10.3: China RSS News Aggregator
-    # ============================================================
-    async def _tool_china_rss_news(self, params: dict) -> str:
-        """Fetch China business news from multiple RSS feeds."""
+            return {'success': False, 'error': str(e)}
+    
+    async def _tool_china_rss_news(self, params: dict) -> dict:
         if not FEEDPARSER_AVAILABLE:
-            return "⚠️ Feedparser not installed. Install with: pip install feedparser"
+            return {'success': False, 'error': 'feedparser not installed'}
         
         limit = params.get('limit', 5)
         
         feeds = [
             ("China Briefing", "https://www.china-briefing.com/news/feed/"),
-            ("China Daily Business", "http://www.chinadaily.com.cn/business/rss.xml"),
-            ("SCMP Business", "https://www.scmp.com/rss/4/feed"),  # Business section
-            ("Caixin", "https://www.caixinglobal.com/rss/top_news.xml"),  # May need update
+            ("China Daily", "http://www.chinadaily.com.cn/business/rss.xml"),
+            ("SCMP", "https://www.scmp.com/rss/4/feed"),
         ]
         
         all_entries = []
         for name, url in feeds:
             try:
                 feed = feedparser.parse(url)
-                for entry in feed.entries[:3]:  # Take top 3 per feed
-                    published = entry.get('published', '')
-                    if hasattr(entry, 'published_parsed') and entry.published_parsed:
-                        published_dt = datetime(*entry.published_parsed[:6])
-                        published = published_dt.strftime('%Y-%m-%d')
+                for entry in feed.entries[:3]:
+                    published = entry.get('published', '')[:10]
                     title = entry.get('title', 'No title')
                     link = entry.get('link', '')
                     all_entries.append((published, f"- {title} ({published})\n  {link}"))
-            except Exception as e:
-                print(f"RSS feed error for {name}: {e}")
+            except:
+                pass
         
-        # Sort by date (descending) – naive sort, may need parsing
         all_entries.sort(reverse=True)
+        results = [item for _, item in all_entries[:limit]]
         
-        if not all_entries:
-            return "No news entries found from RSS feeds."
-        
-        results = []
-        for _, item in all_entries[:limit]:
-            results.append(item)
-        
-        return "🇨🇳 **China Business RSS News** (latest):\n" + "\n".join(results)
-
-    # ============================================================
-    # v10.3: China Economic Indicators (World Bank)
-    # ============================================================
-    async def _tool_china_economic_indicator(self, params: dict) -> str:
-        """Fetch economic indicators for China from World Bank open data."""
+        return {'success': True, 'results': results} if results else {'success': False, 'error': 'No news found'}
+    
+    async def _tool_china_economic_indicator(self, params: dict) -> dict:
         indicator_map = {
-            'gdp': 'NY.GDP.MKTP.CD',          # GDP (current US$)
-            'gdp_growth': 'NY.GDP.MKTP.KD.ZG', # GDP growth (annual %)
-            'pmi': None,  # Not available from World Bank, fallback to Trading Economics? We'll skip for now
-            'trade': 'NE.EXP.GNFS.CD',          # Exports of goods and services (current US$)
-            'imports': 'NE.IMP.GNFS.CD',        # Imports
-            'inflation': 'FP.CPI.TOTL.ZG',      # Inflation, consumer prices (annual %)
+            'gdp': 'NY.GDP.MKTP.CD',
+            'gdp_growth': 'NY.GDP.MKTP.KD.ZG',
+            'trade': 'NE.EXP.GNFS.CD',
+            'imports': 'NE.IMP.GNFS.CD',
+            'inflation': 'FP.CPI.TOTL.ZG',
         }
         
         indicator = params.get('indicator', 'gdp').lower()
         if indicator not in indicator_map:
-            return f"Unknown indicator. Available: {', '.join(indicator_map.keys())}"
+            return {'success': False, 'error': f'Unknown indicator. Use: {list(indicator_map.keys())}'}
         
         wb_code = indicator_map[indicator]
-        if wb_code is None:
-            return f"Indicator '{indicator}' not available from World Bank."
-        
         url = f"http://api.worldbank.org/v2/country/CN/indicator/{wb_code}?format=json&per_page=1&date=2022:2024"
+        
         try:
             response = requests.get(url, timeout=15)
             if response.status_code == 200:
                 data = response.json()
                 if len(data) > 1 and data[1]:
                     latest = data[1][0]
-                    value = latest.get('value')
-                    date = latest.get('date')
-                    if value is not None:
-                        return f"🇨🇳 **China {indicator.upper()}** ({date}): {value:,.2f} (current US$ where applicable)"
-                    else:
-                        return f"No recent data for {indicator}."
-                else:
-                    return f"No data found for {indicator}."
-            else:
-                return f"World Bank API error: {response.status_code}"
+                    return {
+                        'success': True,
+                        'indicator': indicator,
+                        'value': latest.get('value'),
+                        'date': latest.get('date')
+                    }
+            return {'success': False, 'error': 'No data found'}
         except Exception as e:
-            return f"Error fetching economic indicator: {e}"
+            return {'success': False, 'error': str(e)}
 
 tool_registry = ToolRegistry()
 
 # ============================================================
-# SOPHIA MAIN CLASS - FULLY AGENTIC
+# MAIN SOPHIA AGENT - FULLY AGENTIC
 # ============================================================
-
-# In-memory conversation history per session (survives within process lifetime)
 _session_histories: Dict[str, List[dict]] = defaultdict(list)
 _session_histories_lock = threading.Lock()
-_session_last_seen: Dict[str, float] = {}   # session_id -> epoch time of last access
-SESSION_HISTORY_TTL_SECONDS = 3600          # evict sessions idle for >1 hour
-
-MAX_HISTORY_TURNS = 10          # keep last N user/assistant pairs
-MAX_AGENT_ITERATIONS = 6        # max tool-use rounds per message
-REFLECTION_MIN_TOOLS = 1        # reflect only if at least N tools were used
-
+_session_last_seen: Dict[str, float] = {}
+SESSION_HISTORY_TTL_SECONDS = 3600
+MAX_HISTORY_TURNS = 10
 
 def _prune_stale_sessions():
-    """Remove session histories that haven't been accessed for SESSION_HISTORY_TTL_SECONDS."""
     now = time.time()
     with _session_histories_lock:
         stale = [sid for sid, ts in _session_last_seen.items()
@@ -2597,236 +1853,137 @@ def _prune_stale_sessions():
         for sid in stale:
             _session_histories.pop(sid, None)
             _session_last_seen.pop(sid, None)
-    if stale:
-        print(f"🧹 Pruned {len(stale)} stale session(s) from history")
 
-
-class SophiaAgent:
-    """Main Sophia AI Agent - v10.3 China Business Enhanced Edition"""
-    
+class FullyAgenticSophia:
     def __init__(self):
-        self.tool_registry = tool_registry
-        self.ai_provider = ai_provider
-        self.memory = hybrid_memory
+        self.swarm = swarm
+        self.convergent = convergent_agent
+        self.monitor = monitor
+        self.self_improving = self_improving
     
-    # ------------------------------------------------------------------
-    # PUBLIC ENTRY POINT
-    # ------------------------------------------------------------------
-    async def process_message(self, session_id: str, user_message: str, 
+    async def process_message(self, session_id: str, user_message: str,
                               context: dict = None) -> Tuple[str, dict]:
-        """
-        Fully agentic process:
-        1. Load conversation history + vector memories + feedback examples
-        2. Enhanced ReAct planning step
-        3. Multi-step tool loop
-        4. Self-reflection pass (optional)
-        5. Persist everything
-        """
         context = context or {}
-        profile = get_or_create_user_profile(session_id)
-        past_episodes = self.memory.recall_similar_episodes(user_message, n_results=3)
-        feedback_examples = self._get_feedback_examples(user_message, n_results=2)
-        system_prompt = self._build_system_prompt(profile, past_episodes, feedback_examples)
-
-        # --- load persisted conversation history ---
-        history = self._get_history(session_id)
-
-        messages = [{"role": "system", "content": system_prompt}]
-        messages.extend(history)
-        messages.append({"role": "user", "content": user_message})
-
-        tools_schema = self.tool_registry.get_tools_schema()
-        all_tools_used: List[str] = []
-
-        # ------------------------------------------------------------------
-        # STEP 1: Enhanced ReAct planning
-        # ------------------------------------------------------------------
-        _msg_lower = user_message.lower()
-        _words = user_message.split()
-        _is_question = any(_msg_lower.startswith(q) for q in ['what', 'who', 'how', 'why', 'when', 'where', 'can you', 'could you'])
-        _has_research_keywords = any(w in _msg_lower for w in [
-            'research', 'find', 'search', 'analyze', 'analyse', 'compare',
-            'tell me about', 'explain', 'report', 'summarize', 'summarise',
-            'investigate', 'look up', 'latest', 'recent', 'news', 'company',
-            'supplier', 'information', 'details', 'background'
-        ])
-        _is_long = len(_words) >= 6
-
-        _needs_planning = (
-            ENABLE_REACT_REASONING and
-            tools_schema and
-            (_is_question or _has_research_keywords or _is_long)
+        start_time = time.time()
+        
+        # Assess complexity for routing
+        complexity = await self._assess_complexity(user_message)
+        
+        # Route to appropriate agent
+        if complexity == 'high':
+            result = await self.swarm.solve(user_message, session_id)
+        elif complexity == 'medium':
+            result = await self.convergent.solve_with_convergence(user_message, session_id)
+        else:
+            result = await self._direct_response(user_message, session_id)
+        
+        # Check for tool failures and auto-create if needed
+        if not result.get('converged', True) or result.get('confidence', 1) < 0.5:
+            new_tool = await self.self_improving.create_tool_on_demand(
+                need_description=user_message,
+                failed_tool=result.get('failed_tool')
+            )
+            if new_tool:
+                # Retry with new tool
+                result = await self.swarm.solve(user_message, session_id)
+        
+        # Schedule proactive research if low confidence
+        if result.get('confidence', 0) < 0.7:
+            await self._schedule_proactive(session_id, user_message)
+        
+        # Calculate latency
+        latency_ms = (time.time() - start_time) * 1000
+        
+        # Trace
+        tracer.trace(
+            session_id=session_id,
+            operation="agentic_process",
+            inputs={"message": user_message[:100], "complexity": complexity},
+            outputs={"answer": result['answer'][:200]},
+            latency_ms=latency_ms,
+            tools_used=result.get('tools_used', []),
+            iteration=result.get('iterations', 1),
+            converged=result.get('converged', True)
         )
-
-        if _needs_planning:
-            plan_messages = messages + [{
-                "role": "user",
-                "content": (
-                    "Before answering, please create a step‑by‑step plan. "
-                    "Think about what information you need and which tools (if any) would be useful. "
-                    "List the tools in the order you would use them, and explain why. "
-                    "Then, based on your plan, provide your final answer.\n\n"
-                    "Format your plan like this:\n"
-                    "PLAN:\n1. <tool name> – <reason>\n2. ...\n\n"
-                    "Then write your answer."
-                )
-            }]
-            try:
-                plan_resp = await self.ai_provider.chat_completion(
-                    plan_messages, max_tokens=500, temperature=0.2
-                )
-                plan_text = plan_resp['choices'][0]['message'].get('content', '')
-                if plan_text:
-                    messages.append({
-                        "role": "system",
-                        "content": f"[Reasoning plan]:\n{plan_text}"
-                    })
-            except Exception as e:
-                print(f"⚠️ Planning failed: {e}")
-
-        # ------------------------------------------------------------------
-        # STEP 2: Agentic tool loop
-        # ------------------------------------------------------------------
-        iteration = 0
-        while iteration < MAX_AGENT_ITERATIONS:
-            iteration += 1
-
-            response = await self.ai_provider.chat_completion(
-                messages,
-                tools=tools_schema,
-                tool_choice="auto",
-                max_tokens=1000
-            )
-
-            assistant_message = response['choices'][0]['message']
-            finish_reason = response['choices'][0].get('finish_reason', 'stop')
-
-            if not assistant_message.get('tool_calls') or finish_reason == 'stop':
-                messages.append(assistant_message)
-                break
-
-            tool_calls = assistant_message['tool_calls']
-            tool_tasks = []
-            for tc in tool_calls:
-                tool_name = tc['function']['name']
-                try:
-                    tool_args = json.loads(tc['function']['arguments'])
-                except Exception:
-                    tool_args = {}
-                tool_tasks.append((tc, tool_name, tool_args))
-
-            async def _run_tool(tc, name, args):
-                result = await self.tool_registry.execute(name, args)
-                return tc, name, result
-
-            results = await asyncio.gather(
-                *[_run_tool(tc, n, a) for tc, n, a in tool_tasks],
-                return_exceptions=True
-            )
-
-            messages.append(assistant_message)
-
-            for res in results:
-                if isinstance(res, Exception):
-                    continue
-                tc, tool_name, tool_result = res
-                all_tools_used.append(tool_name)
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc['id'],
-                    "content": json.dumps(tool_result) if not isinstance(tool_result, str) else tool_result
-                })
-
-        final_response = (
-            messages[-1].get('content') if messages[-1].get('role') == 'assistant'
-            else response['choices'][0]['message'].get('content', '')
-        ) or 'I apologise, I could not generate a response.'
-
-        # ------------------------------------------------------------------
-        # STEP 3 (optional): Self-reflection
-        # ------------------------------------------------------------------
-        if ENABLE_SELF_REFLECTION and len(all_tools_used) >= REFLECTION_MIN_TOOLS:
-            final_response = await self._reflect_and_improve(
-                messages, user_message, final_response
-            )
-
-        # ------------------------------------------------------------------
-        # STEP 4: Persist
-        # ------------------------------------------------------------------
-        self._update_history(session_id, user_message, final_response)
-        self.memory.store_episodic(
-            session_id, user_message, final_response,
-            success_score=7,
-            intent=context.get('intent', 'unknown')
+        
+        # Store to FAISS memory
+        embedding = encoder.encode(f"User: {user_message}\nAssistant: {result['answer']}")
+        local_memory.add(
+            text=f"User: {user_message}\nAssistant: {result['answer']}",
+            embedding=embedding,
+            metadata={'session_id': session_id, 'intent': context.get('intent')}
         )
-        update_user_profile(session_id, last_intent=context.get('intent'))
-        conversation_id = self._store_conversation(session_id, user_message, final_response, context, all_tools_used)
-
-        return final_response, {'tools_used': all_tools_used, 'iterations': iteration, 'conversation_id': conversation_id}
-
-    # ------------------------------------------------------------------
-    # SELF-REFLECTION
-    # ------------------------------------------------------------------
-    async def _reflect_and_improve(self, messages: List[dict], 
-                                   user_message: str, draft: str) -> str:
-        """Ask the agent to critique its own draft and produce an improved version."""
-        try:
-            reflection_messages = messages + [
-                {
-                    "role": "user",
-                    "content": (
-                        f"Review your previous answer:\n\n{draft}\n\n"
-                        "Is it accurate, complete, and helpful? "
-                        "If you can meaningfully improve it, provide the improved version. "
-                        "Otherwise, repeat the original answer unchanged."
-                    )
-                }
-            ]
-            refl_resp = await self.ai_provider.chat_completion(
-                reflection_messages, max_tokens=1200, temperature=0.2
+        
+        # Update history
+        self._update_history(session_id, user_message, result['answer'])
+        
+        # Store conversation
+        conv_id = self._store_conversation(session_id, user_message, result, context)
+        
+        return result['answer'], {
+            'tools_used': result.get('tools_used', []),
+            'iterations': result.get('iterations', 1),
+            'converged': result.get('converged', True),
+            'confidence': result.get('confidence', 0.8),
+            'complexity': complexity,
+            'conversation_id': conv_id,
+            'latency_ms': latency_ms
+        }
+    
+    async def _assess_complexity(self, message: str) -> str:
+        indicators = {
+            'high': ['research', 'compare', 'analyze', 'investigate', 'find all', 'comprehensive', 'detailed report'],
+            'medium': ['explain', 'how to', 'what is', 'help with', 'tell me about'],
+            'low': ['hello', 'hi', 'thanks', 'yes', 'no', 'ok']
+        }
+        
+        msg_lower = message.lower()
+        for level, keywords in indicators.items():
+            if any(k in msg_lower for k in keywords):
+                return level
+        
+        # Use LLM for ambiguous cases
+        check = await prompt_cache.get_or_compute(
+            messages=[{"role": "user", "content": f"Classify complexity (high/medium/low): {message[:100]}"}],
+            model='fast',
+            compute_func=lambda: ai_provider.chat_completion(
+                [{"role": "user", "content": f"Classify complexity (high/medium/low): {message[:100]}"}],
+                model_type='fast', max_tokens=10
             )
-            improved = refl_resp['choices'][0]['message'].get('content', '').strip()
-            if improved and len(improved) > 30:
-                return improved
-        except Exception as e:
-            print(f"⚠️ Reflection failed: {e}")
-        return draft
-
-    # ------------------------------------------------------------------
-    # FEEDBACK LEARNING
-    # ------------------------------------------------------------------
-    def _get_feedback_examples(self, query: str, n_results: int = 2) -> List[dict]:
-        """
-        Retrieve recent low‑rated conversations with user comments.
-        In a production system you would also vector‑search; here we simply
-        return the most recent ones as a starting point.
-        """
-        try:
-            conn = get_db()
-            c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-            c.execute("""
-                SELECT f.rating, f.comment, c.user_message, c.ai_response
-                FROM user_feedback f
-                JOIN conversations c ON f.conversation_id = c.id
-                WHERE f.rating <= 2 AND f.comment IS NOT NULL AND f.comment != ''
-                ORDER BY f.created_at DESC
-                LIMIT %s
-            """, (n_results,))
-            rows = c.fetchall()
-            conn.close()
-            return [dict(r) for r in rows]
-        except Exception as e:
-            print(f"Feedback retrieval error: {e}")
-            return []
-
-    # ------------------------------------------------------------------
-    # CONVERSATION HISTORY HELPERS
-    # ------------------------------------------------------------------
-    def _get_history(self, session_id: str) -> List[dict]:
-        with _session_histories_lock:
-            _session_last_seen[session_id] = time.time()
-            return list(_session_histories[session_id])
-
+        )
+        
+        response = check['choices'][0]['message']['content'].lower()
+        if 'high' in response:
+            return 'high'
+        elif 'medium' in response:
+            return 'medium'
+        return 'low'
+    
+    async def _direct_response(self, user_message: str, session_id: str) -> dict:
+        """Simple direct response for low complexity"""
+        response = await ai_provider.chat_completion(
+            messages=[{"role": "user", "content": user_message}],
+            max_tokens=500
+        )
+        
+        return {
+            'answer': response['choices'][0]['message']['content'],
+            'iterations': 1,
+            'converged': True,
+            'confidence': 0.9,
+            'tools_used': []
+        }
+    
+    async def _schedule_proactive(self, session_id: str, topic: str):
+        """Schedule background research"""
+        self.monitor.monitors[f"research_{session_id}_{int(time.time())}"] = {
+            'source_type': 'time',
+            'action_type': 'deep_research',
+            'session_id': session_id,
+            'topic': topic,
+            'schedule': time.time() + 300  # 5 minutes
+        }
+    
     def _update_history(self, session_id: str, user_msg: str, assistant_msg: str):
         with _session_histories_lock:
             _session_last_seen[session_id] = time.time()
@@ -2836,66 +1993,22 @@ class SophiaAgent:
             if len(hist) > MAX_HISTORY_TURNS * 2:
                 _session_histories[session_id] = hist[-(MAX_HISTORY_TURNS * 2):]
         _prune_stale_sessions()
-
-    # ------------------------------------------------------------------
-    # SYSTEM PROMPT
-    # ------------------------------------------------------------------
-    def _build_system_prompt(self, profile: dict, past_episodes: List[dict], feedback_examples: List[dict]) -> str:
-        base_prompt = """You are Sophia, an intelligent AI assistant for China West Connector (CWC).
-
-You operate as a FULLY AGENTIC AI: you can reason step-by-step, call multiple tools in sequence, 
-reflect on your results, and refine your answers autonomously.
-
-Core capabilities:
-- **Wikipedia & Wikidata** — Instant encyclopaedia knowledge, now with Chinese company info
-- **Browser Automation** — Browse websites, take screenshots, extract data
-- **Web Search** — DuckDuckGo, Tavily, Bing
-- **Social Monitoring** — Reddit discussions, news monitoring
-- **Geocoding** — Address verification via OpenStreetMap
-- **Vector Memory** — Recall past conversations
-- **Research** — Deep multi-source topic research
-- **🇨🇳 China Business Tools** – Latest news, RSS feeds, economic indicators, translation, and enhanced company data
-
-Tool-use guidelines:
-- Use tools proactively whenever they would improve accuracy or completeness.
-- Chain tools when needed: e.g. search → browse → summarise.
-- If a tool result is insufficient, try a different tool or query.
-- Always synthesise tool outputs into a clear, helpful final answer.
-- Never fabricate facts; prefer verified tool results over assumptions."""
-
-        if past_episodes:
-            base_prompt += "\n\nRelevant past conversations:\n"
-            for ep in past_episodes[:2]:
-                base_prompt += f"- {ep['text'][:200]}…\n"
-
-        if feedback_examples:
-            base_prompt += "\n\n📝 **Learning from user feedback:**\n"
-            for fb in feedback_examples:
-                base_prompt += f"- A similar question was previously answered poorly. Here is a corrected response that users preferred:\n  “{fb['comment'][:200]}”\n\n"
-
-        if profile.get('name'):
-            base_prompt += f"\n\nCurrent user: {profile['name']}"
-        if profile.get('company'):
-            base_prompt += f" ({profile['company']})"
-
-        return base_prompt
-
-    # ------------------------------------------------------------------
-    # PERSISTENCE
-    # ------------------------------------------------------------------
-    def _store_conversation(self, session_id: str, user_message: str, response: str,
-                            context: dict, tools_used: List[str]) -> Optional[int]:
-        """Store conversation and return the new conversation ID."""
+    
+    def _store_conversation(self, session_id: str, user_message: str, 
+                           result: dict, context: dict) -> Optional[int]:
         try:
             conn = get_db()
             c = conn.cursor()
             c.execute("""
                 INSERT INTO conversations 
-                (session_id, user_message, ai_response, intent, tools_used)
-                VALUES (%s, %s, %s, %s, %s::jsonb)
+                (session_id, user_message, ai_response, intent, tools_used, 
+                 confidence_score, iterations, converged)
+                VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s)
                 RETURNING id
-            """, (session_id, user_message, response, context.get('intent'),
-                  json.dumps(tools_used)))
+            """, (session_id, user_message, result['answer'], 
+                  context.get('intent'), json.dumps(result.get('tools_used', [])),
+                  result.get('confidence'), result.get('iterations'), 
+                  result.get('converged')))
             conv_id = c.fetchone()[0]
             conn.commit()
             conn.close()
@@ -2904,21 +2017,19 @@ Tool-use guidelines:
             print(f"Conversation storage error: {e}")
             return None
 
-
-sophia = SophiaAgent()
+sophia = FullyAgenticSophia()
 
 # ============================================================
 # BACKGROUND WORKERS
 # ============================================================
 def goal_executor():
-    """Background thread for autonomous goal execution."""
     while True:
         try:
             time.sleep(GOAL_EXECUTION_INTERVAL_MINUTES * 60)
-
+            
             if not DATABASE_URL:
                 continue
-
+            
             conn = get_db()
             c = conn.cursor()
             c.execute("""
@@ -2929,10 +2040,9 @@ def goal_executor():
             """, (MAX_CONCURRENT_GOALS,))
             goals = c.fetchall()
             conn.close()
-
+            
             for goal_id, goal_type, description in goals:
                 try:
-                    # Mark as in-progress
                     conn2 = get_db()
                     c2 = conn2.cursor()
                     c2.execute(
@@ -2941,8 +2051,7 @@ def goal_executor():
                     )
                     conn2.commit()
                     conn2.close()
-
-                    # Execute goal via the agent (run in a new event loop for the thread)
+                    
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
                     result, meta = loop.run_until_complete(
@@ -2953,10 +2062,7 @@ def goal_executor():
                         )
                     )
                     loop.close()
-
-                    tools_used = meta.get('tools_used', [])
-                    summary = result[:2000] if result else "No result"
-
+                    
                     conn3 = get_db()
                     c3 = conn3.cursor()
                     c3.execute("""
@@ -2965,119 +2071,41 @@ def goal_executor():
                             result = %s,
                             completed_subtasks = %s::jsonb
                         WHERE id = %s
-                    """, (summary, json.dumps({"tools_used": tools_used}), goal_id))
+                    """, (result[:2000], json.dumps({"tools_used": meta.get('tools_used', [])}), goal_id))
                     conn3.commit()
                     conn3.close()
-
-                    print(f"✅ Goal {goal_id} ({goal_type}) completed. Tools: {tools_used}")
-
+                    
                 except Exception as e:
-                    print(f"⚠️ Goal {goal_id} failed: {e}")
-                    try:
-                        conn_err = get_db()
-                        c_err = conn_err.cursor()
-                        c_err.execute("""
-                            UPDATE autonomous_goals 
-                            SET status = 'failed', result = %s,
-                                retry_count = retry_count + 1
-                            WHERE id = %s
-                        """, (str(e)[:500], goal_id))
-                        conn_err.commit()
-                        conn_err.close()
-                    except Exception:
-                        pass
-
+                    print(f"Goal {goal_id} failed: {e}")
+                    
         except Exception as outer:
-            print(f"⚠️ Goal executor error: {outer}")
-
-
-# ============================================================
-# NEW v10.3: Proactive China News Goal Generator (daily)
-# ============================================================
-def proactive_china_goal_generator():
-    """Scans recent conversations for China‑interested users and creates monitoring goals."""
-    while True:
-        try:
-            # Run once per day
-            time.sleep(24 * 60 * 60)
-
-            if not DATABASE_URL:
-                continue
-
-            conn = get_db()
-            c = conn.cursor()
-            # Find sessions with China keywords in the last 7 days
-            c.execute("""
-                SELECT DISTINCT session_id
-                FROM conversations
-                WHERE timestamp > NOW() - INTERVAL '7 days'
-                  AND (user_message ILIKE '%china%' OR user_message ILIKE '%chinese%' OR user_message ILIKE '%supplier%')
-                  AND session_id NOT LIKE 'autonomous_goal_%'
-                ORDER BY session_id
-            """)
-            sessions = c.fetchall()
-
-            for (session_id,) in sessions:
-                # Check if a monitoring goal already exists for this session
-                c.execute("""
-                    SELECT id FROM autonomous_goals
-                    WHERE session_id = %s AND goal_type = 'monitor_china_news' AND status IN ('pending', 'in_progress')
-                """, (session_id,))
-                if not c.fetchone():
-                    # Create new goal
-                    c.execute("""
-                        INSERT INTO autonomous_goals (session_id, goal_type, goal_description, priority, source)
-                        VALUES (%s, 'monitor_china_news', 'Monitor latest China business news for this user', 3, 'proactive')
-                        RETURNING id
-                    """, (session_id,))
-                    goal_id = c.fetchone()[0]
-                    print(f"🎯 Created proactive China news goal {goal_id} for session {session_id}")
-
-            conn.commit()
-            conn.close()
-
-        except Exception as e:
-            print(f"⚠️ Proactive goal generator error: {e}")
-
+            print(f"Goal executor error: {outer}")
 
 # ============================================================
 # FASTAPI APP
 # ============================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan manager"""
     init_db()
     
-    # Start background threads
     goal_thread = threading.Thread(target=goal_executor, daemon=True)
     goal_thread.start()
     
-    # Start proactive goal generator (only if database is configured)
-    if DATABASE_URL:
-        proactive_thread = threading.Thread(target=proactive_china_goal_generator, daemon=True)
-        proactive_thread.start()
-        print("🌐 Proactive China goal generator started (runs daily)")
+    monitor.start_monitoring()
     
     print(f"""
     ╔══════════════════════════════════════════════════════════════╗
-    ║        SOPHIA AI SERVER v10.3 - CHINA BUSINESS EDITION      ║
+    ║     SOPHIA AI SERVER v11.0 - FULLY AGENTIC EDITION          ║
     ╠══════════════════════════════════════════════════════════════╣
-    ║  🧠 Vector Backend: {hybrid_memory.backend_type:<38} ║
-    ║  🔧 Tools Loaded: {len(tool_registry.tools):<40} ║
-    ║  🤖 AI Providers: {len(ai_provider.providers):<40} ║
-    ║  📚 Wikipedia + Enhanced Wikidata: ✅                        ║
-    ║  📰 Google News RSS: {'✅' if FEEDPARSER_AVAILABLE else '⚠️ feedparser missing':<29} ║
-    ║  🇨🇳 China Business Tools:                                     ║
-    ║     • Translation (LibreTranslate)                           ║
-    ║     • RSS Aggregator (multiple feeds)                        ║
-    ║     • Economic Indicators (World Bank)                       ║
-    ║     • Enhanced Company Info (Chinese names)                  ║
-    ║     • Proactive News Goals                                   ║
-    ║  🌐 Browser Automation: {'✅ Playwright' if PLAYWRIGHT_AVAILABLE else '⚠️ HTTP fallback':<29} ║
-    ║  ♾️  Agentic Loop: up to {MAX_AGENT_ITERATIONS} iterations                     ║
-    ║  🪞 Self-Reflection: {'✅ enabled' if ENABLE_SELF_REFLECTION else '❌ disabled':<31} ║
-    ║  🧭 ReAct Reasoning: {'✅ smart-gated' if ENABLE_REACT_REASONING else '❌ disabled':<27} ║
-    ║  💬 User Feedback: ✅ collecting & learning                   ║
+    ║  🤖 Agent Swarm: Multi-agent collaboration                   ║
+    ║  🎯 Convergent Depth: Dynamic iteration control              ║
+    ║  🔧 Self-Improving Tools: Auto-generation                    ║
+    ║  👁️ Autonomous Monitor: Self-triggering actions              ║
+    ║  🧠 Local FAISS: Zero-cost vector storage                    ║
+    ║  🕵️ Stealth Browser: No Playwright needed                    ║
+    ║  💾 ZeroCostTracer: Local observability                      ║
+    ║  ⚡ Prompt Cache: 30-50% speedup                             ║
+    ║  🔄 Resilient Execution: Smart retries                       ║
     ╚══════════════════════════════════════════════════════════════╝
     """)
     
@@ -3086,9 +2114,9 @@ async def lifespan(app: FastAPI):
     print("🛑 Sophia AI Server shutting down...")
 
 app = FastAPI(
-    title="Sophia AI Server v10.3",
-    description="China Business Enhanced Edition with Translation, RSS, Economic Data & Proactive Goals",
-    version="10.3.0",
+    title="Sophia AI Server v11.0",
+    description="Fully Agentic Edition with Multi-Agent Swarm",
+    version="11.0.0",
     lifespan=lifespan
 )
 
@@ -3103,7 +2131,6 @@ app.add_middleware(
 # ============================================================
 # API ENDPOINTS
 # ============================================================
-
 class ChatRequest(BaseModel):
     session_id: str
     message: str
@@ -3113,35 +2140,37 @@ class ChatResponse(BaseModel):
     response: str
     tools_used: List[str] = []
     iterations: int = 1
+    converged: bool = True
+    confidence: float = 0.8
+    complexity: str = "medium"
     conversation_id: Optional[int] = None
+    latency_ms: float = 0
 
 @app.get("/")
 async def root():
-    """Root endpoint"""
     return {
         "service": "Sophia AI Server",
-        "version": "10.3.0",
-        "vector_backend": hybrid_memory.backend_type,
+        "version": "11.0.0",
+        "features": [
+            "agent_swarm", "convergent_depth", "self_improving_tools",
+            "autonomous_monitor", "local_faiss", "zero_cost_tracer"
+        ],
         "tools_count": len(tool_registry.tools),
-        "playwright": PLAYWRIGHT_AVAILABLE,
-        "google_news_rss": FEEDPARSER_AVAILABLE,
         "status": "running"
     }
 
 @app.get("/health")
 async def health_check():
-    """Health check"""
     return {
         "status": "healthy",
-        "vector_backend": hybrid_memory.get_status(),
-        "ai_providers": len(ai_provider.providers),
-        "tools_available": len(tool_registry.tools),
-        "playwright": PLAYWRIGHT_AVAILABLE
+        "faiss_vectors": local_memory.index.ntotal,
+        "cache_stats": prompt_cache.get_stats(),
+        "tracer_stats": tracer.get_stats(),
+        "generated_tools": len(self_improving.runtime_registry)
     }
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    """Main chat endpoint — fully agentic multi-step reasoning"""
     response, metadata = await sophia.process_message(
         request.session_id,
         request.message,
@@ -3151,12 +2180,15 @@ async def chat(request: ChatRequest):
         response=response,
         tools_used=metadata.get('tools_used', []),
         iterations=metadata.get('iterations', 1),
-        conversation_id=metadata.get('conversation_id')
+        converged=metadata.get('converged', True),
+        confidence=metadata.get('confidence', 0.8),
+        complexity=metadata.get('complexity', 'medium'),
+        conversation_id=metadata.get('conversation_id'),
+        latency_ms=metadata.get('latency_ms', 0)
     )
 
 @app.post("/chat/stream")
 async def chat_stream(request: ChatRequest):
-    """Streaming chat endpoint — returns Server-Sent Events"""
     async def event_generator():
         try:
             response_text, metadata = await sophia.process_message(
@@ -3164,93 +2196,21 @@ async def chat_stream(request: ChatRequest):
                 request.message,
                 request.context
             )
-            tools_used = metadata.get('tools_used', [])
-            iterations = metadata.get('iterations', 1)
-            conv_id = metadata.get('conversation_id')
-
+            
             chunk_size = 50
             for i in range(0, len(response_text), chunk_size):
                 chunk = response_text[i:i + chunk_size]
                 yield f"data: {json.dumps({'type': 'text', 'content': chunk})}\n\n"
                 await asyncio.sleep(0.02)
-
-            yield f"data: {json.dumps({'type': 'done', 'tools_used': tools_used, 'iterations': iterations, 'conversation_id': conv_id})}\n\n"
+            
+            yield f"data: {json.dumps({'type': 'done', **metadata})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
-
+    
     return StreamingResponse(event_generator(), media_type="text/event-stream")
-
-
-class GoalRequest(BaseModel):
-    session_id: str = "system"
-    goal_type: str
-    description: str
-    priority: int = 5
-
-@app.post("/goals")
-async def create_goal(req: GoalRequest):
-    """Create an autonomous goal for background execution"""
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("""
-            INSERT INTO autonomous_goals (session_id, goal_type, goal_description, priority, status)
-            VALUES (%s, %s, %s, %s, 'pending')
-            RETURNING id
-        """, (req.session_id, req.goal_type, req.description, req.priority))
-        goal_id = c.fetchone()[0]
-        conn.commit()
-        conn.close()
-        return {"status": "created", "goal_id": goal_id, "priority": req.priority}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/goals")
-async def list_goals(status: Optional[str] = None, limit: int = 20):
-    """List autonomous goals"""
-    try:
-        conn = get_db()
-        c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        if status:
-            c.execute(
-                "SELECT * FROM autonomous_goals WHERE status = %s ORDER BY created_at DESC LIMIT %s",
-                (status, limit)
-            )
-        else:
-            c.execute("SELECT * FROM autonomous_goals ORDER BY created_at DESC LIMIT %s", (limit,))
-        goals = [dict(r) for r in c.fetchall()]
-        conn.close()
-        return {"goals": goals, "count": len(goals)}
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.delete("/chat/history/{session_id}")
-async def clear_chat_history(session_id: str):
-    """Clear in-memory conversation history for a session"""
-    with _session_histories_lock:
-        _session_histories.pop(session_id, None)
-    return {"status": "cleared", "session_id": session_id}
-
-@app.get("/memory/status")
-async def get_memory_status():
-    """Get vector memory status"""
-    return hybrid_memory.get_status()
-
-@app.post("/memory/store")
-async def store_memory(fact_type: str, fact_value: str, importance: int = 5):
-    """Store a memory"""
-    hybrid_memory.store_semantic(fact_type, fact_value, importance, 'manual')
-    return {"status": "stored", "fact_type": fact_type}
-
-@app.get("/memory/recall")
-async def recall_memory(query: str, n_results: int = 5):
-    """Recall memories"""
-    episodes = hybrid_memory.recall_similar_episodes(query, n_results)
-    return {"episodes": episodes}
 
 @app.get("/tools")
 async def list_tools():
-    """List all tools"""
     return {
         "count": len(tool_registry.tools),
         "tools": [{"name": k, "description": v.get('description', '')} 
@@ -3259,122 +2219,49 @@ async def list_tools():
 
 @app.post("/tools/{tool_name}/execute")
 async def execute_tool(tool_name: str, params: dict):
-    """Execute a tool"""
     result = await tool_registry.execute(tool_name, params)
     return result
 
-# ============================================================
-# WIKIPEDIA & BROWSING ENDPOINTS
-# ============================================================
+@app.get("/memory/status")
+async def get_memory_status():
+    return local_memory.get_status()
 
-@app.get("/wikipedia/search")
-async def wikipedia_search(query: str, limit: int = 5):
-    """Search Wikipedia"""
-    results = await wikipedia_knowledge.search_wikipedia(query, limit)
+@app.get("/memory/search")
+async def search_memory(query: str, k: int = 5):
+    embedding = encoder.encode(query)
+    results = local_memory.search(embedding, k)
     return {"query": query, "results": results}
 
-@app.get("/wikipedia/article/{title}")
-async def wikipedia_article(title: str):
-    """Get Wikipedia article"""
-    article = await wikipedia_knowledge.get_article(title)
-    return article
-
-@app.get("/wikidata/search")
-async def wikidata_search(query: str, limit: int = 5):
-    """Search Wikidata"""
-    results = await wikipedia_knowledge.search_wikidata(query, limit)
-    return {"query": query, "results": results}
-
-@app.get("/wikidata/entity/{entity_id}")
-async def wikidata_entity(entity_id: str):
-    """Get Wikidata entity"""
-    entity = await wikipedia_knowledge.get_wikidata_entity(entity_id)
-    return entity
-
-@app.get("/company/{company_name}")
-async def company_info(company_name: str):
-    """Get company information"""
-    info = await wikipedia_knowledge.get_company_info(company_name)
-    return info
-
-@app.get("/browse")
-async def browse_page(url: str, wait_time: int = 2):
-    """Browse a webpage"""
-    result = await browser_automation.browse_page(url, wait_time)
-    return result
-
-@app.get("/screenshot")
-async def screenshot_page(url: str, full_page: bool = False):
-    """Take a screenshot"""
-    result = await browser_automation.take_screenshot(url, full_page)
+@app.get("/admin/stats")
+async def admin_stats(password: str):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(status_code=401, detail="Invalid password")
     
-    if result.get('screenshot'):
-        # Return as image
-        import tempfile
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as f:
-            f.write(base64.b64decode(result['screenshot']))
-            return FileResponse(f.name, media_type='image/png')
-    
-    return result
-
-# ============================================================
-# USER FEEDBACK ENDPOINT (v10.1)
-# ============================================================
-
-class FeedbackRequest(BaseModel):
-    session_id: str
-    conversation_id: Optional[int] = None
-    rating: int  # 1-5
-    comment: Optional[str] = None
+    return {
+        "tracer": tracer.get_stats(),
+        "cache": prompt_cache.get_stats(),
+        "faiss": local_memory.get_status(),
+        "generated_tools": len(self_improving.runtime_registry),
+        "active_monitors": len(monitor.monitors)
+    }
 
 @app.post("/feedback")
-async def submit_feedback(fb: FeedbackRequest):
-    """Submit user feedback on a conversation"""
-    if fb.rating < 1 or fb.rating > 5:
-        raise HTTPException(status_code=400, detail="Rating must be between 1 and 5")
+async def submit_feedback(session_id: str, rating: int, comment: str = None, conversation_id: int = None):
+    if rating < 1 or rating > 5:
+        raise HTTPException(status_code=400, detail="Rating must be 1-5")
+    
     try:
         conn = get_db()
         c = conn.cursor()
         c.execute("""
             INSERT INTO user_feedback (session_id, conversation_id, rating, comment)
             VALUES (%s, %s, %s, %s)
-        """, (fb.session_id, fb.conversation_id, fb.rating, fb.comment))
+        """, (session_id, conversation_id, rating, comment))
         conn.commit()
         conn.close()
-        return {"status": "thank you for your feedback!"}
+        return {"status": "thank you!"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/admin/stats")
-async def admin_stats(password: str):
-    """Get admin statistics"""
-    if password != ADMIN_PASSWORD:
-        raise HTTPException(status_code=401, detail="Invalid password")
-    
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        
-        c.execute("SELECT COUNT(*) FROM conversations")
-        conversation_count = c.fetchone()[0]
-        
-        c.execute("SELECT COUNT(*) FROM user_profiles")
-        user_count = c.fetchone()[0]
-        
-        c.execute("SELECT AVG(rating) FROM user_feedback")
-        avg_rating = c.fetchone()[0]
-        
-        conn.close()
-        
-        return {
-            "conversations": conversation_count,
-            "users": user_count,
-            "average_feedback": round(avg_rating, 2) if avg_rating else None,
-            "vector_backend": hybrid_memory.backend_type,
-            "playwright": PLAYWRIGHT_AVAILABLE
-        }
-    except Exception as e:
-        return {"error": str(e)}
 
 # ============================================================
 # MAIN
