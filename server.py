@@ -1,13 +1,13 @@
 """
 ================================================================================
-SOPHIA AI SERVER v10.7 - CHINA BUSINESS ENHANCED EDITION
+SOPHIA AI SERVER v10.7.1 - CHINA BUSINESS ENHANCED EDITION
 ================================================================================
-NEW IN v10.7:
-⚡ Parallel goal execution — all MAX_CONCURRENT_GOALS run simultaneously via ThreadPoolExecutor
-✂️  Auto-truncate long tool outputs — keeps context window lean, saves tokens
-🎯 Confidence scoring — every response tagged with verified confidence level
-🔁 Auto-retry failed tools — rephrases query once before giving up
-🧹 Stale goal cleanup — goals pending >48h auto-marked stale, run every cycle
+PATCH v10.7.1:
+🔴 CRITICAL FIX: Added missing release_db() + DB connection pool (was crashing on every DB call)
+🔢 MAX_AGENT_ITERATIONS raised to 8 (6 real tool rounds after planning + reflection)
+⚠️  Tool exceptions now reported back to Sophia (no longer silently swallowed)
+📈 Serper quota tracker restored (auto-fallback to DuckDuckGo at 80 searches/day)
+🚀 _init_pool() now called at startup via lifespan
 ================================================================================
 """
 
@@ -203,13 +203,42 @@ def _compute_confidence(tools_used: List[str], final_response: str) -> dict:
     return {'level': level, 'score': score, 'tools_verified': unique}
 
 # ============================================================
-# DATABASE LAYER
+# DATABASE LAYER — Connection Pool
+# release_db() MUST be called after every get_db() call.
 # ============================================================
+from psycopg2 import pool as _psycopg2_pool
+
+_db_pool = None
+
+def _init_pool():
+    global _db_pool
+    if DATABASE_URL and _db_pool is None:
+        try:
+            _db_pool = _psycopg2_pool.SimpleConnectionPool(1, 8, DATABASE_URL)
+            print("✅ DB connection pool initialised (min=1, max=8)")
+        except Exception as e:
+            print(f"⚠️ DB pool init failed — falling back to direct connections: {e}")
+
 def get_db():
-    """Get database connection"""
     if not DATABASE_URL:
         raise ValueError("DATABASE_URL not configured")
+    if _db_pool:
+        return _db_pool.getconn()
     return psycopg2.connect(DATABASE_URL)
+
+def release_db(conn):
+    if conn is None:
+        return
+    try:
+        if _db_pool:
+            _db_pool.putconn(conn)
+        else:
+            conn.close()
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 def init_db():
     """Initialize all database tables"""
@@ -2728,12 +2757,18 @@ Keep it professional and 300-500 words."""
     # v10.5: Serper.dev — Google Search (100/day free)
     # ============================================================
     async def _tool_serper_search(self, params: dict) -> str:
-        """Google Search via Serper.dev — best quality results."""
+        """Google Search via Serper.dev — quota-tracked, falls back to DuckDuckGo."""
+        global _serper_usage
         query = params.get('query', '')
         num = params.get('num', 5)
 
-        if not SERPER_API_KEY:
-            # Graceful fallback to DuckDuckGo
+        # Check daily quota
+        today = datetime.now().strftime('%Y-%m-%d')
+        daily_count = _serper_usage.get(today, 0)
+
+        if not SERPER_API_KEY or daily_count >= SERPER_DAILY_LIMIT:
+            if daily_count >= SERPER_DAILY_LIMIT:
+                print(f"⚠️ Serper quota reached ({daily_count}/{SERPER_DAILY_LIMIT}) — DuckDuckGo fallback")
             return await self._tool_duckduckgo_search({'query': query})
 
         try:
@@ -2744,6 +2779,7 @@ Keep it professional and 300-500 words."""
                 timeout=15
             )
             if response.status_code == 200:
+                _serper_usage[today] = daily_count + 1
                 data = response.json()
                 results = []
                 # Organic results
@@ -2904,7 +2940,11 @@ _session_last_seen: Dict[str, float] = {}   # session_id -> epoch time of last a
 SESSION_HISTORY_TTL_SECONDS = 3600          # evict sessions idle for >1 hour
 
 MAX_HISTORY_TURNS = 10          # keep last N user/assistant pairs
-MAX_AGENT_ITERATIONS = 6        # max tool-use rounds per message
+MAX_AGENT_ITERATIONS = 8        # max tool-use rounds (6 real + planning + reflection)
+
+# Serper daily quota tracker (in-memory, resets on restart — fine for free tier)
+_serper_usage: Dict[str, int] = {}   # date_str -> count
+SERPER_DAILY_LIMIT = 80              # switch to DuckDuckGo at 80% of 100 free quota
 REFLECTION_MIN_TOOLS = 1        # reflect only if at least N tools were used
 
 
@@ -3056,6 +3096,12 @@ class SophiaAgent:
 
             for res in results:
                 if isinstance(res, Exception):
+                    # Report error back to Sophia so she can retry differently
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": "error",
+                        "content": f"Tool execution error: {str(res)}"
+                    })
                     continue
                 tc, tool_name, tool_result = res
                 all_tools_used.append(tool_name)
@@ -3492,6 +3538,7 @@ def proactive_china_goal_generator():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager"""
+    _init_pool()
     init_db()
     
     # Start background threads
@@ -3506,7 +3553,7 @@ async def lifespan(app: FastAPI):
     
     print(f"""
     ╔══════════════════════════════════════════════════════════════╗
-    ║        SOPHIA AI SERVER v10.7 - CHINA BUSINESS EDITION      ║
+    ║       SOPHIA AI SERVER v10.7.1 - CHINA BUSINESS EDITION     ║
     ╠══════════════════════════════════════════════════════════════╣
     ║  🧠 Vector Backend: {hybrid_memory.backend_type:<38} ║
     ║  🔧 Tools Loaded: {len(tool_registry.tools):<40} ║
@@ -3538,9 +3585,9 @@ async def lifespan(app: FastAPI):
     print("🛑 Sophia AI Server shutting down...")
 
 app = FastAPI(
-    title="Sophia AI Server v10.7",
+    title="Sophia AI Server v10.7.1",
     description="China Business Enhanced Edition — Parallel Goals, Confidence Scoring, Auto-retry",
-    version="10.7.0",
+    version="10.7.1",
     lifespan=lifespan
 )
 
@@ -3573,7 +3620,7 @@ async def root():
     """Root endpoint"""
     return {
         "service": "Sophia AI Server",
-        "version": "10.7.0",
+        "version": "10.7.1",
         "vector_backend": hybrid_memory.backend_type,
         "tools_count": len(tool_registry.tools),
         "playwright": PLAYWRIGHT_AVAILABLE,
