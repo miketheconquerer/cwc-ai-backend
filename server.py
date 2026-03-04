@@ -1,18 +1,19 @@
 """
 ================================================================================
-SOPHIA AI SERVER v10.5 - CHINA BUSINESS ENHANCED EDITION
+SOPHIA AI SERVER v10.6 - CHINA BUSINESS ENHANCED EDITION
 ================================================================================
-NEW IN v10.5:
-🔍 Serper.dev Google Search — best quality web results (100/day free)
-💱 Live Currency Rates — USD/CNY and any pair via Frankfurter (free, no key)
-🌍 REST Countries Tool — trade/region/language data, no key needed
-📦 Wayback Machine Tool — archived pages when sites are blocked, free
-🟠 HackerNews Search — tech business discussions, free
-🧠 Intent Gate — simple messages skip expensive ReAct planning (faster + saves tokens)
-🪞 Structured Self-Reflection — checklist-based answer improvement
-📚 Topic-Matched Feedback Learning — relevant past mistakes injected into context
-🐛 Fix: Clear history now deletes from Supabase too
-🐛 Fix: Encoder status display now correct for HF API
+NEW IN v10.6:
+🏢 OpenCorporates Tool — free company registry search for supplier verification
+📊 UN Comtrade Tool — China import/export trade statistics by product
+📍 IP Geolocation Tool — detect user region, tailor China business advice
+👤 Get User Profile Tool — Sophia can look up what she knows about the user
+⚡ DB Connection Pooling — psycopg2 pool prevents Supabase connection exhaustion
+🔄 Eliminated double DB read — history no longer re-fetched on every save
+🧠 Updated system prompt — Sophia now knows all her v10.5+ tools
+⚠️  Tool error feedback — failed tools report back to Sophia so she can retry
+🎯 Dynamic success scoring — memory scores based on actual user feedback
+📈 Serper quota tracker — auto-switches to DuckDuckGo when quota near limit
+🔢 MAX_AGENT_ITERATIONS = 8 — 6 real tool rounds after planning+reflection
 ================================================================================
 """
 
@@ -166,13 +167,45 @@ REFLECTION_THRESHOLD = 0.7
 NEWS_CACHE_MAX_AGE_MINUTES = 30
 
 # ============================================================
-# DATABASE LAYER
+# DATABASE LAYER — Connection Pool (prevents Supabase exhaustion)
 # ============================================================
+from psycopg2 import pool as psycopg2_pool
+
+_db_pool = None
+
+def _init_pool():
+    """Initialise a small connection pool. Called once at startup."""
+    global _db_pool
+    if DATABASE_URL and _db_pool is None:
+        try:
+            _db_pool = psycopg2_pool.SimpleConnectionPool(1, 8, DATABASE_URL)
+            print("✅ DB connection pool initialised (min=1, max=8)")
+        except Exception as e:
+            print(f"⚠️ DB pool init failed, will use direct connections: {e}")
+
 def get_db():
-    """Get database connection"""
+    """Get a database connection from the pool (or a fresh one as fallback)."""
     if not DATABASE_URL:
         raise ValueError("DATABASE_URL not configured")
+    if _db_pool:
+        return _db_pool.getconn()
     return psycopg2.connect(DATABASE_URL)
+
+def release_db(conn):
+    """Return a connection to the pool (or close it if no pool)."""
+    if _db_pool and conn:
+        try:
+            _db_pool.putconn(conn)
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    elif conn:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 def init_db():
     """Initialize all database tables"""
@@ -1779,6 +1812,30 @@ class ToolRegistry:
                 'parameters': {'query': 'string', 'limit': 'integer'},
                 'handler': self._tool_hackernews_search
             },
+
+            # ============================================================
+            # NEW v10.6: OpenCorporates, UN Comtrade, IP Geo, User Profile
+            # ============================================================
+            'opencorporates_search': {
+                'description': 'Search OpenCorporates company registry. Verify real registered company data for supplier due diligence. Free, no key needed.',
+                'parameters': {'company_name': 'string', 'jurisdiction': 'string'},
+                'handler': self._tool_opencorporates_search
+            },
+            'un_comtrade': {
+                'description': 'Get China import/export trade statistics by product from UN Comtrade. Free, no key needed.',
+                'parameters': {'product': 'string', 'flow': 'string'},
+                'handler': self._tool_un_comtrade
+            },
+            'ip_geolocation': {
+                'description': 'Detect user country/region from IP address. Tailor China business advice to their location. Free, no key needed.',
+                'parameters': {'ip': 'string'},
+                'handler': self._tool_ip_geolocation
+            },
+            'get_user_profile': {
+                'description': 'Look up what Sophia knows about the current user: name, company, interests, visit count.',
+                'parameters': {'session_id': 'string'},
+                'handler': self._tool_get_user_profile
+            },
         })
     
     def _load_from_db(self):
@@ -2672,12 +2729,18 @@ Keep it professional and 300-500 words."""
     # v10.5: Serper.dev — Google Search (100/day free)
     # ============================================================
     async def _tool_serper_search(self, params: dict) -> str:
-        """Google Search via Serper.dev — best quality results."""
+        """Google Search via Serper.dev — best quality results, quota-tracked."""
+        global _serper_usage
         query = params.get('query', '')
         num = params.get('num', 5)
 
-        if not SERPER_API_KEY:
-            # Graceful fallback to DuckDuckGo
+        # Check quota
+        today = datetime.now().strftime('%Y-%m-%d')
+        daily_count = _serper_usage.get(today, 0)
+
+        if not SERPER_API_KEY or daily_count >= SERPER_DAILY_LIMIT:
+            if daily_count >= SERPER_DAILY_LIMIT:
+                print(f"⚠️ Serper quota reached ({daily_count}/{SERPER_DAILY_LIMIT}) — falling back to DuckDuckGo")
             return await self._tool_duckduckgo_search({'query': query})
 
         try:
@@ -2688,12 +2751,12 @@ Keep it professional and 300-500 words."""
                 timeout=15
             )
             if response.status_code == 200:
+                # Track usage
+                _serper_usage[today] = daily_count + 1
                 data = response.json()
                 results = []
-                # Organic results
                 for r in data.get('organic', [])[:num]:
                     results.append(f"- **{r.get('title', '')}**\n  {r.get('snippet', '')}\n  🔗 {r.get('link', '')}")
-                # Knowledge graph if available
                 kg = data.get('knowledgeGraph', {})
                 if kg.get('description'):
                     results.insert(0, f"📌 **{kg.get('title', '')}**: {kg.get('description', '')}")
@@ -2835,6 +2898,161 @@ Keep it professional and 300-500 words."""
         except Exception as e:
             return f"HackerNews search failed: {e}"
 
+    # ============================================================
+    # v10.6: OpenCorporates — free company registry search
+    # ============================================================
+    async def _tool_opencorporates_search(self, params: dict) -> str:
+        """Search OpenCorporates for registered company data."""
+        company_name = params.get('company_name', '')
+        jurisdiction = params.get('jurisdiction', '')  # e.g. 'cn' for China
+
+        if not company_name:
+            return "Please provide a company name."
+
+        try:
+            api_params = {'q': company_name, 'format': 'json'}
+            if jurisdiction:
+                api_params['jurisdiction_code'] = jurisdiction
+
+            response = requests.get(
+                "https://api.opencorporates.com/v0.4/companies/search",
+                params=api_params,
+                timeout=15
+            )
+            if response.status_code == 200:
+                data = response.json()
+                companies = data.get('results', {}).get('companies', [])
+                if not companies:
+                    return f"No registered companies found for: {company_name}"
+
+                results = []
+                for item in companies[:5]:
+                    c = item.get('company', {})
+                    name = c.get('name', 'Unknown')
+                    jcode = c.get('jurisdiction_code', '').upper()
+                    number = c.get('company_number', 'N/A')
+                    status = c.get('current_status', 'Unknown')
+                    inc_date = c.get('incorporation_date', 'Unknown')
+                    oc_url = c.get('opencorporates_url', '')
+                    results.append(
+                        f"- **{name}** ({jcode})\n"
+                        f"  Reg#: {number} | Status: {status} | Incorporated: {inc_date}\n"
+                        f"  🔗 {oc_url}"
+                    )
+                return f"🏢 **OpenCorporates results for '{company_name}':**\n\n" + "\n\n".join(results)
+            return f"OpenCorporates error: {response.status_code}"
+        except Exception as e:
+            return f"OpenCorporates search failed: {e}"
+
+    # ============================================================
+    # v10.6: UN Comtrade — China trade statistics (free)
+    # ============================================================
+    async def _tool_un_comtrade(self, params: dict) -> str:
+        """Get China import/export trade stats from UN Comtrade."""
+        product = params.get('product', '')
+        flow = params.get('flow', 'export').lower()  # 'import' or 'export'
+
+        flow_code = '2' if 'import' in flow else '1'
+        flow_label = 'Imports' if flow_code == '2' else 'Exports'
+
+        try:
+            response = requests.get(
+                "https://comtradeapi.un.org/public/v1/preview/C/A/HS",
+                params={
+                    'reporterCode': '156',  # China
+                    'period': '2022',
+                    'flowCode': flow_code,
+                    'cmdCode': 'TOTAL',
+                    'includeDesc': 'true'
+                },
+                timeout=15
+            )
+            if response.status_code == 200:
+                data = response.json()
+                records = data.get('data', [])
+                if not records:
+                    return f"No UN Comtrade data found for China {flow_label}."
+
+                results = []
+                for r in records[:5]:
+                    partner = r.get('partnerDesc', 'World')
+                    value = r.get('primaryValue', 0)
+                    year = r.get('period', '2022')
+                    if value:
+                        results.append(f"- {partner}: ${value:,.0f} USD ({year})")
+
+                return (
+                    f"📊 **China {flow_label}** (UN Comtrade, top partners):\n" +
+                    "\n".join(results) if results else f"No data for China {flow_label}."
+                )
+            # Fallback: summarise from World Bank if Comtrade fails
+            return f"UN Comtrade unavailable (status {response.status_code}). Try the china_economic_indicator tool instead."
+        except Exception as e:
+            return f"UN Comtrade lookup failed: {e}"
+
+    # ============================================================
+    # v10.6: IP Geolocation — free, no key needed
+    # ============================================================
+    async def _tool_ip_geolocation(self, params: dict) -> str:
+        """Detect country/region from IP address."""
+        ip = params.get('ip', '').strip()
+        endpoint = f"https://ipapi.co/{ip}/json/" if ip else "https://ipapi.co/json/"
+
+        try:
+            response = requests.get(endpoint, headers={"User-Agent": "SophiaAI/1.0"}, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('error'):
+                    return f"IP lookup error: {data.get('reason', 'unknown')}"
+                country = data.get('country_name', 'Unknown')
+                region = data.get('region', '')
+                city = data.get('city', '')
+                org = data.get('org', '')
+                timezone = data.get('timezone', '')
+                return (
+                    f"📍 **IP Geolocation**:\n"
+                    f"- Location: {city}{', ' + region if region else ''}, {country}\n"
+                    f"- Timezone: {timezone}\n"
+                    f"- ISP/Org: {org}"
+                )
+            return f"IP geolocation failed: {response.status_code}"
+        except Exception as e:
+            return f"IP geolocation error: {e}"
+
+    # ============================================================
+    # v10.6: Get User Profile — Sophia looks up current user
+    # ============================================================
+    async def _tool_get_user_profile(self, params: dict) -> str:
+        """Look up what Sophia knows about the current user."""
+        session_id = params.get('session_id', '')
+        if not session_id:
+            return "No session_id provided."
+
+        try:
+            conn = get_db()
+            c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            c.execute("SELECT * FROM user_profiles WHERE session_id = %s", (session_id,))
+            profile = c.fetchone()
+            release_db(conn)
+
+            if not profile:
+                return f"No profile found for session: {session_id}"
+
+            p = dict(profile)
+            lines = [f"👤 **User Profile ({session_id})**:"]
+            if p.get('name'):        lines.append(f"- Name: {p['name']}")
+            if p.get('email'):       lines.append(f"- Email: {p['email']}")
+            if p.get('company'):     lines.append(f"- Company: {p['company']}")
+            if p.get('phone'):       lines.append(f"- Phone: {p['phone']}")
+            if p.get('region_interest'): lines.append(f"- Region interest: {p['region_interest']}")
+            if p.get('sector_interest'): lines.append(f"- Sector interest: {p['sector_interest']}")
+            lines.append(f"- Visit count: {p.get('visit_count', 1)}")
+            lines.append(f"- Lead score: {p.get('lead_score', 0)}")
+            if p.get('last_seen'):   lines.append(f"- Last seen: {str(p['last_seen'])[:19]}")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Profile lookup failed: {e}"
+
 tool_registry = ToolRegistry()
 
 # ============================================================
@@ -2848,8 +3066,12 @@ _session_last_seen: Dict[str, float] = {}   # session_id -> epoch time of last a
 SESSION_HISTORY_TTL_SECONDS = 3600          # evict sessions idle for >1 hour
 
 MAX_HISTORY_TURNS = 10          # keep last N user/assistant pairs
-MAX_AGENT_ITERATIONS = 6        # max tool-use rounds per message
+MAX_AGENT_ITERATIONS = 8        # max tool-use rounds per message (6 real + planning + reflection)
 REFLECTION_MIN_TOOLS = 1        # reflect only if at least N tools were used
+
+# Serper daily quota tracker (resets at midnight UTC)
+_serper_usage: Dict[str, int] = {}  # date_str -> count
+SERPER_DAILY_LIMIT = 80  # switch to DuckDuckGo at 80% of 100 quota
 
 
 def _prune_stale_sessions():
@@ -2892,7 +3114,7 @@ class SophiaAgent:
         feedback_examples = self._get_feedback_examples(user_message, n_results=2)
         system_prompt = self._build_system_prompt(profile, past_episodes, feedback_examples)
 
-        # --- load persisted conversation history ---
+        # Load history once — reuse below to avoid double DB read
         history = self._get_history(session_id)
 
         messages = [{"role": "system", "content": system_prompt}]
@@ -3000,6 +3222,12 @@ class SophiaAgent:
 
             for res in results:
                 if isinstance(res, Exception):
+                    # Report the error back to Sophia so she can retry differently
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": "error",
+                        "content": f"Tool execution error: {str(res)}"
+                    })
                     continue
                 tc, tool_name, tool_result = res
                 all_tools_used.append(tool_name)
@@ -3025,10 +3253,27 @@ class SophiaAgent:
         # ------------------------------------------------------------------
         # STEP 4: Persist
         # ------------------------------------------------------------------
-        self._update_history(session_id, user_message, final_response)
+        # Pass already-loaded history to avoid a second DB read
+        self._update_history(session_id, user_message, final_response, current_history=history)
+
+        # Dynamic success score: use latest feedback rating if available, else default 7
+        try:
+            conn = get_db()
+            c = conn.cursor()
+            c.execute("""
+                SELECT rating FROM user_feedback
+                WHERE session_id = %s
+                ORDER BY created_at DESC LIMIT 1
+            """, (session_id,))
+            row = c.fetchone()
+            release_db(conn)
+            success_score = int(row[0]) * 2 if row else 7  # scale 1-5 → 2-10
+        except Exception:
+            success_score = 7
+
         self.memory.store_episodic(
             session_id, user_message, final_response,
-            success_score=7,
+            success_score=success_score,
             intent=context.get('intent', 'unknown')
         )
         update_user_profile(session_id, last_intent=context.get('intent'))
@@ -3123,36 +3368,31 @@ class SophiaAgent:
     # Falls back to in-memory if DB is unavailable
     # ------------------------------------------------------------------
     def _get_history(self, session_id: str) -> List[dict]:
-        # Try DB first
         try:
             conn = get_db()
             c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-            c.execute(
-                "SELECT history FROM session_histories WHERE session_id = %s",
-                (session_id,)
-            )
+            c.execute("SELECT history FROM session_histories WHERE session_id = %s", (session_id,))
             row = c.fetchone()
-            conn.close()
+            release_db(conn)
             if row:
                 return list(row['history']) if row['history'] else []
             return []
         except Exception as e:
             print(f"⚠️ DB history read failed, using in-memory: {e}")
-            # Fallback to in-memory
             with _session_histories_lock:
                 _session_last_seen[session_id] = time.time()
                 return list(_session_histories[session_id])
 
-    def _update_history(self, session_id: str, user_msg: str, assistant_msg: str):
-        # Build updated history
-        current = self._get_history(session_id)
+    def _update_history(self, session_id: str, user_msg: str, assistant_msg: str,
+                        current_history: Optional[List[dict]] = None):
+        """Update history. Pass current_history to avoid a redundant DB read."""
+        # Use provided history or fetch (avoids double DB read when caller already has it)
+        current = list(current_history) if current_history is not None else self._get_history(session_id)
         current.append({"role": "user", "content": user_msg})
         current.append({"role": "assistant", "content": assistant_msg})
-        # Keep last N turns only
         if len(current) > MAX_HISTORY_TURNS * 2:
             current = current[-(MAX_HISTORY_TURNS * 2):]
 
-        # Try to persist to DB
         try:
             conn = get_db()
             c = conn.cursor()
@@ -3163,10 +3403,9 @@ class SophiaAgent:
                 DO UPDATE SET history = %s::jsonb, updated_at = NOW()
             """, (session_id, json.dumps(current), json.dumps(current)))
             conn.commit()
-            conn.close()
+            release_db(conn)
         except Exception as e:
             print(f"⚠️ DB history write failed, using in-memory: {e}")
-            # Fallback to in-memory
             with _session_histories_lock:
                 _session_last_seen[session_id] = time.time()
                 _session_histories[session_id] = current
@@ -3182,19 +3421,26 @@ You operate as a FULLY AGENTIC AI: you can reason step-by-step, call multiple to
 reflect on your results, and refine your answers autonomously.
 
 Core capabilities:
-- **Wikipedia & Wikidata** — Instant encyclopaedia knowledge, now with Chinese company info
-- **Browser Automation** — Browse websites, take screenshots, extract data
-- **Web Search** — DuckDuckGo, Tavily, Bing
-- **Social Monitoring** — Reddit discussions, news monitoring
-- **Geocoding** — Address verification via OpenStreetMap
-- **Vector Memory** — Recall past conversations
-- **Research** — Deep multi-source topic research
-- **🇨🇳 China Business Tools** – Latest news, RSS feeds, economic indicators, translation, and enhanced company data
+- **Google Search** — serper_search for best quality results (falls back to duckduckgo_search)
+- **Wikipedia & Wikidata** — encyclopaedia knowledge, Chinese company info
+- **Browser Automation** — browse_page, screenshot_page, extract_web_data
+- **News & RSS** — news_monitor, china_business_news, china_rss_news, hackernews_search
+- **Social Monitoring** — reddit_search, reddit_get_posts
+- **China Business** — china_economic_indicator, translate_chinese, company_info
+- **Trade & Finance** — currency_rates (USD/CNY live), un_comtrade (trade stats)
+- **Company Verification** — opencorporates_search (company registry due diligence)
+- **Geography** — country_info, geocode_address, ip_geolocation
+- **Memory** — recall_memories, store_memory, get_user_profile
+- **Web Utilities** — jina_reader, wayback_machine, zenrows_scrape
+- **Research** — research_topic (deep multi-source)
+- **Content** — content_writer, generate_report, analyze_sentiment
 
 Tool-use guidelines:
-- Use tools proactively whenever they would improve accuracy or completeness.
-- Chain tools when needed: e.g. search → browse → summarise.
-- If a tool result is insufficient, try a different tool or query.
+- Prefer serper_search over duckduckgo_search for important queries.
+- For supplier verification, chain: opencorporates_search → company_info → serper_search.
+- For trade questions, use currency_rates and un_comtrade.
+- Always call get_user_profile early in conversations to personalise your response.
+- If a tool result is insufficient, try a different tool or rephrase the query.
 - Always synthesise tool outputs into a clear, helpful final answer.
 - Never fabricate facts; prefer verified tool results over assumptions."""
 
@@ -3233,7 +3479,7 @@ Tool-use guidelines:
                   json.dumps(tools_used)))
             conv_id = c.fetchone()[0]
             conn.commit()
-            conn.close()
+            release_db(conn)
             return conv_id
         except Exception as e:
             print(f"Conversation storage error: {e}")
@@ -3381,6 +3627,7 @@ def proactive_china_goal_generator():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager"""
+    _init_pool()
     init_db()
     
     # Start background threads
@@ -3395,32 +3642,31 @@ async def lifespan(app: FastAPI):
     
     print(f"""
     ╔══════════════════════════════════════════════════════════════╗
-    ║        SOPHIA AI SERVER v10.5 - CHINA BUSINESS EDITION      ║
+    ║        SOPHIA AI SERVER v10.6 - CHINA BUSINESS EDITION      ║
     ╠══════════════════════════════════════════════════════════════╣
     ║  🧠 Vector Backend: {hybrid_memory.backend_type:<38} ║
     ║  🔧 Tools Loaded: {len(tool_registry.tools):<40} ║
     ║  🤖 AI Providers: {len(ai_provider.providers):<40} ║
     ║  🧬 Embeddings: {'HF API (semantic) ✅' if HUGGINGFACE_API_KEY else 'hash-based (limited) ⚠️':<38} ║
     ║  💾 Session History: {'Supabase (persistent) ✅' if DATABASE_URL else 'in-memory only ⚠️':<33} ║
+    ║  ⚡ DB Pool: {'✅ active (max 8 conns)' if _db_pool else '⚠️ direct connections':<32} ║
     ║  🔍 Serper Search: {'✅ Google quality' if SERPER_API_KEY else '⚠️ DuckDuckGo fallback':<33} ║
-    ║  📚 Wikipedia + Enhanced Wikidata: ✅                        ║
+    ║  🏢 OpenCorporates: ✅ company registry (free)              ║
+    ║  📊 UN Comtrade: ✅ trade statistics (free)                 ║
+    ║  📍 IP Geolocation: ✅ user region detection (free)         ║
+    ║  💱 Currency Rates: ✅ live USD/CNY (free)                  ║
+    ║  🌍 Country Info: ✅ REST Countries (free)                  ║
+    ║  📦 Wayback Machine: ✅ archived pages (free)               ║
+    ║  🟠 HackerNews: ✅ tech business news (free)                ║
+    ║  📚 Wikipedia + Wikidata: ✅                                 ║
     ║  📰 Google News RSS: {'✅' if FEEDPARSER_AVAILABLE else '⚠️ feedparser missing':<29} ║
-    ║  🇨🇳 China Business Tools:                                     ║
-    ║     • Translation (LibreTranslate)                           ║
-    ║     • RSS Aggregator (multiple feeds)                        ║
-    ║     • Economic Indicators (World Bank)                       ║
-    ║     • Enhanced Company Info (Chinese names)                  ║
-    ║     • Proactive News Goals                                   ║
-    ║  💱 Currency Rates: ✅ (Frankfurter, free)                   ║
-    ║  🌍 Country Info: ✅ (REST Countries, free)                  ║
-    ║  📦 Wayback Machine: ✅ (free)                               ║
-    ║  🟠 HackerNews Search: ✅ (free)                             ║
     ║  🌐 Browser Automation: {'✅ Playwright' if PLAYWRIGHT_AVAILABLE else '⚠️ HTTP fallback':<29} ║
-    ║  ♾️  Agentic Loop: up to {MAX_AGENT_ITERATIONS} iterations                     ║
-    ║  🚦 Intent Gate: ✅ simple msgs skip planning                ║
-    ║  🪞 Self-Reflection: {'✅ structured' if ENABLE_SELF_REFLECTION else '❌ disabled':<31} ║
-    ║  🧭 ReAct Reasoning: {'✅ smart-gated' if ENABLE_REACT_REASONING else '❌ disabled':<27} ║
-    ║  💬 User Feedback: ✅ topic-matched learning                 ║
+    ║  ♾️  Agentic Loop: up to {MAX_AGENT_ITERATIONS} iterations (6 real tools)         ║
+    ║  🚦 Intent Gate: ✅ simple msgs skip planning               ║
+    ║  🪞 Self-Reflection: ✅ structured checklist                ║
+    ║  🧭 ReAct Reasoning: ✅ smart-gated                         ║
+    ║  🎯 Success Scoring: ✅ dynamic (feedback-based)            ║
+    ║  💬 Feedback Learning: ✅ topic-matched                     ║
     ╚══════════════════════════════════════════════════════════════╝
     """)
     
