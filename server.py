@@ -135,6 +135,13 @@ REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT", "SophiaAI/1.0 by ChinaWestCon
 # ============================================================
 ZENROWS_API_KEY = os.getenv("ZENROWS_API_KEY", "")
 
+# ============================================================
+# Hugging Face API (free embeddings — zero RAM cost on Render)
+# ============================================================
+HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY", "")
+HF_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+HF_EMBEDDING_URL = f"https://api-inference.huggingface.co/pipeline/feature-extraction/{HF_EMBEDDING_MODEL}"
+
 # Intelligence Settings
 AUTO_IMPROVEMENT_INTERVAL_HOURS = 24
 ENVIRONMENT_CHECK_INTERVAL_HOURS = 6
@@ -422,6 +429,18 @@ def init_db():
         """)
         print("✅ User feedback table created")
 
+        # Persistent session histories table (v10.4)
+        # Survives Render restarts — replaces in-memory only storage
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS session_histories (
+                id SERIAL PRIMARY KEY,
+                session_id VARCHAR(100) UNIQUE,
+                history JSONB DEFAULT '[]'::jsonb,
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        print("✅ Persistent session histories table created")
+
         conn.commit()
         conn.close()
         print("✅ Database tables initialized")
@@ -707,7 +726,17 @@ class HybridVectorMemory:
         self._init_backend(backend)
     
     def _init_encoder(self):
-        """Initialize the sentence encoder - with lightweight fallback"""
+        """Initialize the sentence encoder.
+        Priority:
+          1. Hugging Face Inference API (free, zero RAM on Render) ✅
+          2. sentence-transformers local (if installed)
+          3. hash-based fallback (last resort)
+        """
+        if HUGGINGFACE_API_KEY:
+            self.encoder = "huggingface_api"
+            print("✅ Using Hugging Face API embeddings (all-MiniLM-L6-v2) — zero RAM cost")
+            return
+
         if SENTENCE_TRANSFORMERS_AVAILABLE:
             try:
                 from sentence_transformers import SentenceTransformer
@@ -716,29 +745,56 @@ class HybridVectorMemory:
                 return
             except Exception as e:
                 print(f"⚠️ Encoder init failed: {e}")
-        
-        print("✅ Using lightweight hash-based embeddings (no ML libraries needed)")
+
+        print("⚠️ No HF API key found — using hash-based embeddings (memory recall will be limited)")
         self.encoder = "hash"
-    
+
     def encode(self, text: str) -> List[float]:
-        """Encode text to embedding vector - with lightweight fallback"""
-        if self.encoder and self.encoder != "hash":
+        """Encode text to a semantic embedding vector.
+        Uses Hugging Face API when available, falls back gracefully."""
+
+        # --- Hugging Face API (best, free, no RAM cost) ---
+        if self.encoder == "huggingface_api":
+            try:
+                response = requests.post(
+                    HF_EMBEDDING_URL,
+                    headers={"Authorization": f"Bearer {HUGGINGFACE_API_KEY}"},
+                    json={"inputs": text[:512], "options": {"wait_for_model": True}},
+                    timeout=15
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    # HF returns list-of-lists for batches; we sent one string
+                    if isinstance(data, list) and len(data) > 0:
+                        vec = data[0] if isinstance(data[0], list) else data
+                        # Normalise
+                        norm = math.sqrt(sum(x * x for x in vec))
+                        if norm > 0:
+                            vec = [x / norm for x in vec]
+                        return vec
+                else:
+                    print(f"⚠️ HF embedding API error {response.status_code}: {response.text[:200]}")
+            except Exception as e:
+                print(f"⚠️ HF embedding failed, falling back to hash: {e}")
+            # Fall through to hash if API call failed
+
+        # --- Local sentence-transformers ---
+        if self.encoder and self.encoder not in ("hash", "huggingface_api"):
             try:
                 return self.encoder.encode(text).tolist()
-            except:
+            except Exception:
                 pass
-        
+
+        # --- Hash-based fallback ---
         embedding = []
         for i in range(384):
             hash_input = f"{text}_{i}".encode('utf-8')
             hash_val = hashlib.md5(hash_input).hexdigest()
             val = (int(hash_val[:8], 16) / 0xFFFFFFFF) * 2 - 1
             embedding.append(round(val, 6))
-        
-        norm = math.sqrt(sum(x*x for x in embedding))
+        norm = math.sqrt(sum(x * x for x in embedding))
         if norm > 0:
-            embedding = [x/norm for x in embedding]
-        
+            embedding = [x / norm for x in embedding]
         return embedding
     
     def _determine_backend(self) -> str:
@@ -2822,20 +2878,57 @@ class SophiaAgent:
 
     # ------------------------------------------------------------------
     # CONVERSATION HISTORY HELPERS
+    # Persistent in Supabase — survives Render restarts ✅
+    # Falls back to in-memory if DB is unavailable
     # ------------------------------------------------------------------
     def _get_history(self, session_id: str) -> List[dict]:
-        with _session_histories_lock:
-            _session_last_seen[session_id] = time.time()
-            return list(_session_histories[session_id])
+        # Try DB first
+        try:
+            conn = get_db()
+            c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            c.execute(
+                "SELECT history FROM session_histories WHERE session_id = %s",
+                (session_id,)
+            )
+            row = c.fetchone()
+            conn.close()
+            if row:
+                return list(row['history']) if row['history'] else []
+            return []
+        except Exception as e:
+            print(f"⚠️ DB history read failed, using in-memory: {e}")
+            # Fallback to in-memory
+            with _session_histories_lock:
+                _session_last_seen[session_id] = time.time()
+                return list(_session_histories[session_id])
 
     def _update_history(self, session_id: str, user_msg: str, assistant_msg: str):
-        with _session_histories_lock:
-            _session_last_seen[session_id] = time.time()
-            hist = _session_histories[session_id]
-            hist.append({"role": "user", "content": user_msg})
-            hist.append({"role": "assistant", "content": assistant_msg})
-            if len(hist) > MAX_HISTORY_TURNS * 2:
-                _session_histories[session_id] = hist[-(MAX_HISTORY_TURNS * 2):]
+        # Build updated history
+        current = self._get_history(session_id)
+        current.append({"role": "user", "content": user_msg})
+        current.append({"role": "assistant", "content": assistant_msg})
+        # Keep last N turns only
+        if len(current) > MAX_HISTORY_TURNS * 2:
+            current = current[-(MAX_HISTORY_TURNS * 2):]
+
+        # Try to persist to DB
+        try:
+            conn = get_db()
+            c = conn.cursor()
+            c.execute("""
+                INSERT INTO session_histories (session_id, history, updated_at)
+                VALUES (%s, %s::jsonb, NOW())
+                ON CONFLICT (session_id)
+                DO UPDATE SET history = %s::jsonb, updated_at = NOW()
+            """, (session_id, json.dumps(current), json.dumps(current)))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"⚠️ DB history write failed, using in-memory: {e}")
+            # Fallback to in-memory
+            with _session_histories_lock:
+                _session_last_seen[session_id] = time.time()
+                _session_histories[session_id] = current
         _prune_stale_sessions()
 
     # ------------------------------------------------------------------
@@ -3061,11 +3154,13 @@ async def lifespan(app: FastAPI):
     
     print(f"""
     ╔══════════════════════════════════════════════════════════════╗
-    ║        SOPHIA AI SERVER v10.3 - CHINA BUSINESS EDITION      ║
+    ║        SOPHIA AI SERVER v10.4 - CHINA BUSINESS EDITION      ║
     ╠══════════════════════════════════════════════════════════════╣
     ║  🧠 Vector Backend: {hybrid_memory.backend_type:<38} ║
     ║  🔧 Tools Loaded: {len(tool_registry.tools):<40} ║
     ║  🤖 AI Providers: {len(ai_provider.providers):<40} ║
+    ║  🧬 Embeddings: {'HF API (semantic) ✅' if HUGGINGFACE_API_KEY else 'hash-based (limited) ⚠️':<38} ║
+    ║  💾 Session History: {'Supabase (persistent) ✅' if DATABASE_URL else 'in-memory only ⚠️':<33} ║
     ║  📚 Wikipedia + Enhanced Wikidata: ✅                        ║
     ║  📰 Google News RSS: {'✅' if FEEDPARSER_AVAILABLE else '⚠️ feedparser missing':<29} ║
     ║  🇨🇳 China Business Tools:                                     ║
