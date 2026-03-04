@@ -1,9 +1,9 @@
 """
 ================================================================================
-SOPHIA AI SERVER v10.7.1 - CHINA BUSINESS ENHANCED EDITION
+SOPHIA AI SERVER v10.7.2 - CHINA BUSINESS ENHANCED EDITION
 ================================================================================
-PATCH v10.7.1:
-🔴 CRITICAL FIX: Added missing release_db() + DB connection pool (was crashing on every DB call)
+PATCH v10.7.2:
+🔴 FIX: Pool leak — all conn.close() replaced with release_db() across every function/endpoint
 🔢 MAX_AGENT_ITERATIONS raised to 8 (6 real tool rounds after planning + reflection)
 ⚠️  Tool exceptions now reported back to Sophia (no longer silently swallowed)
 📈 Serper quota tracker restored (auto-fallback to DuckDuckGo at 80 searches/day)
@@ -517,7 +517,7 @@ def init_db():
         print("✅ Persistent session histories table created")
 
         conn.commit()
-        conn.close()
+        release_db(conn)
         print("✅ Database tables initialized")
         run_migrations()
     except Exception as e:
@@ -551,7 +551,7 @@ def run_migrations():
                     print(f"⚠️ Migration warning ({table}.{column}): {e}")
         
         conn.commit()
-        conn.close()
+        release_db(conn)
     except Exception as e:
         print(f"⚠️ Migration error: {e}")
 
@@ -579,7 +579,7 @@ def get_or_create_user_profile(session_id: str) -> dict:
             """, (session_id,))
             conn.commit()
         
-        conn.close()
+        release_db(conn)
         return dict(profile) if profile else {}
     except Exception as e:
         print(f"Profile error: {e}")
@@ -609,7 +609,7 @@ def update_user_profile(session_id: str, **kwargs):
             WHERE session_id = %s
         """, values)
         conn.commit()
-        conn.close()
+        release_db(conn)
     except Exception as e:
         print(f"Update profile error: {e}")
 
@@ -1845,6 +1845,30 @@ class ToolRegistry:
                 'parameters': {'query': 'string', 'limit': 'integer'},
                 'handler': self._tool_hackernews_search
             },
+
+            # ============================================================
+            # v10.6 tools (re-added in v10.7.2)
+            # ============================================================
+            'opencorporates_search': {
+                'description': 'Search OpenCorporates company registry. Verify real registered company data for supplier due diligence. Free, no key.',
+                'parameters': {'company_name': 'string', 'jurisdiction': 'string'},
+                'handler': self._tool_opencorporates_search
+            },
+            'un_comtrade': {
+                'description': 'Get China import/export trade statistics by product from UN Comtrade. Free, no key.',
+                'parameters': {'product': 'string', 'flow': 'string'},
+                'handler': self._tool_un_comtrade
+            },
+            'ip_geolocation': {
+                'description': 'Detect user country/region from IP address to tailor China business advice. Free, no key.',
+                'parameters': {'ip': 'string'},
+                'handler': self._tool_ip_geolocation
+            },
+            'get_user_profile': {
+                'description': 'Look up what Sophia knows about the current user: name, company, interests, visit count.',
+                'parameters': {'session_id': 'string'},
+                'handler': self._tool_get_user_profile
+            },
         })
     
     def _load_from_db(self):
@@ -1862,7 +1886,7 @@ class ToolRegistry:
                     }
             except:
                 pass
-            conn.close()
+            release_db(conn)
             print(f"🔧 Loaded {len(self.tools)} tools")
         except Exception as e:
             print(f"Tool load error: {e}")
@@ -2006,7 +2030,7 @@ class ToolRegistry:
                 VALUES (%s, 'proactive', 'Sophia Update', %s)
             """, (session_id, message))
             conn.commit()
-            conn.close()
+            release_db(conn)
             return f"Notification queued for session {session_id}"
         except Exception as e:
             return f"Failed to send notification: {e}"
@@ -2027,7 +2051,7 @@ class ToolRegistry:
             """, (goal_type, description, priority))
             goal_id = c.fetchone()[0]
             conn.commit()
-            conn.close()
+            release_db(conn)
             return f"Created goal #{goal_id}: {description}"
         except Exception as e:
             return f"Failed to create goal: {e}"
@@ -2927,6 +2951,136 @@ Keep it professional and 300-500 words."""
         except Exception as e:
             return f"HackerNews search failed: {e}"
 
+
+    # ============================================================
+    # v10.6 tool handlers (re-added in v10.7.2)
+    # ============================================================
+    async def _tool_opencorporates_search(self, params: dict) -> str:
+        """Search OpenCorporates for registered company data."""
+        company_name = params.get('company_name', '')
+        jurisdiction = params.get('jurisdiction', '')
+        if not company_name:
+            return "Please provide a company name."
+        try:
+            api_params = {'q': company_name, 'format': 'json'}
+            if jurisdiction:
+                api_params['jurisdiction_code'] = jurisdiction
+            response = requests.get(
+                "https://api.opencorporates.com/v0.4/companies/search",
+                params=api_params, timeout=15
+            )
+            if response.status_code == 200:
+                data = response.json()
+                companies = data.get('results', {}).get('companies', [])
+                if not companies:
+                    return f"No registered companies found for: {company_name}"
+                results = []
+                for item in companies[:5]:
+                    c = item.get('company', {})
+                    name = c.get('name', 'Unknown')
+                    jcode = c.get('jurisdiction_code', '').upper()
+                    number = c.get('company_number', 'N/A')
+                    status = c.get('current_status', 'Unknown')
+                    inc_date = c.get('incorporation_date', 'Unknown')
+                    oc_url = c.get('opencorporates_url', '')
+                    results.append(
+                        f"- **{name}** ({jcode})\n"
+                        f"  Reg#: {number} | Status: {status} | Incorporated: {inc_date}\n"
+                        f"  🔗 {oc_url}"
+                    )
+                return f"🏢 **OpenCorporates results for '{company_name}':**\n\n" + "\n\n".join(results)
+            return f"OpenCorporates error: {response.status_code}"
+        except Exception as e:
+            return f"OpenCorporates search failed: {e}"
+
+    async def _tool_un_comtrade(self, params: dict) -> str:
+        """Get China import/export trade stats from UN Comtrade."""
+        flow = params.get('flow', 'export').lower()
+        flow_code = '2' if 'import' in flow else '1'
+        flow_label = 'Imports' if flow_code == '2' else 'Exports'
+        try:
+            response = requests.get(
+                "https://comtradeapi.un.org/public/v1/preview/C/A/HS",
+                params={
+                    'reporterCode': '156',
+                    'period': '2022',
+                    'flowCode': flow_code,
+                    'cmdCode': 'TOTAL',
+                    'includeDesc': 'true'
+                },
+                timeout=15
+            )
+            if response.status_code == 200:
+                data = response.json()
+                records = data.get('data', [])
+                if not records:
+                    return f"No UN Comtrade data found for China {flow_label}."
+                results = []
+                for r in records[:5]:
+                    partner = r.get('partnerDesc', 'World')
+                    value = r.get('primaryValue', 0)
+                    year = r.get('period', '2022')
+                    if value:
+                        results.append(f"- {partner}: ${value:,.0f} USD ({year})")
+                return (f"📊 **China {flow_label}** (UN Comtrade, top partners):\n" +
+                        "\n".join(results)) if results else f"No data for China {flow_label}."
+            return f"UN Comtrade unavailable ({response.status_code}). Try china_economic_indicator instead."
+        except Exception as e:
+            return f"UN Comtrade lookup failed: {e}"
+
+    async def _tool_ip_geolocation(self, params: dict) -> str:
+        """Detect country/region from IP address."""
+        ip = params.get('ip', '').strip()
+        endpoint = f"https://ipapi.co/{ip}/json/" if ip else "https://ipapi.co/json/"
+        try:
+            response = requests.get(endpoint, headers={"User-Agent": "SophiaAI/1.0"}, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('error'):
+                    return f"IP lookup error: {data.get('reason', 'unknown')}"
+                country = data.get('country_name', 'Unknown')
+                region = data.get('region', '')
+                city = data.get('city', '')
+                org = data.get('org', '')
+                timezone = data.get('timezone', '')
+                return (
+                    f"📍 **IP Geolocation**:\n"
+                    f"- Location: {city}{', ' + region if region else ''}, {country}\n"
+                    f"- Timezone: {timezone}\n"
+                    f"- ISP/Org: {org}"
+                )
+            return f"IP geolocation failed: {response.status_code}"
+        except Exception as e:
+            return f"IP geolocation error: {e}"
+
+    async def _tool_get_user_profile(self, params: dict) -> str:
+        """Look up what Sophia knows about the current user."""
+        session_id = params.get('session_id', '')
+        if not session_id:
+            return "No session_id provided."
+        try:
+            conn = get_db()
+            c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            c.execute("SELECT * FROM user_profiles WHERE session_id = %s", (session_id,))
+            profile = c.fetchone()
+            release_db(conn)
+            if not profile:
+                return f"No profile found for session: {session_id}"
+            p = dict(profile)
+            lines = [f"👤 **User Profile ({session_id})**:"]
+            if p.get('name'):             lines.append(f"- Name: {p['name']}")
+            if p.get('email'):            lines.append(f"- Email: {p['email']}")
+            if p.get('company'):          lines.append(f"- Company: {p['company']}")
+            if p.get('phone'):            lines.append(f"- Phone: {p['phone']}")
+            if p.get('region_interest'):  lines.append(f"- Region interest: {p['region_interest']}")
+            if p.get('sector_interest'):  lines.append(f"- Sector interest: {p['sector_interest']}")
+            lines.append(f"- Visit count: {p.get('visit_count', 1)}")
+            lines.append(f"- Lead score: {p.get('lead_score', 0)}")
+            if p.get('last_seen'):        lines.append(f"- Last seen: {str(p['last_seen'])[:19]}")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Profile lookup failed: {e}"
+
 tool_registry = ToolRegistry()
 
 # ============================================================
@@ -3225,7 +3379,7 @@ class SophiaAgent:
                 """, values)
                 rows = c.fetchall()
                 if rows:
-                    conn.close()
+                    release_db(conn)
                     return [dict(r) for r in rows[:n_results]]
 
             # Fallback: most recent bad ratings
@@ -3238,7 +3392,7 @@ class SophiaAgent:
                 LIMIT %s
             """, (n_results,))
             rows = c.fetchall()
-            conn.close()
+            release_db(conn)
             return [dict(r) for r in rows]
         except Exception as e:
             print(f"Feedback retrieval error: {e}")
@@ -3298,23 +3452,27 @@ class SophiaAgent:
     def _build_system_prompt(self, profile: dict, past_episodes: List[dict], feedback_examples: List[dict]) -> str:
         base_prompt = """You are Sophia, an intelligent AI assistant for China West Connector (CWC).
 
-You operate as a FULLY AGENTIC AI: you can reason step-by-step, call multiple tools in sequence, 
+You operate as a FULLY AGENTIC AI: you can reason step-by-step, call multiple tools in sequence,
 reflect on your results, and refine your answers autonomously.
 
 Core capabilities:
-- **Wikipedia & Wikidata** — Instant encyclopaedia knowledge, now with Chinese company info
-- **Browser Automation** — Browse websites, take screenshots, extract data
-- **Web Search** — DuckDuckGo, Tavily, Bing
-- **Social Monitoring** — Reddit discussions, news monitoring
-- **Geocoding** — Address verification via OpenStreetMap
-- **Vector Memory** — Recall past conversations
-- **Research** — Deep multi-source topic research
-- **🇨🇳 China Business Tools** – Latest news, RSS feeds, economic indicators, translation, and enhanced company data
+- **Google Search** — serper_search (best quality, 100/day free) → fallback: duckduckgo_search
+- **Wikipedia & Wikidata** — wikipedia_search, wikipedia_article, wikidata_search, company_info
+- **China Business** — china_business_news, china_rss_news, china_economic_indicator, translate_chinese
+- **Company Verification** — opencorporates_search (registry due diligence), company_info
+- **Trade & Finance** — currency_rates (live USD/CNY), un_comtrade (import/export stats)
+- **News & Social** — news_monitor, hackernews_search, reddit_search, reddit_get_posts
+- **Browser & Web** — browse_page, screenshot_page, extract_web_data, jina_reader, wayback_machine
+- **Geography** — country_info, geocode_address, ip_geolocation
+- **User Intelligence** — get_user_profile, recall_memories, store_memory
+- **Research** — research_topic (deep multi-source), generate_report, analyze_sentiment
 
 Tool-use guidelines:
-- Use tools proactively whenever they would improve accuracy or completeness.
-- Chain tools when needed: e.g. search → browse → summarise.
-- If a tool result is insufficient, try a different tool or query.
+- Always prefer serper_search over duckduckgo_search for important queries.
+- For supplier verification, chain: opencorporates_search → company_info → serper_search.
+- For trade questions, use currency_rates and un_comtrade together.
+- Call get_user_profile early to personalise responses.
+- If a tool result is poor, rephrase and retry with a different tool.
 - Always synthesise tool outputs into a clear, helpful final answer.
 - Never fabricate facts; prefer verified tool results over assumptions."""
 
@@ -3353,7 +3511,7 @@ Tool-use guidelines:
                   json.dumps(tools_used)))
             conv_id = c.fetchone()[0]
             conn.commit()
-            conn.close()
+            release_db(conn)
             return conv_id
         except Exception as e:
             print(f"Conversation storage error: {e}")
@@ -3526,7 +3684,7 @@ def proactive_china_goal_generator():
                     print(f"🎯 Created proactive China news goal {goal_id} for session {session_id}")
 
             conn.commit()
-            conn.close()
+            release_db(conn)
 
         except Exception as e:
             print(f"⚠️ Proactive goal generator error: {e}")
@@ -3585,9 +3743,9 @@ async def lifespan(app: FastAPI):
     print("🛑 Sophia AI Server shutting down...")
 
 app = FastAPI(
-    title="Sophia AI Server v10.7.1",
+    title="Sophia AI Server v10.7.2",
     description="China Business Enhanced Edition — Parallel Goals, Confidence Scoring, Auto-retry",
-    version="10.7.1",
+    version="10.7.2",
     lifespan=lifespan
 )
 
@@ -3620,7 +3778,7 @@ async def root():
     """Root endpoint"""
     return {
         "service": "Sophia AI Server",
-        "version": "10.7.1",
+        "version": "10.7.2",
         "vector_backend": hybrid_memory.backend_type,
         "tools_count": len(tool_registry.tools),
         "playwright": PLAYWRIGHT_AVAILABLE,
@@ -3701,7 +3859,7 @@ async def create_goal(req: GoalRequest):
         """, (req.session_id, req.goal_type, req.description, req.priority))
         goal_id = c.fetchone()[0]
         conn.commit()
-        conn.close()
+        release_db(conn)
         return {"status": "created", "goal_id": goal_id, "priority": req.priority}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -3720,7 +3878,7 @@ async def list_goals(status: Optional[str] = None, limit: int = 20):
         else:
             c.execute("SELECT * FROM autonomous_goals ORDER BY created_at DESC LIMIT %s", (limit,))
         goals = [dict(r) for r in c.fetchall()]
-        conn.close()
+        release_db(conn)
         return {"goals": goals, "count": len(goals)}
     except Exception as e:
         return {"error": str(e)}
@@ -3737,7 +3895,7 @@ async def clear_chat_history(session_id: str):
         c = conn.cursor()
         c.execute("DELETE FROM session_histories WHERE session_id = %s", (session_id,))
         conn.commit()
-        conn.close()
+        release_db(conn)
     except Exception as e:
         print(f"⚠️ Could not clear DB history for {session_id}: {e}")
     return {"status": "cleared", "session_id": session_id}
@@ -3851,7 +4009,7 @@ async def submit_feedback(fb: FeedbackRequest):
             VALUES (%s, %s, %s, %s)
         """, (fb.session_id, fb.conversation_id, fb.rating, fb.comment))
         conn.commit()
-        conn.close()
+        release_db(conn)
         return {"status": "thank you for your feedback!"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -3936,7 +4094,7 @@ async def admin_stats(password: str):
         c.execute("SELECT AVG(rating) FROM user_feedback")
         avg_rating = c.fetchone()[0]
         
-        conn.close()
+        release_db(conn)
         
         return {
             "conversations": conversation_count,
