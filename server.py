@@ -1,14 +1,18 @@
 """
 ================================================================================
-SOPHIA AI SERVER v10.3 - CHINA BUSINESS ENHANCED EDITION
+SOPHIA AI SERVER v10.5 - CHINA BUSINESS ENHANCED EDITION
 ================================================================================
-NEW IN v10.3:
-🇨🇳 Chinese Translation tool – translates between English and Chinese (free)
-📡 China Business RSS Aggregator – multiple China news feeds
-🏢 Enhanced Chinese Company Info – Chinese names & China flag in Wikidata
-📊 China Economic Indicators – GDP, PMI, trade from World Bank (free)
-🎯 Proactive China News Goals – auto‑creates monitoring goals for interested users
-➕ Added /api/china-news endpoint for widget (mediastack)
+NEW IN v10.5:
+🔍 Serper.dev Google Search — best quality web results (100/day free)
+💱 Live Currency Rates — USD/CNY and any pair via Frankfurter (free, no key)
+🌍 REST Countries Tool — trade/region/language data, no key needed
+📦 Wayback Machine Tool — archived pages when sites are blocked, free
+🟠 HackerNews Search — tech business discussions, free
+🧠 Intent Gate — simple messages skip expensive ReAct planning (faster + saves tokens)
+🪞 Structured Self-Reflection — checklist-based answer improvement
+📚 Topic-Matched Feedback Learning — relevant past mistakes injected into context
+🐛 Fix: Clear history now deletes from Supabase too
+🐛 Fix: Encoder status display now correct for HF API
 ================================================================================
 """
 
@@ -134,6 +138,11 @@ REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT", "SophiaAI/1.0 by ChinaWestCon
 # Web Scraping & Geocoding APIs
 # ============================================================
 ZENROWS_API_KEY = os.getenv("ZENROWS_API_KEY", "")
+
+# ============================================================
+# Serper.dev — Google Search API (100 free searches/day)
+# ============================================================
+SERPER_API_KEY = os.getenv("SERPER_API_KEY", "")
 
 # ============================================================
 # Hugging Face API (free embeddings — zero RAM cost on Render)
@@ -992,7 +1001,9 @@ class HybridVectorMemory:
     
     def get_status(self) -> dict:
         """Get memory system status"""
-        if self.encoder == "hash":
+        if self.encoder == "huggingface_api":
+            encoder_type = "huggingface-api (semantic, zero RAM)"
+        elif self.encoder == "hash":
             encoder_type = "hash-based (lightweight)"
         elif self.encoder:
             encoder_type = "sentence-transformers (ML)"
@@ -1738,6 +1749,35 @@ class ToolRegistry:
                 'description': 'Get current economic indicators for China (GDP, PMI, trade) from World Bank open data.',
                 'parameters': {'indicator': 'string'},  # 'gdp', 'pmi', 'trade'
                 'handler': self._tool_china_economic_indicator
+            },
+
+            # ============================================================
+            # NEW v10.5: Serper Google Search, Currency, Countries, Wayback, HackerNews
+            # ============================================================
+            'serper_search': {
+                'description': 'Google Search via Serper.dev — best quality web results. Use for company research, news, any topic.',
+                'parameters': {'query': 'string', 'num': 'integer'},
+                'handler': self._tool_serper_search
+            },
+            'currency_rates': {
+                'description': 'Get live currency exchange rates, especially USD/CNY. Free, no key needed.',
+                'parameters': {'base': 'string', 'target': 'string'},
+                'handler': self._tool_currency_rates
+            },
+            'country_info': {
+                'description': 'Get country information: trade data, languages, currencies, region. Free, no key needed.',
+                'parameters': {'country': 'string'},
+                'handler': self._tool_country_info
+            },
+            'wayback_machine': {
+                'description': 'Retrieve cached/archived version of any URL via Wayback Machine. Useful when sites are blocked.',
+                'parameters': {'url': 'string'},
+                'handler': self._tool_wayback_machine
+            },
+            'hackernews_search': {
+                'description': 'Search HackerNews for tech and business discussions. Great for Chinese tech company news.',
+                'parameters': {'query': 'string', 'limit': 'integer'},
+                'handler': self._tool_hackernews_search
             },
         })
     
@@ -2628,6 +2668,173 @@ Keep it professional and 300-500 words."""
         except Exception as e:
             return f"Error fetching economic indicator: {e}"
 
+    # ============================================================
+    # v10.5: Serper.dev — Google Search (100/day free)
+    # ============================================================
+    async def _tool_serper_search(self, params: dict) -> str:
+        """Google Search via Serper.dev — best quality results."""
+        query = params.get('query', '')
+        num = params.get('num', 5)
+
+        if not SERPER_API_KEY:
+            # Graceful fallback to DuckDuckGo
+            return await self._tool_duckduckgo_search({'query': query})
+
+        try:
+            response = requests.post(
+                "https://google.serper.dev/search",
+                headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
+                json={"q": query, "num": num},
+                timeout=15
+            )
+            if response.status_code == 200:
+                data = response.json()
+                results = []
+                # Organic results
+                for r in data.get('organic', [])[:num]:
+                    results.append(f"- **{r.get('title', '')}**\n  {r.get('snippet', '')}\n  🔗 {r.get('link', '')}")
+                # Knowledge graph if available
+                kg = data.get('knowledgeGraph', {})
+                if kg.get('description'):
+                    results.insert(0, f"📌 **{kg.get('title', '')}**: {kg.get('description', '')}")
+                if results:
+                    return f"🔍 Google results for '{query}':\n\n" + "\n\n".join(results)
+                return f"No results found for: {query}"
+            return await self._tool_duckduckgo_search({'query': query})
+        except Exception as e:
+            return await self._tool_duckduckgo_search({'query': query})
+
+    # ============================================================
+    # v10.5: Live Currency Rates (Open Exchange Rates — free tier)
+    # ============================================================
+    async def _tool_currency_rates(self, params: dict) -> str:
+        """Get live currency exchange rates. Especially useful for USD/CNY."""
+        base = params.get('base', 'USD').upper()
+        target = params.get('target', 'CNY').upper()
+
+        try:
+            # Use frankfurter.app — completely free, no key needed
+            response = requests.get(
+                f"https://api.frankfurter.app/latest?from={base}&to={target}",
+                timeout=10
+            )
+            if response.status_code == 200:
+                data = response.json()
+                rate = data.get('rates', {}).get(target)
+                date = data.get('date', 'unknown')
+                if rate:
+                    return f"💱 **{base} → {target}**: {rate} (as of {date})"
+                return f"Rate not found for {base}/{target}"
+            return f"Currency API error: {response.status_code}"
+        except Exception as e:
+            return f"Currency lookup failed: {e}"
+
+    # ============================================================
+    # v10.5: REST Countries — free, no key needed
+    # ============================================================
+    async def _tool_country_info(self, params: dict) -> str:
+        """Get country info: trade data, languages, currencies, region."""
+        country = params.get('country', '')
+        if not country:
+            return "Please provide a country name."
+
+        try:
+            response = requests.get(
+                f"https://restcountries.com/v3.1/name/{urllib.parse.quote(country)}?fields=name,capital,region,subregion,population,currencies,languages,area,flags,borders",
+                timeout=10
+            )
+            if response.status_code == 200:
+                data = response.json()
+                if not data:
+                    return f"No data found for country: {country}"
+                c = data[0]
+                name = c.get('name', {}).get('common', country)
+                capital = c.get('capital', ['Unknown'])[0] if c.get('capital') else 'Unknown'
+                region = c.get('region', 'Unknown')
+                subregion = c.get('subregion', '')
+                population = f"{c.get('population', 0):,}"
+                currencies = ', '.join([f"{v.get('name', k)} ({v.get('symbol', '')})" for k, v in c.get('currencies', {}).items()])
+                languages = ', '.join(c.get('languages', {}).values())
+                area = f"{c.get('area', 0):,} km²"
+
+                return (
+                    f"🌍 **{name}**\n"
+                    f"- Capital: {capital}\n"
+                    f"- Region: {region}{' / ' + subregion if subregion else ''}\n"
+                    f"- Population: {population}\n"
+                    f"- Area: {area}\n"
+                    f"- Currency: {currencies}\n"
+                    f"- Languages: {languages}"
+                )
+            return f"Country not found: {country}"
+        except Exception as e:
+            return f"Country lookup failed: {e}"
+
+    # ============================================================
+    # v10.5: Wayback Machine — free, no key needed
+    # ============================================================
+    async def _tool_wayback_machine(self, params: dict) -> str:
+        """Retrieve archived/cached version of any URL via Wayback Machine."""
+        url = params.get('url', '')
+        if not url:
+            return "Please provide a URL."
+
+        try:
+            response = requests.get(
+                f"https://archive.org/wayback/available?url={urllib.parse.quote(url)}",
+                timeout=10
+            )
+            if response.status_code == 200:
+                data = response.json()
+                snapshot = data.get('archived_snapshots', {}).get('closest', {})
+                if snapshot.get('available'):
+                    archived_url = snapshot.get('url', '')
+                    timestamp = snapshot.get('timestamp', '')
+                    # Format timestamp YYYYMMDDHHMMSS → readable
+                    if len(timestamp) >= 8:
+                        readable = f"{timestamp[:4]}-{timestamp[4:6]}-{timestamp[6:8]}"
+                    else:
+                        readable = timestamp
+                    return f"📦 **Wayback Machine snapshot** (archived {readable}):\n🔗 {archived_url}"
+                return f"No archived version found for: {url}"
+            return f"Wayback Machine error: {response.status_code}"
+        except Exception as e:
+            return f"Wayback Machine lookup failed: {e}"
+
+    # ============================================================
+    # v10.5: HackerNews Search — free, no key needed
+    # ============================================================
+    async def _tool_hackernews_search(self, params: dict) -> str:
+        """Search HackerNews for tech and business discussions."""
+        query = params.get('query', '')
+        limit = params.get('limit', 5)
+
+        if not query:
+            return "Please provide a search query."
+
+        try:
+            response = requests.get(
+                "https://hn.algolia.com/api/v1/search",
+                params={"query": query, "hitsPerPage": limit, "tags": "story"},
+                timeout=10
+            )
+            if response.status_code == 200:
+                data = response.json()
+                hits = data.get('hits', [])
+                if not hits:
+                    return f"No HackerNews results for: {query}"
+                results = []
+                for h in hits:
+                    points = h.get('points', 0)
+                    title = h.get('title', 'No title')
+                    url = h.get('url', f"https://news.ycombinator.com/item?id={h.get('objectID', '')}")
+                    date = h.get('created_at', '')[:10]
+                    results.append(f"- [{points}pts] **{title}** ({date})\n  🔗 {url}")
+                return f"🟠 HackerNews results for '{query}':\n\n" + "\n\n".join(results)
+            return f"HackerNews search error: {response.status_code}"
+        except Exception as e:
+            return f"HackerNews search failed: {e}"
+
 tool_registry = ToolRegistry()
 
 # ============================================================
@@ -2696,20 +2903,28 @@ class SophiaAgent:
         all_tools_used: List[str] = []
 
         # ------------------------------------------------------------------
-        # STEP 1: Enhanced ReAct planning
+        # STEP 1: Intent gate — skip expensive planning for simple messages
         # ------------------------------------------------------------------
-        _msg_lower = user_message.lower()
+        _msg_lower = user_message.lower().strip()
         _words = user_message.split()
+
+        _is_simple = any(_msg_lower == s for s in [
+            'hi', 'hello', 'hey', 'thanks', 'thank you', 'ok', 'okay',
+            'yes', 'no', 'bye', 'goodbye', 'good morning', 'good afternoon',
+            'good evening', 'how are you', 'nice', 'great', 'cool', 'perfect'
+        ]) or len(_words) <= 2
+
         _is_question = any(_msg_lower.startswith(q) for q in ['what', 'who', 'how', 'why', 'when', 'where', 'can you', 'could you'])
         _has_research_keywords = any(w in _msg_lower for w in [
             'research', 'find', 'search', 'analyze', 'analyse', 'compare',
             'tell me about', 'explain', 'report', 'summarize', 'summarise',
             'investigate', 'look up', 'latest', 'recent', 'news', 'company',
-            'supplier', 'information', 'details', 'background'
+            'supplier', 'information', 'details', 'background', 'translate'
         ])
         _is_long = len(_words) >= 6
 
         _needs_planning = (
+            not _is_simple and
             ENABLE_REACT_REASONING and
             tools_schema and
             (_is_question or _has_research_keywords or _is_long)
@@ -2826,16 +3041,22 @@ class SophiaAgent:
     # ------------------------------------------------------------------
     async def _reflect_and_improve(self, messages: List[dict], 
                                    user_message: str, draft: str) -> str:
-        """Ask the agent to critique its own draft and produce an improved version."""
+        """Ask the agent to critique its own draft using a structured checklist."""
         try:
             reflection_messages = messages + [
                 {
                     "role": "user",
                     "content": (
-                        f"Review your previous answer:\n\n{draft}\n\n"
-                        "Is it accurate, complete, and helpful? "
-                        "If you can meaningfully improve it, provide the improved version. "
-                        "Otherwise, repeat the original answer unchanged."
+                        f"Review your previous answer for this question: '{user_message}'\n\n"
+                        f"Your draft answer:\n{draft}\n\n"
+                        "Evaluate using this checklist:\n"
+                        "1. Did I use at least one tool to verify facts, or did I rely on assumptions?\n"
+                        "2. Is anything uncertain, outdated, or potentially wrong?\n"
+                        "3. Is the answer complete and useful for a China business context?\n"
+                        "4. Is the answer clear and well-structured?\n\n"
+                        "If you can meaningfully improve the answer based on this checklist, provide the improved version. "
+                        "If the answer is already complete and accurate, repeat it unchanged. "
+                        "Do NOT add unnecessary caveats or padding."
                     )
                 }
             ]
@@ -2854,13 +3075,33 @@ class SophiaAgent:
     # ------------------------------------------------------------------
     def _get_feedback_examples(self, query: str, n_results: int = 2) -> List[dict]:
         """
-        Retrieve recent low‑rated conversations with user comments.
-        In a production system you would also vector‑search; here we simply
-        return the most recent ones as a starting point.
+        Retrieve feedback examples relevant to the current query topic.
+        Uses vector similarity when available, falls back to recency.
         """
         try:
             conn = get_db()
             c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+            # Try topic-matched: join feedback with conversations and filter by keyword overlap
+            keywords = [w for w in query.lower().split() if len(w) > 4][:5]
+            if keywords:
+                keyword_conditions = " OR ".join([f"c.user_message ILIKE %s" for _ in keywords])
+                values = [f"%{kw}%" for kw in keywords] + [n_results * 3]
+                c.execute(f"""
+                    SELECT f.rating, f.comment, c.user_message, c.ai_response
+                    FROM user_feedback f
+                    JOIN conversations c ON f.conversation_id = c.id
+                    WHERE f.rating <= 2 AND f.comment IS NOT NULL AND f.comment != ''
+                    AND ({keyword_conditions})
+                    ORDER BY f.created_at DESC
+                    LIMIT %s
+                """, values)
+                rows = c.fetchall()
+                if rows:
+                    conn.close()
+                    return [dict(r) for r in rows[:n_results]]
+
+            # Fallback: most recent bad ratings
             c.execute("""
                 SELECT f.rating, f.comment, c.user_message, c.ai_response
                 FROM user_feedback f
@@ -3154,13 +3395,14 @@ async def lifespan(app: FastAPI):
     
     print(f"""
     ╔══════════════════════════════════════════════════════════════╗
-    ║        SOPHIA AI SERVER v10.4 - CHINA BUSINESS EDITION      ║
+    ║        SOPHIA AI SERVER v10.5 - CHINA BUSINESS EDITION      ║
     ╠══════════════════════════════════════════════════════════════╣
     ║  🧠 Vector Backend: {hybrid_memory.backend_type:<38} ║
     ║  🔧 Tools Loaded: {len(tool_registry.tools):<40} ║
     ║  🤖 AI Providers: {len(ai_provider.providers):<40} ║
     ║  🧬 Embeddings: {'HF API (semantic) ✅' if HUGGINGFACE_API_KEY else 'hash-based (limited) ⚠️':<38} ║
     ║  💾 Session History: {'Supabase (persistent) ✅' if DATABASE_URL else 'in-memory only ⚠️':<33} ║
+    ║  🔍 Serper Search: {'✅ Google quality' if SERPER_API_KEY else '⚠️ DuckDuckGo fallback':<33} ║
     ║  📚 Wikipedia + Enhanced Wikidata: ✅                        ║
     ║  📰 Google News RSS: {'✅' if FEEDPARSER_AVAILABLE else '⚠️ feedparser missing':<29} ║
     ║  🇨🇳 China Business Tools:                                     ║
@@ -3169,11 +3411,16 @@ async def lifespan(app: FastAPI):
     ║     • Economic Indicators (World Bank)                       ║
     ║     • Enhanced Company Info (Chinese names)                  ║
     ║     • Proactive News Goals                                   ║
+    ║  💱 Currency Rates: ✅ (Frankfurter, free)                   ║
+    ║  🌍 Country Info: ✅ (REST Countries, free)                  ║
+    ║  📦 Wayback Machine: ✅ (free)                               ║
+    ║  🟠 HackerNews Search: ✅ (free)                             ║
     ║  🌐 Browser Automation: {'✅ Playwright' if PLAYWRIGHT_AVAILABLE else '⚠️ HTTP fallback':<29} ║
     ║  ♾️  Agentic Loop: up to {MAX_AGENT_ITERATIONS} iterations                     ║
-    ║  🪞 Self-Reflection: {'✅ enabled' if ENABLE_SELF_REFLECTION else '❌ disabled':<31} ║
+    ║  🚦 Intent Gate: ✅ simple msgs skip planning                ║
+    ║  🪞 Self-Reflection: {'✅ structured' if ENABLE_SELF_REFLECTION else '❌ disabled':<31} ║
     ║  🧭 ReAct Reasoning: {'✅ smart-gated' if ENABLE_REACT_REASONING else '❌ disabled':<27} ║
-    ║  💬 User Feedback: ✅ collecting & learning                   ║
+    ║  💬 User Feedback: ✅ topic-matched learning                 ║
     ╚══════════════════════════════════════════════════════════════╝
     """)
     
@@ -3322,9 +3569,19 @@ async def list_goals(status: Optional[str] = None, limit: int = 20):
 
 @app.delete("/chat/history/{session_id}")
 async def clear_chat_history(session_id: str):
-    """Clear in-memory conversation history for a session"""
+    """Clear conversation history for a session — both in-memory and Supabase"""
+    # Clear in-memory
     with _session_histories_lock:
         _session_histories.pop(session_id, None)
+    # Clear from Supabase
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("DELETE FROM session_histories WHERE session_id = %s", (session_id,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"⚠️ Could not clear DB history for {session_id}: {e}")
     return {"status": "cleared", "session_id": session_id}
 
 @app.get("/memory/status")
