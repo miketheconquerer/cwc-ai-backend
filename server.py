@@ -3352,7 +3352,7 @@ async def submit_feedback(fb: FeedbackRequest):
 # ============================================================
 
 _news_cache: Dict[str, Any] = {"items": [], "fetched_at": 0.0}
-NEWS_WIDGET_CACHE_TTL = 1800  # 30 min
+NEWS_WIDGET_CACHE_TTL = 900  # 15 minutes
 
 
 def _parse_rss_no_deps(url: str, category: str, limit: int = 2) -> List[dict]:
@@ -3421,22 +3421,47 @@ def _parse_rss_no_deps(url: str, category: str, limit: int = 2) -> List[dict]:
 
 def _fetch_news_sync(limit: int = 6) -> List[dict]:
     """
-    Fetch real China business news using ONLY stdlib.
-    Google News RSS needs no API key and is always free.
+    Fetch pro-business China news using ONLY stdlib.
+    Queries are opportunity-focused; political/negative headlines are filtered out.
+    Uses gl=SG (Singapore) for a neutral Asia-Pacific perspective.
     """
+    # Specific opportunity-focused queries — avoid broad "China" which surfaces politics
     searches = [
-        ("China+business+trade",      "Business"),
-        ("China+economy+2026",         "Economy"),
-        ("China+investment+FDI",       "Investment"),
-        ("China+supply+chain",         "Trade"),
-        ("China+technology+innovation","Tech"),
-        ("China+Europe+partnership",   "Global"),
+        ("China+manufacturing+export+deal",          "Trade"),
+        ("China+investment+opportunity+2026",         "Investment"),
+        ("China+supply+chain+partnership",            "Supply Chain"),
+        ("China+technology+innovation+company",       "Tech"),
+        ("China+green+energy+solar+export",           "Energy"),
+        ("Belt+Road+logistics+infrastructure+deal",   "Logistics"),
+        ("China+FDI+foreign+direct+investment",       "FDI"),
+        ("Chinese+manufacturer+international+market", "Manufacturing"),
     ]
+
+    # Headlines containing ANY of these words/phrases are silently dropped
+    NEGATIVE_KEYWORDS = [
+        "sanction", "tariff", "ban", "restrict", "crackdown", "spy", "espionage",
+        "threat", "risk", "war", "conflict", "tension", "aggression", "human rights",
+        "forced labor", "uyghur", "taiwan strait", "south china sea", "military",
+        "nuclear", "missile", "hack", "cyber attack", "steal", "theft", "probe",
+        "investigation", "fraud", "corruption", "lawsuit", "penalty", "fine",
+        "collapse", "crash", "crisis", "deflation", "debt trap", "surveillance",
+        "censorship", "authoritarian", "xi jinping", "ccp", "communist",
+    ]
+
+    def is_negative(headline: str) -> bool:
+        h = headline.lower()
+        return any(kw in h for kw in NEGATIVE_KEYWORDS)
+
     items = []
     for query, category in searches:
-        url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
-        fetched = _parse_rss_no_deps(url, category, limit=2)
-        items.extend(fetched)
+        # gl=SG = Singapore locale → neutral Asia-Pacific business framing
+        url = f"https://news.google.com/rss/search?q={query}&hl=en-SG&gl=SG&ceid=SG:en"
+        fetched = _parse_rss_no_deps(url, category, limit=3)
+        for item in fetched:
+            if not is_negative(item.get("headline", "")):
+                items.append(item)
+            if len(items) >= limit:
+                break
         if len(items) >= limit:
             break
 
@@ -3490,6 +3515,16 @@ async def get_news(limit: int = 6):
 
     # Always return something — curated fallback
     return JSONResponse({"items": _NEWS_CURATED[:limit], "cached": False, "source": "curated"})
+
+
+@app.post("/admin/news/refresh")
+async def refresh_news_cache(password: str):
+    """Force-clear the news cache so next /news call fetches fresh results."""
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(status_code=401, detail="Invalid password")
+    global _news_cache
+    _news_cache = {"items": [], "fetched_at": 0.0}
+    return {"status": "news cache cleared — next /news call will fetch fresh"}
 
 
 @app.get("/admin/stats")
