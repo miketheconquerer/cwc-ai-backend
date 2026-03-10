@@ -1,14 +1,8 @@
 """
 ================================================================================
-SOPHIA AI SERVER v10.4 - CHINA BUSINESS ENHANCED EDITION
+SOPHIA AI SERVER v10.5 - CHINA BUSINESS ENHANCED EDITION
 ================================================================================
-NEW IN v10.4:
-📰 /news endpoint – real-time China business news for the widget news panel
-   • Google News RSS (free, real-time) with 30-min server-side cache
-   • Curated fallback if RSS unavailable
-   • Returns JSON: {headline, category, source, time_ago, link, query}
-
-NEW IN v10.3:
+NEW IN v10.5:
 🇨🇳 Chinese Translation tool – translates between English and Chinese (free)
 📡 China Business RSS Aggregator – multiple China news feeds
 🏢 Enhanced Chinese Company Info – Chinese names & China flag in Wikidata
@@ -3352,119 +3346,150 @@ async def submit_feedback(fb: FeedbackRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================
-# NEWS ENDPOINT — used by the CWC widget news panel
+# /news  — Real China business news for the widget panel
+# Uses ONLY Python stdlib (urllib + xml.etree) — zero extra deps.
+# Falls back to curated items if RSS is unreachable.
 # ============================================================
 
-# Simple in-process cache so the widget doesn't hammer RSS on every open
-_news_cache: Dict[str, Any] = {"items": [], "fetched_at": 0}
-NEWS_CACHE_TTL = 1800  # 30 minutes
+_news_cache: Dict[str, Any] = {"items": [], "fetched_at": 0.0}
+NEWS_WIDGET_CACHE_TTL = 1800  # 30 min
 
 
-async def _fetch_news_items(limit: int = 6) -> List[dict]:
-    """
-    Fetch real China business news.
-    Priority: Google News RSS (free, real-time) → curated fallback.
-    Returns a list of dicts: {headline, category, source, time_ago, link, query}
-    """
+def _parse_rss_no_deps(url: str, category: str, limit: int = 2) -> List[dict]:
+    """Fetch & parse an RSS/Atom feed using only stdlib. Returns list of items."""
+    import urllib.request
     items = []
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "CWC-NewsBot/1.0"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            raw = resp.read()
+        root = ET.fromstring(raw)
+        # Handle both RSS <item> and Atom <entry>
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+        entries = root.findall(".//item") or root.findall(".//atom:entry", ns)
+        for entry in entries[:limit]:
+            # Title
+            title_el = entry.find("title")
+            if title_el is None:
+                title_el = entry.find("atom:title", ns)
+            title = (title_el.text or "").strip() if title_el is not None else ""
+            # Strip source suffix common in Google News ("- Reuters")
+            title = re.sub(r"\s*-\s*[^-]{1,40}$", "", title).strip()
+            if not title:
+                continue
+            # Link
+            link_el = entry.find("link")
+            if link_el is None:
+                link_el = entry.find("atom:link", ns)
+            link = ""
+            if link_el is not None:
+                link = (link_el.text or link_el.get("href") or "").strip()
+            # Published date → human time
+            pub_tags = ["pubDate", "published", "atom:published", "updated", "atom:updated"]
+            time_ago = "Recently"
+            for tag in pub_tags:
+                el = entry.find(tag) if ":" not in tag else entry.find(tag, ns)
+                if el is not None and el.text:
+                    try:
+                        from email.utils import parsedate_to_datetime
+                        pub_dt = parsedate_to_datetime(el.text.strip())
+                        diff_h = int((datetime.now(pub_dt.tzinfo) - pub_dt).total_seconds() // 3600)
+                        if diff_h < 1:
+                            time_ago = "Just now"
+                        elif diff_h < 24:
+                            time_ago = f"{diff_h}h ago"
+                        else:
+                            time_ago = f"{diff_h // 24}d ago"
+                    except Exception:
+                        pass
+                    break
+            # Source name
+            src_el = entry.find("source")
+            source = src_el.text.strip() if src_el is not None and src_el.text else "Google News"
+            items.append({
+                "headline": title,
+                "category": category,
+                "source": source,
+                "time_ago": time_ago,
+                "link": link,
+                "query": f"{title[:80]} China business"
+            })
+    except Exception as e:
+        print(f"RSS parse error ({url}): {e}")
+    return items
 
-    # --- Google News RSS (no key needed) ---
-    if FEEDPARSER_AVAILABLE:
-        searches = [
-            ("China business",   "Business"),
-            ("China trade 2026", "Trade"),
-            ("China investment",  "Investment"),
-            ("China economy",    "Economy"),
-            ("China FDI",        "Policy"),
-        ]
-        for query, category in searches:
-            try:
-                encoded = urllib.parse.quote(query)
-                url = f"https://news.google.com/rss/search?q={encoded}&hl=en-US&gl=US&ceid=US:en"
-                feed = feedparser.parse(url)
-                for entry in feed.entries[:2]:
-                    title = entry.get("title", "").split(" - ")[0].strip()  # strip source suffix
-                    link  = entry.get("link", "")
-                    # Human-friendly time
-                    time_ago = "Recently"
-                    if hasattr(entry, "published_parsed") and entry.published_parsed:
-                        try:
-                            pub = datetime(*entry.published_parsed[:6])
-                            diff = datetime.utcnow() - pub
-                            h = int(diff.total_seconds() // 3600)
-                            if h < 1:
-                                time_ago = "Just now"
-                            elif h < 24:
-                                time_ago = f"{h}h ago"
-                            else:
-                                time_ago = f"{h // 24}d ago"
-                        except Exception:
-                            pass
-                    source = entry.get("source", {}).get("title", "Google News")
-                    items.append({
-                        "headline": title,
-                        "category": category,
-                        "source":   source,
-                        "time_ago": time_ago,
-                        "link":     link,
-                        "query":    f"{query} latest news analysis"
-                    })
-                    if len(items) >= limit:
-                        break
-            except Exception as e:
-                print(f"Google News RSS error ({query}): {e}")
-            if len(items) >= limit:
-                break
 
-    # --- Curated fallback (always shown if RSS fails / feedparser missing) ---
-    if not items:
-        items = [
-            {"headline": "China announces new FDI incentives for tech sector",
-             "category": "Policy",   "source": "CWC Intelligence", "time_ago": "Today",
-             "link": "", "query": "China FDI incentives tech sector 2026"},
-            {"headline": "Chinese EV makers accelerate global battery investments",
-             "category": "Trade",    "source": "CWC Intelligence", "time_ago": "Today",
-             "link": "", "query": "China EV battery market global expansion 2026"},
-            {"headline": "Major lithium partnerships signed with African firms",
-             "category": "Investment","source": "CWC Intelligence", "time_ago": "Today",
-             "link": "", "query": "China Africa lithium mining deals 2026"},
-            {"headline": "UAE and China expand cross-border digital currency pilot",
-             "category": "Fintech",  "source": "CWC Intelligence", "time_ago": "Today",
-             "link": "", "query": "Middle East China fintech digital currency 2026"},
-            {"headline": "New due diligence requirements for foreign buyers in China",
-             "category": "Compliance","source": "CWC Intelligence", "time_ago": "Today",
-             "link": "", "query": "China supplier due diligence regulations 2026"},
-            {"headline": "Belt & Road logistics corridors see record volumes",
-             "category": "Logistics", "source": "CWC Intelligence", "time_ago": "Today",
-             "link": "", "query": "Belt and Road logistics Central Asia 2026"},
-        ]
+def _fetch_news_sync(limit: int = 6) -> List[dict]:
+    """
+    Fetch real China business news using ONLY stdlib.
+    Google News RSS needs no API key and is always free.
+    """
+    searches = [
+        ("China+business+trade",      "Business"),
+        ("China+economy+2026",         "Economy"),
+        ("China+investment+FDI",       "Investment"),
+        ("China+supply+chain",         "Trade"),
+        ("China+technology+innovation","Tech"),
+        ("China+Europe+partnership",   "Global"),
+    ]
+    items = []
+    for query, category in searches:
+        url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+        fetched = _parse_rss_no_deps(url, category, limit=2)
+        items.extend(fetched)
+        if len(items) >= limit:
+            break
 
     return items[:limit]
+
+
+_NEWS_CURATED = [
+    {"headline": "China announces expanded FDI incentives for technology sector",
+     "category": "Policy",     "source": "CWC Intelligence", "time_ago": "Today",
+     "link": "", "query": "China FDI incentives tech sector 2026"},
+    {"headline": "Chinese EV manufacturers accelerate global battery plant investments",
+     "category": "Trade",      "source": "CWC Intelligence", "time_ago": "Today",
+     "link": "", "query": "China EV battery market global expansion 2026"},
+    {"headline": "Major lithium supply agreements signed between China and African nations",
+     "category": "Investment", "source": "CWC Intelligence", "time_ago": "Today",
+     "link": "", "query": "China Africa lithium mining deals 2026"},
+    {"headline": "UAE and China expand cross-border digital payment infrastructure",
+     "category": "Fintech",    "source": "CWC Intelligence", "time_ago": "Today",
+     "link": "", "query": "Middle East China fintech digital currency 2026"},
+    {"headline": "New compliance requirements introduced for foreign buyers in China",
+     "category": "Compliance", "source": "CWC Intelligence", "time_ago": "Today",
+     "link": "", "query": "China supplier compliance regulations 2026"},
+    {"headline": "Belt & Road logistics corridors report record cargo volumes",
+     "category": "Logistics",  "source": "CWC Intelligence", "time_ago": "Today",
+     "link": "", "query": "Belt and Road logistics Central Asia 2026"},
+]
 
 
 @app.get("/news")
 async def get_news(limit: int = 6):
     """
-    Return China business news items for the widget news panel.
-    Cached for 30 minutes to avoid hammering RSS feeds.
-    Response: { "items": [ {headline, category, source, time_ago, link, query}, ... ] }
+    Return China business news for the widget panel.
+    Uses Google News RSS via stdlib — no extra packages required.
+    Cached 30 min server-side.
+    Response: { items: [{headline, category, source, time_ago, link, query}] }
     """
     global _news_cache
     now = time.time()
 
-    # Serve from cache if fresh
-    if _news_cache["items"] and (now - _news_cache["fetched_at"]) < NEWS_CACHE_TTL:
-        return {"items": _news_cache["items"][:limit], "cached": True}
+    if _news_cache["items"] and (now - _news_cache["fetched_at"]) < NEWS_WIDGET_CACHE_TTL:
+        return JSONResponse({"items": _news_cache["items"][:limit], "cached": True})
 
     try:
-        items = await _fetch_news_items(limit)
-        _news_cache = {"items": items, "fetched_at": now}
-        return {"items": items, "cached": False}
+        loop = asyncio.get_event_loop()
+        items = await loop.run_in_executor(None, _fetch_news_sync, limit)
+        if items:
+            _news_cache = {"items": items, "fetched_at": now}
+            return JSONResponse({"items": items, "cached": False})
     except Exception as e:
-        # Never return an error to the widget — fall back to cache or empty
-        if _news_cache["items"]:
-            return {"items": _news_cache["items"][:limit], "cached": True}
-        return {"items": [], "cached": False, "error": str(e)}
+        print(f"News fetch error: {e}")
+
+    # Always return something — curated fallback
+    return JSONResponse({"items": _NEWS_CURATED[:limit], "cached": False, "source": "curated"})
 
 
 @app.get("/admin/stats")
